@@ -1,0 +1,35 @@
+{
+  "manifest_version": 3,
+  "name": "Recruiting Local Capture",
+  "version": "0.3.27",
+  "description": "Collect recruiting candidate cards from Boss and Liepin, with Boss chat resume automation.",
+  "background": {
+    "service_worker": "service_worker.js"
+  },
+  "permissions": [
+    "activeTab",
+    "debugger",
+    "downloads",
+    "scripting",
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://www.zhipin.com/*",
+    "https://zhipin.com/*",
+    "https://*.zhipin.com/*",
+    "https://bosszhipin.com/*",
+    "https://*.bosszhipin.com/*",
+    "https://office.weizhipin.com/*",
+    "https://*.weizhipin.com/*",
+    "https://www.liepin.com/*",
+    "https://liepin.com/*",
+    "https://*.liepin.com/*",
+    "http://127.0.0.1/*",
+    "http://localhost/*"
+  ],
+  "action": {
+    "default_title": "Recruiting Local Capture",
+    "default_popup": "popup.html"
+  }
+}
