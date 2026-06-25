@@ -9,6 +9,60 @@ from storage.migrations import apply_migrations
 
 
 class MigrationTest(unittest.TestCase):
+    def test_existing_screening_tasks_get_claim_columns_before_claim_index(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            connection = sqlite3.connect(str(Path(tmp_dir) / "old_tasks.db"))
+            connection.executescript(
+                """
+                CREATE TABLE schema_version (version INTEGER NOT NULL PRIMARY KEY);
+                INSERT INTO schema_version(version) VALUES (11);
+
+                CREATE TABLE screening_tasks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id INTEGER NOT NULL,
+                    candidate_id INTEGER NOT NULL,
+                    role_id INTEGER NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    route TEXT NOT NULL DEFAULT 'pass_to_ai',
+                    route_reason TEXT,
+                    route_details_json TEXT NOT NULL DEFAULT '{}',
+                    priority INTEGER NOT NULL DEFAULT 0,
+                    retry_count INTEGER NOT NULL DEFAULT 0,
+                    max_retry_count INTEGER NOT NULL DEFAULT 2,
+                    model_name TEXT NOT NULL,
+                    prompt_version TEXT NOT NULL DEFAULT 'v1',
+                    request_payload_hash TEXT NOT NULL,
+                    result_id INTEGER,
+                    error_message TEXT,
+                    created_at TEXT NOT NULL,
+                    started_at TEXT,
+                    finished_at TEXT,
+                    updated_at TEXT NOT NULL,
+                    result_source TEXT NOT NULL DEFAULT '',
+                    prompt_text TEXT NOT NULL DEFAULT '',
+                    candidate_text TEXT NOT NULL DEFAULT '',
+                    UNIQUE(run_id, candidate_id)
+                );
+                """
+            )
+
+            apply_migrations(connection)
+
+            task_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(screening_tasks)").fetchall()
+            }
+            indexes = {
+                row[1] for row in connection.execute("PRAGMA index_list(screening_tasks)").fetchall()
+            }
+            version = connection.execute("SELECT version FROM schema_version").fetchone()[0]
+            self.assertIn("locked_at", task_columns)
+            self.assertIn("locked_by", task_columns)
+            self.assertIn("next_attempt_at", task_columns)
+            self.assertIn("failure_category", task_columns)
+            self.assertIn("idx_screening_tasks_claim", indexes)
+            self.assertEqual(version, 12)
+            connection.close()
+
     def test_existing_screening_runs_table_gets_origin_column(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             connection = sqlite3.connect(str(Path(tmp_dir) / "old.db"))

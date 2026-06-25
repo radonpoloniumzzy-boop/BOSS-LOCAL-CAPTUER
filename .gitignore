@@ -6,6 +6,7 @@ build/
 dist/
 logs/*.log
 data/*.db
+data/*.db.bak-*
 data/config.json
 data/browser_profile/
 data/exports/

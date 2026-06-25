@@ -194,8 +194,6 @@ CREATE INDEX IF NOT EXISTS idx_screening_tasks_run_status ON screening_tasks(run
 CREATE INDEX IF NOT EXISTS idx_screening_tasks_candidate ON screening_tasks(candidate_id);
 CREATE INDEX IF NOT EXISTS idx_screening_tasks_request_hash
 ON screening_tasks(role_id, candidate_id, model_name, prompt_version, request_payload_hash);
-CREATE INDEX IF NOT EXISTS idx_screening_tasks_claim
-ON screening_tasks(run_id, route, status, next_attempt_at, priority);
 
 CREATE TABLE IF NOT EXISTS candidate_role_matches (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -304,10 +302,6 @@ def apply_migrations(connection) -> None:
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_screening_tasks_request_hash "
         "ON screening_tasks(role_id, candidate_id, model_name, prompt_version, request_payload_hash)"
-    )
-    connection.execute(
-        "CREATE INDEX IF NOT EXISTS idx_screening_tasks_claim "
-        "ON screening_tasks(run_id, route, status, next_attempt_at, priority)"
     )
     connection.execute(
         """
@@ -495,6 +489,10 @@ def apply_migrations(connection) -> None:
         connection.execute(
             "ALTER TABLE screening_tasks ADD COLUMN failure_category TEXT NOT NULL DEFAULT ''"
         )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_screening_tasks_claim "
+        "ON screening_tasks(run_id, route, status, next_attempt_at, priority)"
+    )
     connection.execute(
         """
         INSERT OR IGNORE INTO screening_tasks(
