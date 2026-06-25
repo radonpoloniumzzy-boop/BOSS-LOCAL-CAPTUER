@@ -34,6 +34,65 @@ class RulePrescreener:
         "summary_text",
         "raw_card_text",
     )
+    finance_trading_role_terms = (
+        "证券交易员",
+        "交易员",
+        "股票交易员",
+        "期货交易员",
+        "操盘手",
+        "证券",
+        "股票",
+        "期货",
+        "账户操作",
+        "行情",
+        "投资",
+        "资管",
+    )
+    finance_market_terms = (
+        "金融",
+        "证券",
+        "股票",
+        "期货",
+        "基金",
+        "私募",
+        "资管",
+        "投资",
+        "A股",
+        "港股",
+        "美股",
+        "债券",
+        "可转债",
+        "ETF",
+        "期权",
+        "外汇",
+        "量化",
+    )
+    finance_trading_action_terms = (
+        "交易",
+        "下单",
+        "买卖",
+        "操盘",
+        "账户操作",
+        "行情",
+        "盘口",
+        "止损",
+        "风控",
+        "盯盘",
+        "交易计划",
+        "价格波动",
+    )
+    finance_trading_specific_terms = (
+        "证券交易",
+        "股票交易",
+        "期货交易",
+        "基金交易",
+        "A股交易",
+        "港股交易",
+        "美股交易",
+        "交易员",
+        "操盘手",
+        "账户操作",
+    )
 
     def __init__(self, requirement_extractor: RoleRequirementExtractor | None = None) -> None:
         self.requirement_extractor = requirement_extractor or RoleRequirementExtractor()
@@ -49,6 +108,12 @@ class RulePrescreener:
         missing_required_terms = [
             term for term in requirements.required_terms if term not in candidate_terms
         ]
+        keyword_signal = self._has_required_keyword_signal(
+            profile,
+            requirements.to_dict(),
+            candidate_terms,
+            text,
+        )
 
         details = {
             "text_length": len(text),
@@ -59,6 +124,7 @@ class RulePrescreener:
             "candidate_years": candidate_years,
             "candidate_terms": candidate_terms,
             "missing_required_terms": missing_required_terms,
+            "keyword_signal": keyword_signal,
         }
         if len(text) < 8:
             return PrescreenDecision(
@@ -101,7 +167,7 @@ class RulePrescreener:
                 reason="role_years_below_minimum",
                 details=details,
             )
-        if requirements.required_terms and not set(requirements.required_terms).intersection(candidate_terms):
+        if requirements.required_terms and not keyword_signal:
             return PrescreenDecision(
                 route=MANUAL_CHECK,
                 reason="missing_role_keywords",
@@ -124,3 +190,45 @@ class RulePrescreener:
             if len(value) >= 8:
                 count += 1
         return count
+
+    def _has_required_keyword_signal(
+        self,
+        profile: dict[str, object],
+        requirements: dict[str, object],
+        candidate_terms: list[str],
+        candidate_text: str,
+    ) -> bool:
+        required_terms = [str(term) for term in requirements.get("required_terms") or []]
+        if not self._is_finance_trading_role(profile, requirements):
+            return bool(set(required_terms).intersection(candidate_terms))
+        return self._has_finance_trading_candidate_signal(candidate_text)
+
+    def _is_finance_trading_role(
+        self,
+        profile: dict[str, object],
+        requirements: dict[str, object],
+    ) -> bool:
+        role_text = normalize_multiline_text(
+            "\n".join(
+                [
+                    str(profile.get("job_title") or ""),
+                    str(profile.get("jd_text") or ""),
+                    str(requirements.get("job_family") or ""),
+                    str(requirements.get("job_track") or ""),
+                    " ".join(str(term) for term in requirements.get("required_terms") or []),
+                ]
+            )
+        ).lower()
+        return any(term.lower() in role_text for term in self.finance_trading_role_terms)
+
+    def _has_finance_trading_candidate_signal(self, candidate_text: str) -> bool:
+        text = normalize_text(candidate_text).lower()
+        if any(term.lower() in text for term in self.finance_trading_specific_terms):
+            return True
+        has_market = any(term.lower() in text for term in self.finance_market_terms)
+        has_action = any(term.lower() in text for term in self.finance_trading_action_terms)
+        has_trading_context = any(
+            term.lower() in text
+            for term in ("行情判断", "交易计划", "价格波动", "买卖操作", "风控纪律")
+        )
+        return has_market or (has_action and has_trading_context)

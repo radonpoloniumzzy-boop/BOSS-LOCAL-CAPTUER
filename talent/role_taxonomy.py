@@ -35,6 +35,15 @@ class RoleTrackDefinition:
 
 DEFAULT_ROLE_TRACKS = (
     RoleTrackDefinition(
+        family="金融",
+        track="证券交易员",
+        aliases=("证券交易员", "交易员", "股票交易员", "期货交易员", "操盘手", "Trader"),
+        must_have=("证券", "交易", "股票", "期货", "投资", "行情", "账户操作", "下单"),
+        nice_to_have=("基金", "私募", "资管", "A股", "港股", "美股", "债券", "ETF", "量化"),
+        risk_flags=("只有电商交易或订单交易经验", "无证券市场或账户操作证据"),
+        interview_checks=("交易品种", "账户规模", "交易频率", "风控纪律", "行情判断依据"),
+    ),
+    RoleTrackDefinition(
         family="销售",
         track="SaaS销售",
         aliases=("SaaS销售", "SaaS Sales", "软件销售", "企业软件销售", "CRM销售"),

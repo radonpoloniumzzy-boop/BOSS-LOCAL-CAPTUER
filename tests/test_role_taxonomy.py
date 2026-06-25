@@ -25,6 +25,12 @@ class RoleTaxonomyTest(unittest.TestCase):
             ("技术", "后端开发"),
         )
 
+    def test_classifies_securities_trader_track(self) -> None:
+        self.assertEqual(
+            self.taxonomy.classify("证券交易员 股票 期货 账户操作 行情判断 下单 风控"),
+            ("金融", "证券交易员"),
+        )
+
     def test_profile_builder_uses_shared_taxonomy(self) -> None:
         profile = StandardProfileBuilder(role_taxonomy=self.taxonomy).build(
             {
@@ -42,6 +48,23 @@ class RoleTaxonomyTest(unittest.TestCase):
         self.assertEqual(profile["job_track"], "SaaS销售")
         self.assertIn("SaaS", profile["skill_tags"])
 
+    def test_profile_builder_tags_securities_trader_without_finance_word(self) -> None:
+        profile = StandardProfileBuilder(role_taxonomy=self.taxonomy).build(
+            {
+                "id": 2,
+                "name": "Lin",
+                "job_title": "交易员",
+                "work_experience_text": "2 years 股票交易 and A股账户下单 experience.",
+                "education_text": "Bachelor",
+                "tags_text": "股票交易 | 行情判断 | 止损纪律",
+                "raw_card_text": "Handled A股账户买卖操作 and intraday risk controls.",
+            }
+        )
+
+        self.assertEqual(profile["job_family"], "金融")
+        self.assertEqual(profile["job_track"], "证券交易员")
+        self.assertIn("股票", profile["skill_tags"])
+
     def test_role_requirements_include_taxonomy_classification(self) -> None:
         requirements = RoleRequirementExtractor(role_taxonomy=self.taxonomy).from_profile(
             {
@@ -56,6 +79,20 @@ class RoleTaxonomyTest(unittest.TestCase):
         self.assertIn("B2B", requirements.required_terms)
         self.assertIn("SaaS", requirements.required_terms)
         self.assertIn("CRM", requirements.preferred_terms)
+
+    def test_trader_requirements_include_market_and_trading_terms(self) -> None:
+        requirements = RoleRequirementExtractor(role_taxonomy=self.taxonomy).from_profile(
+            {
+                "job_title": "证券交易员",
+                "jd_text": "负责账户的证券操作，关注行情并做股票交易计划，对金融行业和证券投资有兴趣。",
+            }
+        )
+
+        self.assertEqual(requirements.job_family, "金融")
+        self.assertEqual(requirements.job_track, "证券交易员")
+        self.assertIn("证券", requirements.required_terms)
+        self.assertIn("交易", requirements.required_terms)
+        self.assertIn("股票", requirements.required_terms)
 
 
 if __name__ == "__main__":

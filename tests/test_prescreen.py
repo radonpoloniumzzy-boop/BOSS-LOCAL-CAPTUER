@@ -11,6 +11,14 @@ class RulePrescreenerTest(unittest.TestCase):
             "job_title": "SaaS Sales",
             "jd_text": "Must have 3+ years B2B SaaS sales experience in Shenzhen.",
         }
+        self.trader_profile = {
+            "job_title": "证券交易员",
+            "jd_text": (
+                "关注市场公开信息和上市公司重要公告，能够对行情快速判断。"
+                "负责账户的证券操作，根据指令及时进行准确买卖操作。"
+                "本科及以上学历，对金融行业和证券投资有兴趣，具有两年以上交易经验。"
+            ),
+        }
 
     def test_routes_rich_candidate_to_ai(self) -> None:
         decision = self.prescreener.evaluate(
@@ -112,6 +120,40 @@ class RulePrescreenerTest(unittest.TestCase):
         self.assertEqual(decision.route, MANUAL_CHECK)
         self.assertEqual(decision.reason, "missing_role_keywords")
         self.assertIn("B2B", decision.details["missing_required_terms"])
+
+    def test_trader_candidate_with_market_trading_terms_passes_without_finance_word(self) -> None:
+        decision = self.prescreener.evaluate(
+            {
+                "name": "Lin",
+                "work_experience_text": "2 years 股票交易 and A股账户下单 experience.",
+                "education_text": "Bachelor degree",
+                "tags_text": "股票交易 | 行情判断 | 止损纪律",
+                "summary_text": "Built daily trading plans from market announcements and price action.",
+                "raw_card_text": "Handled A股账户买卖操作 and intraday risk controls.",
+            },
+            self.trader_profile,
+        )
+
+        self.assertEqual(decision.route, PASS_TO_AI)
+        self.assertEqual(decision.reason, "sufficient_candidate_evidence")
+        self.assertTrue(decision.details["keyword_signal"])
+
+    def test_generic_transaction_mentions_still_need_manual_check_for_trader_role(self) -> None:
+        decision = self.prescreener.evaluate(
+            {
+                "name": "Evan",
+                "work_experience_text": "3 years ecommerce transaction operations.",
+                "education_text": "Bachelor degree",
+                "tags_text": "电商交易 | 订单交易 | 客服协同",
+                "summary_text": "Optimized marketplace order transaction conversion and after-sales flows.",
+                "raw_card_text": "Responsible for online shop transaction data and promotion operations.",
+            },
+            self.trader_profile,
+        )
+
+        self.assertEqual(decision.route, MANUAL_CHECK)
+        self.assertEqual(decision.reason, "missing_role_keywords")
+        self.assertFalse(decision.details["keyword_signal"])
 
 
 if __name__ == "__main__":
