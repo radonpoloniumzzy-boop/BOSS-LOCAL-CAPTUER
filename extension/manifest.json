@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Recruiting Local Capture",
-  "version": "0.3.28",
-  "description": "Collect recruiting candidate cards from Boss and Liepin, with Boss chat resume automation.",
+  "version": "0.3.29",
+  "description": "Collect recruiting candidate cards from Boss and Liepin, with opt-in Boss chat resume automation.",
   "background": {
     "service_worker": "service_worker.js"
   },

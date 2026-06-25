@@ -358,7 +358,22 @@ function testAutomationAutoButtonStartsDesktopWorkflow() {
   assert(html.includes('id="apiToken"'));
   assert(popup.includes("automation_requested"));
   assert(popup.includes("AUTO 采集完成，已提交 AI 初筛"));
-  assert.strictEqual(manifest.version, "0.3.28");
+  assert.strictEqual(manifest.version, "0.3.29");
+}
+
+function testChatAutomationIsOptIn() {
+  const popup = fs.readFileSync(path.join(EXTENSION_DIR, "popup.js"), "utf8");
+  const html = fs.readFileSync(path.join(EXTENSION_DIR, "popup.html"), "utf8");
+  const manifest = JSON.parse(fs.readFileSync(path.join(EXTENSION_DIR, "manifest.json"), "utf8"));
+  const guardCalls = popup.match(/if \(!ensureChatAutomationEnabled\(settings\)\)/g) || [];
+  assert(html.includes('id="chatAutomationEnabled"'));
+  assert(html.includes('type="checkbox"'));
+  assert(popup.includes("chatAutomationEnabled: false"));
+  assert(popup.includes('element.type === "checkbox"'));
+  assert(popup.includes("function ensureChatAutomationEnabled"));
+  assert.strictEqual(guardCalls.length, 2);
+  assert(popup.indexOf("if (!ensureChatAutomationEnabled(settings))") < popup.indexOf("await ensureChatRunnerInjected(tab.id)"));
+  assert(manifest.description.includes("opt-in Boss chat"));
 }
 
 function testScrollWaitDefaultsToThirtyMillisecondsAndHasAdjusters() {
@@ -410,6 +425,7 @@ async function main() {
   testCollectionSupportsBossAndLiepinAdapters();
   testAutoScrollCanBePausedFromPopup();
   testAutomationAutoButtonStartsDesktopWorkflow();
+  testChatAutomationIsOptIn();
   testScrollWaitDefaultsToThirtyMillisecondsAndHasAdjusters();
   testRuntimeFingerprintAndVersionAwareRunnerInjection();
   console.log("extension regression tests passed");

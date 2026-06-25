@@ -747,9 +747,66 @@ class CandidateRepository:
                         )
         return inserted
 
-    def claim_next_screening_task(self, run_id: int) -> dict[str, object] | None:
+    def claim_next_screening_task(
+        self,
+        run_id: int,
+        *,
+        worker_id: str = "",
+        lock_timeout_seconds: float = 600.0,
+    ) -> dict[str, object] | None:
         connection = self.db.get_connection()
         with connection:
+            timestamp = now_iso()
+            lock_owner = str(worker_id or "screening-worker")
+            stale_before = (
+                datetime.now() - timedelta(seconds=max(float(lock_timeout_seconds), 0.0))
+            ).isoformat(timespec="seconds")
+            stale_rows = connection.execute(
+                """
+                SELECT candidate_id, role_id
+                FROM screening_tasks
+                WHERE run_id = ?
+                  AND route = 'pass_to_ai'
+                  AND status = 'running'
+                  AND (
+                    locked_at IS NULL
+                    OR locked_at = ''
+                    OR locked_at <= ?
+                  )
+                """,
+                (run_id, stale_before),
+            ).fetchall()
+            if stale_rows:
+                connection.execute(
+                    """
+                    UPDATE screening_tasks
+                    SET status = 'retrying',
+                        locked_at = NULL,
+                        locked_by = '',
+                        started_at = NULL,
+                        next_attempt_at = ?,
+                        error_message = 'Released stale worker lock',
+                        updated_at = ?
+                    WHERE run_id = ?
+                      AND route = 'pass_to_ai'
+                      AND status = 'running'
+                      AND (
+                        locked_at IS NULL
+                        OR locked_at = ''
+                        OR locked_at <= ?
+                      )
+                    """,
+                    (timestamp, timestamp, run_id, stale_before),
+                )
+                for stale_row in stale_rows:
+                    self._upsert_candidate_role_match(
+                        connection,
+                        candidate_id=int(stale_row["candidate_id"]),
+                        role_id=int(stale_row["role_id"]),
+                        match_status="screening_retrying",
+                        timestamp=timestamp,
+                    )
+
             row = connection.execute(
                 """
                 SELECT
@@ -768,6 +825,10 @@ class CandidateRepository:
                     t.request_payload_hash,
                     t.prompt_text,
                     t.candidate_text,
+                    t.locked_at,
+                    t.locked_by,
+                    t.next_attempt_at,
+                    t.failure_category,
                     c.name,
                     c.active_status,
                     c.expected_salary,
@@ -781,25 +842,29 @@ class CandidateRepository:
                 WHERE t.run_id = ?
                   AND t.route = 'pass_to_ai'
                   AND t.status IN ('pending', 'retrying')
+                  AND COALESCE(NULLIF(t.next_attempt_at, ''), '0000-01-01T00:00:00') <= ?
                 ORDER BY t.priority DESC, t.id
                 LIMIT 1
                 """,
-                (run_id,),
+                (run_id, timestamp),
             ).fetchone()
             if row is None:
                 return None
-            timestamp = now_iso()
-            connection.execute(
+            cursor = connection.execute(
                 """
                 UPDATE screening_tasks
                 SET status = 'running',
                     started_at = COALESCE(started_at, ?),
+                    locked_at = ?,
+                    locked_by = ?,
                     updated_at = ?,
                     error_message = NULL
                 WHERE id = ? AND route = 'pass_to_ai' AND status IN ('pending', 'retrying')
                 """,
-                (timestamp, timestamp, int(row["task_id"])),
+                (timestamp, timestamp, lock_owner, timestamp, int(row["task_id"])),
             )
+            if cursor.rowcount <= 0:
+                return None
             self._upsert_candidate_role_match(
                 connection,
                 candidate_id=int(row["candidate_id"]),
@@ -809,6 +874,8 @@ class CandidateRepository:
             )
         payload = dict(row)
         payload["status"] = "running"
+        payload["locked_at"] = timestamp
+        payload["locked_by"] = lock_owner
         return payload
 
     def mark_screening_task_success(
@@ -828,6 +895,10 @@ class CandidateRepository:
                     result_id = ?,
                     result_source = ?,
                     error_message = '',
+                    failure_category = '',
+                    locked_at = NULL,
+                    locked_by = '',
+                    next_attempt_at = NULL,
                     finished_at = ?,
                     updated_at = ?
                 WHERE id = ?
@@ -884,11 +955,11 @@ class CandidateRepository:
         connection = self.db.get_connection()
         connection.execute(
             """
-            UPDATE screening_tasks
-            SET model_name = ?,
-                prompt_version = ?,
-                request_payload_hash = ?,
-                prompt_text = ?,
+                UPDATE screening_tasks
+                SET model_name = ?,
+                    prompt_version = ?,
+                    request_payload_hash = ?,
+                    prompt_text = ?,
                 candidate_text = ?,
                 updated_at = ?
             WHERE id = ?
@@ -905,7 +976,14 @@ class CandidateRepository:
         )
         connection.commit()
 
-    def mark_screening_task_failure(self, task_id: int, error_message: str) -> str:
+    def mark_screening_task_failure(
+        self,
+        task_id: int,
+        error_message: str,
+        *,
+        failure_category: str = "provider_error",
+        retry_after_seconds: float = 0.0,
+    ) -> str:
         connection = self.db.get_connection()
         row = connection.execute(
             "SELECT retry_count, max_retry_count, candidate_id, role_id FROM screening_tasks WHERE id = ?",
@@ -916,6 +994,11 @@ class CandidateRepository:
         retry_count = int(row["retry_count"]) + 1
         max_retry_count = int(row["max_retry_count"])
         timestamp = now_iso()
+        normalized_category = str(failure_category or "provider_error").strip() or "provider_error"
+        retry_after = max(float(retry_after_seconds or 0.0), 0.0)
+        next_attempt_at = (
+            datetime.now() + timedelta(seconds=retry_after)
+        ).isoformat(timespec="seconds")
         if retry_count <= max_retry_count:
             status = "retrying"
             connection.execute(
@@ -924,11 +1007,23 @@ class CandidateRepository:
                 SET status = ?,
                     retry_count = ?,
                     error_message = ?,
+                    failure_category = ?,
+                    locked_at = NULL,
+                    locked_by = '',
+                    next_attempt_at = ?,
                     started_at = NULL,
                     updated_at = ?
                 WHERE id = ?
                 """,
-                (status, retry_count, error_message, timestamp, task_id),
+                (
+                    status,
+                    retry_count,
+                    error_message,
+                    normalized_category,
+                    next_attempt_at,
+                    timestamp,
+                    task_id,
+                ),
             )
         else:
             status = "failed"
@@ -938,11 +1033,23 @@ class CandidateRepository:
                 SET status = ?,
                     retry_count = ?,
                     error_message = ?,
+                    failure_category = ?,
+                    locked_at = NULL,
+                    locked_by = '',
+                    next_attempt_at = NULL,
                     finished_at = ?,
                     updated_at = ?
                 WHERE id = ?
                 """,
-                (status, retry_count, error_message, timestamp, timestamp, task_id),
+                (
+                    status,
+                    retry_count,
+                    error_message,
+                    normalized_category,
+                    timestamp,
+                    timestamp,
+                    task_id,
+                ),
             )
         connection.commit()
         self.upsert_candidate_role_match(
@@ -1406,6 +1513,9 @@ class CandidateRepository:
                 UPDATE screening_tasks
                 SET status = 'pending',
                     started_at = NULL,
+                    locked_at = NULL,
+                    locked_by = '',
+                    next_attempt_at = NULL,
                     error_message = 'Recovered after interrupted screening run',
                     updated_at = ?
                 WHERE status IN ('running', 'retrying')
@@ -1609,7 +1719,12 @@ class CandidateRepository:
                 SET status = 'pending',
                     retry_count = 0,
                     result_id = NULL,
+                    result_source = '',
                     error_message = '',
+                    failure_category = '',
+                    locked_at = NULL,
+                    locked_by = '',
+                    next_attempt_at = NULL,
                     started_at = NULL,
                     finished_at = NULL,
                     updated_at = ?
@@ -1668,6 +1783,10 @@ class CandidateRepository:
                     result_id = NULL,
                     result_source = '',
                     error_message = '',
+                    failure_category = '',
+                    locked_at = NULL,
+                    locked_by = '',
+                    next_attempt_at = NULL,
                     started_at = NULL,
                     finished_at = NULL,
                     updated_at = ?
@@ -1739,6 +1858,10 @@ class CandidateRepository:
                     t.retry_count,
                     t.max_retry_count,
                     t.result_source,
+                    t.failure_category,
+                    t.locked_at,
+                    t.locked_by,
+                    t.next_attempt_at,
                     t.error_message AS task_error,
                     t.created_at AS task_created_at,
                     t.started_at AS task_started_at,

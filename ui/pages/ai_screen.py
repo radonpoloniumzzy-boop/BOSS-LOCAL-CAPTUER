@@ -432,6 +432,15 @@ class AIScreenPage(QWidget):
         action = str(row.get("recommended_action") or "")
         if action:
             parts.append(f"action={action}")
+        failure_category = str(row.get("failure_category") or "")
+        if failure_category:
+            parts.append(f"failure={failure_category}")
+        next_attempt_at = str(row.get("next_attempt_at") or "")
+        if next_attempt_at:
+            parts.append(f"next_retry={next_attempt_at}")
+        locked_by = str(row.get("locked_by") or "")
+        if locked_by and AIScreenPage._task_status(row) == "running":
+            parts.append(f"worker={locked_by}")
         route_summary = AIScreenPage._route_detail(row)
         if route_summary:
             parts.append(route_summary)

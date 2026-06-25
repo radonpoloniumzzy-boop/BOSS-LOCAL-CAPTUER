@@ -179,6 +179,10 @@ CREATE TABLE IF NOT EXISTS screening_tasks (
     result_source TEXT NOT NULL DEFAULT '',
     prompt_text TEXT NOT NULL DEFAULT '',
     candidate_text TEXT NOT NULL DEFAULT '',
+    locked_at TEXT,
+    locked_by TEXT NOT NULL DEFAULT '',
+    next_attempt_at TEXT,
+    failure_category TEXT NOT NULL DEFAULT '',
     FOREIGN KEY(run_id) REFERENCES screening_runs(id) ON DELETE CASCADE,
     FOREIGN KEY(candidate_id) REFERENCES candidates(id) ON DELETE CASCADE,
     FOREIGN KEY(role_id) REFERENCES screening_profiles(id) ON DELETE CASCADE,
@@ -190,6 +194,8 @@ CREATE INDEX IF NOT EXISTS idx_screening_tasks_run_status ON screening_tasks(run
 CREATE INDEX IF NOT EXISTS idx_screening_tasks_candidate ON screening_tasks(candidate_id);
 CREATE INDEX IF NOT EXISTS idx_screening_tasks_request_hash
 ON screening_tasks(role_id, candidate_id, model_name, prompt_version, request_payload_hash);
+CREATE INDEX IF NOT EXISTS idx_screening_tasks_claim
+ON screening_tasks(run_id, route, status, next_attempt_at, priority);
 
 CREATE TABLE IF NOT EXISTS candidate_role_matches (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -275,6 +281,10 @@ def apply_migrations(connection) -> None:
             result_source TEXT NOT NULL DEFAULT '',
             prompt_text TEXT NOT NULL DEFAULT '',
             candidate_text TEXT NOT NULL DEFAULT '',
+            locked_at TEXT,
+            locked_by TEXT NOT NULL DEFAULT '',
+            next_attempt_at TEXT,
+            failure_category TEXT NOT NULL DEFAULT '',
             FOREIGN KEY(run_id) REFERENCES screening_runs(id) ON DELETE CASCADE,
             FOREIGN KEY(candidate_id) REFERENCES candidates(id) ON DELETE CASCADE,
             FOREIGN KEY(role_id) REFERENCES screening_profiles(id) ON DELETE CASCADE,
@@ -294,6 +304,10 @@ def apply_migrations(connection) -> None:
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_screening_tasks_request_hash "
         "ON screening_tasks(role_id, candidate_id, model_name, prompt_version, request_payload_hash)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_screening_tasks_claim "
+        "ON screening_tasks(run_id, route, status, next_attempt_at, priority)"
     )
     connection.execute(
         """
@@ -469,6 +483,18 @@ def apply_migrations(connection) -> None:
         connection.execute(
             "ALTER TABLE screening_tasks ADD COLUMN candidate_text TEXT NOT NULL DEFAULT ''"
         )
+    if "locked_at" not in task_columns:
+        connection.execute("ALTER TABLE screening_tasks ADD COLUMN locked_at TEXT")
+    if "locked_by" not in task_columns:
+        connection.execute(
+            "ALTER TABLE screening_tasks ADD COLUMN locked_by TEXT NOT NULL DEFAULT ''"
+        )
+    if "next_attempt_at" not in task_columns:
+        connection.execute("ALTER TABLE screening_tasks ADD COLUMN next_attempt_at TEXT")
+    if "failure_category" not in task_columns:
+        connection.execute(
+            "ALTER TABLE screening_tasks ADD COLUMN failure_category TEXT NOT NULL DEFAULT ''"
+        )
     connection.execute(
         """
         INSERT OR IGNORE INTO screening_tasks(
@@ -614,5 +640,5 @@ def apply_migrations(connection) -> None:
         """
     )
     connection.execute("DELETE FROM schema_version")
-    connection.execute("INSERT INTO schema_version(version) VALUES (11)")
+    connection.execute("INSERT INTO schema_version(version) VALUES (12)")
     connection.commit()

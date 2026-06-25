@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from core.models import CandidateRecord, ScreeningProfile, ScreeningResult
@@ -320,7 +321,7 @@ class CandidateRepositoryTest(unittest.TestCase):
         self.assertEqual(automation_runs[0]["id"], automation_run_id)
         self.assertEqual(automation_runs[0]["origin"], "automation")
         version = self.db.get_connection().execute("SELECT version FROM schema_version").fetchone()
-        self.assertEqual(version["version"], 11)
+        self.assertEqual(version["version"], 12)
 
     def test_interrupted_screening_tasks_are_recovered(self) -> None:
         batch = self.repository.create_batch("Sales", "https://example.com")
@@ -357,6 +358,153 @@ class CandidateRepositoryTest(unittest.TestCase):
         self.assertEqual(run["status"], "recoverable")
         matches = self.repository.list_candidate_role_matches(role_id=int(profile.id))
         self.assertEqual(matches[0]["match_status"], "screening_pending")
+
+    def test_screening_task_claim_records_worker_lock(self) -> None:
+        batch = self.repository.create_batch("Sales", "https://example.com")
+        self.repository.upsert_batch_candidates(batch.id, [self._candidate("platform:lock", "Lock")])
+        candidate = dict(self.repository.list_candidates()[0])
+        profile = self.repository.save_screening_profile(
+            ScreeningProfile(job_title="Sales", jd_text="SaaS", prompt_text="screen SaaS")
+        )
+        run_id = self.repository.create_screening_run(
+            profile_id=int(profile.id),
+            source_job_title="Sales",
+            batch_id=batch.id,
+            provider="fake",
+            model="fake-model",
+            total_candidates=1,
+        )
+        self.repository.create_screening_tasks(
+            run_id=run_id,
+            role_id=int(profile.id),
+            candidates=[candidate],
+            model_name="fake-model",
+            prompt_version="v1",
+            request_hashes={int(candidate["id"]): "hash"},
+        )
+
+        task = self.repository.claim_next_screening_task(
+            run_id,
+            worker_id="worker-a",
+            lock_timeout_seconds=300,
+        )
+
+        tasks = self.repository.list_screening_tasks(run_id)
+        self.assertIsNotNone(task)
+        assert task is not None
+        self.assertEqual(task["locked_by"], "worker-a")
+        self.assertEqual(tasks[0]["status"], "running")
+        self.assertEqual(tasks[0]["locked_by"], "worker-a")
+        self.assertTrue(tasks[0]["locked_at"])
+
+    def test_retrying_task_waits_until_next_attempt_at(self) -> None:
+        batch = self.repository.create_batch("Sales", "https://example.com")
+        self.repository.upsert_batch_candidates(batch.id, [self._candidate("platform:retry-delay", "Delay")])
+        candidate = dict(self.repository.list_candidates()[0])
+        profile = self.repository.save_screening_profile(
+            ScreeningProfile(job_title="Sales", jd_text="SaaS", prompt_text="screen SaaS")
+        )
+        run_id = self.repository.create_screening_run(
+            profile_id=int(profile.id),
+            source_job_title="Sales",
+            batch_id=batch.id,
+            provider="fake",
+            model="fake-model",
+            total_candidates=1,
+        )
+        self.repository.create_screening_tasks(
+            run_id=run_id,
+            role_id=int(profile.id),
+            candidates=[candidate],
+            model_name="fake-model",
+            prompt_version="v1",
+            request_hashes={int(candidate["id"]): "hash"},
+            max_retry_count=1,
+        )
+        task = self.repository.claim_next_screening_task(run_id, worker_id="worker-a")
+        assert task is not None
+        self.repository.mark_screening_task_failure(
+            int(task["task_id"]),
+            "provider timed out",
+            failure_category="timeout",
+            retry_after_seconds=60,
+        )
+
+        blocked = self.repository.claim_next_screening_task(run_id, worker_id="worker-b")
+        rows = self.repository.list_screening_tasks(run_id)
+        self.assertIsNone(blocked)
+        self.assertEqual(rows[0]["status"], "retrying")
+        self.assertEqual(rows[0]["failure_category"], "timeout")
+        self.assertTrue(rows[0]["next_attempt_at"])
+
+        self.db.get_connection().execute(
+            """
+            UPDATE screening_tasks
+            SET next_attempt_at = ?
+            WHERE id = ?
+            """,
+            (
+                (datetime.now() - timedelta(seconds=1)).isoformat(timespec="seconds"),
+                int(task["task_id"]),
+            ),
+        )
+        self.db.get_connection().commit()
+        retry_task = self.repository.claim_next_screening_task(run_id, worker_id="worker-c")
+        self.assertIsNotNone(retry_task)
+        assert retry_task is not None
+        self.assertEqual(retry_task["locked_by"], "worker-c")
+
+    def test_stale_running_task_lock_is_released_for_another_worker(self) -> None:
+        batch = self.repository.create_batch("Sales", "https://example.com")
+        self.repository.upsert_batch_candidates(batch.id, [self._candidate("platform:stale", "Stale")])
+        candidate = dict(self.repository.list_candidates()[0])
+        profile = self.repository.save_screening_profile(
+            ScreeningProfile(job_title="Sales", jd_text="SaaS", prompt_text="screen SaaS")
+        )
+        run_id = self.repository.create_screening_run(
+            profile_id=int(profile.id),
+            source_job_title="Sales",
+            batch_id=batch.id,
+            provider="fake",
+            model="fake-model",
+            total_candidates=1,
+        )
+        self.repository.create_screening_tasks(
+            run_id=run_id,
+            role_id=int(profile.id),
+            candidates=[candidate],
+            model_name="fake-model",
+            prompt_version="v1",
+            request_hashes={int(candidate["id"]): "hash"},
+        )
+        task = self.repository.claim_next_screening_task(run_id, worker_id="worker-a")
+        assert task is not None
+        self.db.get_connection().execute(
+            """
+            UPDATE screening_tasks
+            SET locked_at = ?
+            WHERE id = ?
+            """,
+            (
+                (datetime.now() - timedelta(minutes=10)).isoformat(timespec="seconds"),
+                int(task["task_id"]),
+            ),
+        )
+        self.db.get_connection().commit()
+
+        reclaimed = self.repository.claim_next_screening_task(
+            run_id,
+            worker_id="worker-b",
+            lock_timeout_seconds=60,
+        )
+
+        tasks = self.repository.list_screening_tasks(run_id)
+        self.assertIsNotNone(reclaimed)
+        assert reclaimed is not None
+        self.assertEqual(reclaimed["task_id"], task["task_id"])
+        self.assertEqual(tasks[0]["status"], "running")
+        self.assertEqual(tasks[0]["locked_by"], "worker-b")
+        self.assertFalse(tasks[0]["error_message"])
 
     def test_failed_screening_tasks_reset_alongside_pending_tasks(self) -> None:
         batch = self.repository.create_batch("Sales", "https://example.com")

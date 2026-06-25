@@ -6,7 +6,7 @@ from pathlib import Path
 
 from ai.prompt_manager import PromptManager
 from ai.schemas import ScreeningDecision
-from ai.screening_service import ScreeningService
+from ai.screening_service import ProviderRateLimiter, ScreeningService
 from core.models import CandidateRecord, ScreeningProfile
 from storage.db import DatabaseManager
 from storage.repository import CandidateRepository
@@ -50,6 +50,15 @@ class AlwaysFailProvider:
     def screen(self, _system_prompt: str, _candidate_text: str) -> ScreeningDecision:
         self.calls += 1
         raise RuntimeError("provider down")
+
+
+class TimeoutProvider:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def screen(self, _system_prompt: str, _candidate_text: str) -> ScreeningDecision:
+        self.calls += 1
+        raise RuntimeError("request timeout")
 
 
 class CountingProvider:
@@ -193,6 +202,63 @@ class ScreeningServiceTest(unittest.TestCase):
         self.assertEqual(tasks[0]["status"], "failed")
         self.assertEqual(tasks[0]["retry_count"], 2)
         self.assertEqual(rows[0]["status"], "failed")
+
+    def test_screening_task_classifies_timeout_failure(self) -> None:
+        candidates = self.repository.list_screening_candidates(job_title="Java Engineer")
+        provider = TimeoutProvider()
+        service = ScreeningService(
+            repository=self.repository,
+            prompt_manager=self.prompt_manager,
+            provider=provider,
+            max_retry_count=0,
+            retry_backoff_base_seconds=0,
+        )
+
+        result = service.run(
+            profile=self.profile.to_dict(),
+            candidates=candidates,
+            source_job_title="Java Engineer",
+            batch_id=None,
+            provider_name="fake",
+            model="fake-model",
+        )
+
+        tasks = self.repository.list_screening_tasks(int(result["run_id"]))
+        rows = self.repository.list_screening_results(int(result["run_id"]))
+        self.assertEqual(provider.calls, 1)
+        self.assertEqual(tasks[0]["status"], "failed")
+        self.assertEqual(tasks[0]["failure_category"], "timeout")
+        self.assertIn("timeout", rows[0]["error"])
+
+    def test_provider_rate_limiter_is_called_before_model_request(self) -> None:
+        candidates = self.repository.list_screening_candidates(job_title="Java Engineer")
+        calls: list[tuple[str, float]] = []
+        original_wait = ProviderRateLimiter.__dict__["wait"]
+
+        def record_wait(key: str, min_interval_seconds: float) -> None:
+            calls.append((key, min_interval_seconds))
+
+        ProviderRateLimiter.wait = record_wait
+        try:
+            service = ScreeningService(
+                repository=self.repository,
+                prompt_manager=self.prompt_manager,
+                provider=CountingProvider(),
+                retry_backoff_base_seconds=0,
+                provider_min_interval_seconds=0.25,
+            )
+            service.run(
+                profile=self.profile.to_dict(),
+                candidates=candidates,
+                source_job_title="Java Engineer",
+                batch_id=None,
+                provider_name="fake",
+                model="fake-model",
+            )
+        finally:
+            ProviderRateLimiter.wait = original_wait
+
+        self.assertEqual(calls, [("fake:fake-model", 0.25)])
 
     def test_same_request_reuses_cached_result_without_model_call(self) -> None:
         candidates = self.repository.list_screening_candidates(job_title="Java Engineer")

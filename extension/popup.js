@@ -12,6 +12,7 @@ const DEFAULTS = {
   pollIntervalMs: 2000,
   batchActionDelaySeconds: 5,
   maxBatchSessions: 50,
+  chatAutomationEnabled: false,
 };
 
 const OLD_DEFAULT_SCROLL_WAIT_MS = 1500;
@@ -50,6 +51,7 @@ const fields = {
   pollIntervalMs: document.getElementById("pollIntervalMs"),
   batchActionDelaySeconds: document.getElementById("batchActionDelaySeconds"),
   maxBatchSessions: document.getElementById("maxBatchSessions"),
+  chatAutomationEnabled: document.getElementById("chatAutomationEnabled"),
 };
 
 const statusEl = document.getElementById("status");
@@ -92,7 +94,11 @@ async function init() {
   }
   for (const [key, element] of Object.entries(fields)) {
     if (element) {
-      element.value = stored[key];
+      if (element.type === "checkbox") {
+        element.checked = Boolean(stored[key]);
+      } else {
+        element.value = stored[key];
+      }
     }
   }
   await refreshBatchStatus();
@@ -252,6 +258,9 @@ async function requestScrollPause() {
 async function runSingleChatAction(action) {
   const settings = collectSettings();
   await chrome.storage.local.set(settings);
+  if (!ensureChatAutomationEnabled(settings)) {
+    return;
+  }
 
   const tab = await getActiveBossTab();
   if (!tab) {
@@ -285,6 +294,9 @@ async function runSingleChatAction(action) {
 async function startBatch(mode) {
   const settings = collectSettings();
   await chrome.storage.local.set(settings);
+  if (!ensureChatAutomationEnabled(settings)) {
+    return;
+  }
 
   const tab = await getActiveBossTab();
   if (!tab) {
@@ -584,7 +596,20 @@ function collectSettings() {
     pollIntervalMs: Number(fields.pollIntervalMs.value || DEFAULTS.pollIntervalMs),
     batchActionDelayMs: Math.max(Number(fields.batchActionDelaySeconds.value || DEFAULTS.batchActionDelaySeconds), 1) * 1000,
     maxBatchSessions: Math.min(Math.max(Number(fields.maxBatchSessions.value || DEFAULTS.maxBatchSessions), 1), 50),
+    chatAutomationEnabled: Boolean(fields.chatAutomationEnabled?.checked),
   };
+}
+
+function ensureChatAutomationEnabled(settings = collectSettings()) {
+  if (settings.chatAutomationEnabled) {
+    return true;
+  }
+  const message = "Boss 聊天自动化默认关闭。请先勾选“启用 Boss 聊天自动化”，再执行求简历、批量求简历或附件下载。";
+  setStatus(message);
+  if (batchStatusEl) {
+    batchStatusEl.textContent = `批量任务：未启动。\n${message}`;
+  }
+  return false;
 }
 
 function localApiHeaders(settings) {

@@ -38,11 +38,13 @@ class ReviewPage(QWidget):
         filter_group = QGroupBox("复核范围")
         filter_layout = QHBoxLayout(filter_group)
         self.role_combo = QComboBox()
+        self.summary_label = QLabel("待复核 0")
         self.role_combo.addItem("全部岗位", None)
         self.refresh_button = QPushButton("刷新")
         filter_layout.addWidget(QLabel("岗位"))
         filter_layout.addWidget(self.role_combo, 2)
         filter_layout.addWidget(self.refresh_button)
+        filter_layout.addWidget(self.summary_label)
         filter_layout.addStretch(1)
 
         splitter = QSplitter(Qt.Horizontal)
@@ -78,9 +80,18 @@ class ReviewPage(QWidget):
         status_row.addWidget(self.reason_code_combo)
         status_row.addWidget(self.record_status_button)
         self.status_note_input = QLineEdit()
+        quick_row = QHBoxLayout()
+        self.pass_review_button = QPushButton("人工通过")
+        self.reject_review_button = QPushButton("人工拒绝")
+        self.talent_pool_button = QPushButton("放入人才库")
+        quick_row.addWidget(self.pass_review_button)
+        quick_row.addWidget(self.reject_review_button)
+        quick_row.addWidget(self.talent_pool_button)
+        quick_row.addStretch(1)
         self.status_note_input.setPlaceholderText("备注")
         status_layout.addLayout(status_row)
         status_layout.addWidget(self.status_note_input)
+        status_layout.addLayout(quick_row)
         detail_layout.addWidget(status_group)
 
         splitter.addWidget(self.table)
@@ -94,6 +105,27 @@ class ReviewPage(QWidget):
         self.role_combo.currentIndexChanged.connect(self.refresh_requested.emit)
         self.table.itemSelectionChanged.connect(self._show_selected_detail)
         self.record_status_button.clicked.connect(self._emit_status_change)
+        self.pass_review_button.clicked.connect(
+            lambda: self._emit_quick_status_change(
+                "priority_outreach",
+                "manual_review_passed",
+                "Manual review passed; prioritize outreach.",
+            )
+        )
+        self.reject_review_button.clicked.connect(
+            lambda: self._emit_quick_status_change(
+                "rejected",
+                "manual_review_rejected",
+                "Manual review rejected.",
+            )
+        )
+        self.talent_pool_button.clicked.connect(
+            lambda: self._emit_quick_status_change(
+                "talent_pool",
+                "manual_review_passed",
+                "Manual review passed; keep in talent pool.",
+            )
+        )
 
     def current_filters(self) -> dict[str, object]:
         return {"role_id": self.role_combo.currentData()}
@@ -111,6 +143,7 @@ class ReviewPage(QWidget):
 
     def set_rows(self, rows: list[dict[str, object]]) -> None:
         self._rows = rows
+        self.summary_label.setText(f"待复核 {len(rows)}")
         self.table.setRowCount(len(rows))
         for row_index, row in enumerate(rows):
             values = [
@@ -137,13 +170,22 @@ class ReviewPage(QWidget):
         else:
             self.detail_text.setPlainText("暂无需要人工复核的候选人。")
         self.record_status_button.setEnabled(bool(rows))
+        self.pass_review_button.setEnabled(bool(rows))
+        self.reject_review_button.setEnabled(bool(rows))
+        self.talent_pool_button.setEnabled(bool(rows))
 
     def _show_selected_detail(self) -> None:
         row = self._selected_review_row()
         if row is None:
             self.record_status_button.setEnabled(False)
+            self.pass_review_button.setEnabled(False)
+            self.reject_review_button.setEnabled(False)
+            self.talent_pool_button.setEnabled(False)
             return
         self.record_status_button.setEnabled(True)
+        self.pass_review_button.setEnabled(True)
+        self.reject_review_button.setEnabled(True)
+        self.talent_pool_button.setEnabled(True)
         lines = [
             f"候选人：{row.get('name') or '-'}",
             f"岗位：{row.get('role_title') or '-'}",
@@ -183,6 +225,29 @@ class ReviewPage(QWidget):
         self.detail_text.setPlainText("\n".join(lines))
 
     def _emit_status_change(self) -> None:
+        self._emit_status_payload(
+            self.recruitment_status_update_combo.currentData(),
+            self.reason_code_combo.currentData() or "",
+            self.status_note_input.text().strip(),
+        )
+        self.status_note_input.clear()
+
+    def _emit_quick_status_change(
+        self,
+        to_status: str,
+        reason_code: str,
+        default_note: str,
+    ) -> None:
+        note = self.status_note_input.text().strip() or default_note
+        self._emit_status_payload(to_status, reason_code, note)
+        self.status_note_input.clear()
+
+    def _emit_status_payload(
+        self,
+        to_status: object,
+        reason_code: object,
+        note: str,
+    ) -> None:
         row = self._selected_review_row()
         if row is None:
             return
@@ -190,12 +255,11 @@ class ReviewPage(QWidget):
             {
                 "candidate_id": int(row["candidate_id"]),
                 "role_id": int(row["role_id"]),
-                "to_status": self.recruitment_status_update_combo.currentData(),
-                "reason_code": self.reason_code_combo.currentData() or "",
-                "note": self.status_note_input.text().strip(),
+                "to_status": to_status,
+                "reason_code": reason_code or "",
+                "note": note,
             }
         )
-        self.status_note_input.clear()
 
     def _selected_review_row(self) -> dict[str, object] | None:
         current_row = self.table.currentRow()

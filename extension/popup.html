@@ -105,6 +105,18 @@
         background: #91b7aa;
         cursor: wait;
       }
+
+      .checkbox-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: 8px;
+      }
+
+      .checkbox-row input {
+        width: auto;
+        margin: 0;
+      }
     </style>
   </head>
   <body>
@@ -164,6 +176,12 @@
     <div class="section">
       <label for="resumeMessage">沟通请求话术</label>
       <textarea id="resumeMessage" placeholder="方便发一份你的简历过来吗？"></textarea>
+
+      <label class="checkbox-row" for="chatAutomationEnabled">
+        <input id="chatAutomationEnabled" type="checkbox">
+        <span>启用 Boss 聊天自动化</span>
+      </label>
+      <div class="hint">默认关闭；开启后才允许求简历、批量求简历和附件下载。</div>
 
       <div class="row">
         <div>

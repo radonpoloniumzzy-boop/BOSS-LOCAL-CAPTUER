@@ -67,6 +67,10 @@ class MigrationTest(unittest.TestCase):
             self.assertIn("result_source", task_columns)
             self.assertIn("prompt_text", task_columns)
             self.assertIn("candidate_text", task_columns)
+            self.assertIn("locked_at", task_columns)
+            self.assertIn("locked_by", task_columns)
+            self.assertIn("next_attempt_at", task_columns)
+            self.assertIn("failure_category", task_columns)
             self.assertIn("confidence", result_columns)
             self.assertIn("evidence_json", result_columns)
             self.assertIn("gap_json", result_columns)
@@ -86,7 +90,7 @@ class MigrationTest(unittest.TestCase):
             self.assertIn("industry_tags_json", profile_columns)
             self.assertIn("skill_tags_json", profile_columns)
             self.assertIn("profile_completeness", profile_columns)
-            self.assertEqual(version, 11)
+            self.assertEqual(version, 12)
             connection.close()
 
     def test_existing_screening_results_are_backfilled_as_tasks(self) -> None:
@@ -198,7 +202,9 @@ class MigrationTest(unittest.TestCase):
                     result_id,
                     result_source,
                     prompt_text,
-                    candidate_text
+                    candidate_text,
+                    locked_by,
+                    failure_category
                 FROM screening_tasks
                 """
             ).fetchone()
@@ -244,12 +250,14 @@ class MigrationTest(unittest.TestCase):
                 "legacy",
                 "",
                 "",
+                "",
+                "",
             ))
             self.assertEqual(tuple(match_row), (1, 1, "SSR", "ai_screened", "screened", 1))
             self.assertEqual(tuple(event_row), (1, 1, "", "screened", "migration_backfill"))
             self.assertEqual(tuple(profile_row), (1, "Legacy Candidate", "Sales", "", ""))
             self.assertEqual(tuple(result_row), ("", "[]", "[]", "[]", ""))
-            self.assertEqual(version, 11)
+            self.assertEqual(version, 12)
             connection.close()
 
 

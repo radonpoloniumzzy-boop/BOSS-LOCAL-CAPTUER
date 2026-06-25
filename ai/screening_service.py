@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from collections.abc import Callable
 
@@ -10,6 +11,27 @@ from ai.provider import AIProvider
 from ai.schemas import ScreeningProgress
 from core.models import ScreeningResult
 from core.utils import short_hash
+
+
+class ProviderRateLimiter:
+    _guard = threading.Lock()
+    _locks: dict[str, threading.Lock] = {}
+    _last_call_at: dict[str, float] = {}
+
+    @classmethod
+    def wait(cls, key: str, min_interval_seconds: float) -> None:
+        interval = max(float(min_interval_seconds or 0.0), 0.0)
+        if interval <= 0:
+            return
+        with cls._guard:
+            lock = cls._locks.setdefault(key, threading.Lock())
+        with lock:
+            now = time.monotonic()
+            last_call_at = cls._last_call_at.get(key, 0.0)
+            wait_seconds = interval - (now - last_call_at)
+            if wait_seconds > 0:
+                time.sleep(wait_seconds)
+            cls._last_call_at[key] = time.monotonic()
 
 
 class ScreeningService:
@@ -22,6 +44,9 @@ class ScreeningService:
         prescreener: RulePrescreener | None = None,
         max_retry_count: int = 2,
         retry_backoff_base_seconds: float = 1.0,
+        worker_id: str = "",
+        task_lock_timeout_seconds: float = 600.0,
+        provider_min_interval_seconds: float = 0.0,
     ) -> None:
         self.repository = repository
         self.prompt_manager = prompt_manager
@@ -30,6 +55,9 @@ class ScreeningService:
         self.prescreener = prescreener or RulePrescreener()
         self.max_retry_count = max_retry_count
         self.retry_backoff_base_seconds = retry_backoff_base_seconds
+        self.worker_id = worker_id or f"screening-{id(self):x}"
+        self.task_lock_timeout_seconds = task_lock_timeout_seconds
+        self.provider_min_interval_seconds = provider_min_interval_seconds
         self._stop_requested = False
 
     def request_stop(self) -> None:
@@ -111,7 +139,11 @@ class ScreeningService:
                     note = "User stopped AI screening."
                     break
 
-                task = self.repository.claim_next_screening_task(run_id)
+                task = self.repository.claim_next_screening_task(
+                    run_id,
+                    worker_id=self.worker_id,
+                    lock_timeout_seconds=self.task_lock_timeout_seconds,
+                )
                 if task is None:
                     break
 
@@ -184,6 +216,10 @@ class ScreeningService:
                                     prompt_text=task_prompt_text,
                                     candidate_text=task_candidate_text,
                                 )
+                            ProviderRateLimiter.wait(
+                                f"{provider_name}:{task_model}",
+                                self.provider_min_interval_seconds,
+                            )
                             decision = self.provider.screen(task_prompt_text, task_candidate_text)
                             result_id = self.repository.save_screening_result(
                                 ScreeningResult(
@@ -208,7 +244,14 @@ class ScreeningService:
                         result_source=result_source,
                     )
                 except Exception as exc:
-                    next_status = self.repository.mark_screening_task_failure(task_id, str(exc))
+                    failure_category = self._failure_category(exc)
+                    retry_after_seconds = self._retry_delay_seconds(task)
+                    next_status = self.repository.mark_screening_task_failure(
+                        task_id,
+                        str(exc),
+                        failure_category=failure_category,
+                        retry_after_seconds=retry_after_seconds,
+                    )
                     message = f"{name}: failed - {exc}"
                     if next_status == "failed":
                         self.repository.save_screening_result(
@@ -218,11 +261,11 @@ class ScreeningService:
                                 rating="",
                                 persona="",
                                 status="failed",
-                                error=str(exc),
+                                error=f"{failure_category}: {exc}",
                             )
                         )
                     else:
-                        message = f"{name}: retrying after {exc}"
+                        message = f"{name}: retrying after {failure_category} - {exc}"
                         self._sleep_before_retry(task)
                     self._log("exception", "Screening candidate %s failed: %s", candidate_id, exc)
 
@@ -312,11 +355,31 @@ class ScreeningService:
         return short_hash(json.dumps(payload, ensure_ascii=False, sort_keys=True))
 
     def _sleep_before_retry(self, task: dict[str, object]) -> None:
-        if self.retry_backoff_base_seconds <= 0:
+        delay = self._retry_delay_seconds(task)
+        if delay <= 0:
             return
-        retry_count = int(task.get("retry_count") or 0) + 1
-        delay = min(self.retry_backoff_base_seconds * (2 ** max(retry_count - 1, 0)), 30.0)
         time.sleep(delay)
+
+    def _retry_delay_seconds(self, task: dict[str, object]) -> float:
+        if self.retry_backoff_base_seconds <= 0:
+            return 0.0
+        retry_count = int(task.get("retry_count") or 0) + 1
+        return min(self.retry_backoff_base_seconds * (2 ** max(retry_count - 1, 0)), 30.0)
+
+    @staticmethod
+    def _failure_category(exc: Exception) -> str:
+        message = str(exc).lower()
+        if "rate limit" in message or "too many requests" in message or "429" in message:
+            return "rate_limit"
+        if "timeout" in message or "timed out" in message:
+            return "timeout"
+        if "json" in message or "parse" in message or "schema" in message:
+            return "parse_error"
+        if "unauthorized" in message or "401" in message or "403" in message or "api key" in message:
+            return "auth_error"
+        if "connection" in message or "network" in message or "dns" in message:
+            return "network_error"
+        return "provider_error"
 
     def _log(self, level: str, message: str, *args) -> None:
         if not self.logger:
