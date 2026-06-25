@@ -138,8 +138,35 @@ def _screening_json_schema() -> dict[str, Any]:
         "properties": {
             "rating": {"type": "string", "enum": ["UR", "SSR", "SR", "R", "N"]},
             "persona": {"type": "string", "minLength": 1, "maxLength": 240},
+            "confidence": {"type": "string", "enum": ["high", "medium", "low", ""]},
+            "evidence": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "item": {"type": "string"},
+                        "evidence": {"type": "string"},
+                    },
+                    "required": ["item", "evidence"],
+                    "additionalProperties": False,
+                },
+            },
+            "gaps": {"type": "array", "items": {"type": "string"}},
+            "risks": {"type": "array", "items": {"type": "string"}},
+            "recommended_action": {
+                "type": "string",
+                "enum": ["priority_outreach", "normal_review", "manual_check", "hold", ""],
+            },
         },
-        "required": ["rating", "persona"],
+        "required": [
+            "rating",
+            "persona",
+            "confidence",
+            "evidence",
+            "gaps",
+            "risks",
+            "recommended_action",
+        ],
         "additionalProperties": False,
     }
 
@@ -194,7 +221,47 @@ def _parse_decision(raw_text: str) -> ScreeningDecision:
         raise AIProviderError(f"模型返回了无效评级：{rating or '-'}")
     if not persona:
         raise AIProviderError("模型未返回人物画像。")
-    return ScreeningDecision(rating=rating, persona=persona[:240], raw_response=raw)
+    confidence = normalize_text(str(data.get("confidence") or "")).lower()
+    if confidence not in {"", "high", "medium", "low"}:
+        confidence = ""
+    recommended_action = normalize_text(str(data.get("recommended_action") or ""))
+    if recommended_action not in {"", "priority_outreach", "normal_review", "manual_check", "hold"}:
+        recommended_action = ""
+    return ScreeningDecision(
+        rating=rating,
+        persona=persona[:240],
+        raw_response=raw,
+        confidence=confidence,
+        evidence=_normalize_evidence(data.get("evidence")),
+        gaps=_normalize_string_list(data.get("gaps")),
+        risks=_normalize_string_list(data.get("risks")),
+        recommended_action=recommended_action,
+    )
+
+
+def _normalize_evidence(value: object) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    items: list[dict[str, str]] = []
+    for item in value[:8]:
+        if not isinstance(item, dict):
+            continue
+        label = normalize_text(str(item.get("item") or ""))[:80]
+        evidence = normalize_text(str(item.get("evidence") or ""))[:240]
+        if label or evidence:
+            items.append({"item": label, "evidence": evidence})
+    return items
+
+
+def _normalize_string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    items: list[str] = []
+    for item in value[:12]:
+        text = normalize_text(str(item or ""))[:160]
+        if text:
+            items.append(text)
+    return items
 
 
 def _extract_api_error(body: str) -> str:

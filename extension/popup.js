@@ -1,6 +1,7 @@
 const DEFAULTS = {
   jobTitle: "Boss 推荐牛人",
   apiBase: "http://127.0.0.1:17863",
+  apiToken: "",
   scrollMode: "end",
   scrollStep: 900,
   scrollWaitMs: 30,
@@ -38,6 +39,7 @@ const COLLECT_PLATFORMS = [
 const fields = {
   jobTitle: document.getElementById("jobTitle"),
   apiBase: document.getElementById("apiBase"),
+  apiToken: document.getElementById("apiToken"),
   scrollMode: document.getElementById("scrollMode"),
   scrollStep: document.getElementById("scrollStep"),
   scrollWaitMs: document.getElementById("scrollWaitMs"),
@@ -108,7 +110,7 @@ async function runAutomation() {
   automationAutoButton.disabled = true;
   setStatus("正在读取桌面端自动化方案...");
   try {
-    const automation = await startDesktopAutomation(settings.apiBase, tab.url);
+    const automation = await startDesktopAutomation(settings, tab.url);
     fields.jobTitle.value = automation.job_title || automation.profile_job_title || settings.jobTitle;
     await chrome.storage.local.set({ ...collectSettings(), jobTitle: fields.jobTitle.value });
     setStatus(
@@ -127,12 +129,18 @@ async function runAutomation() {
   }
 }
 
-async function startDesktopAutomation(apiBase, sourceUrl) {
-  const response = await fetch(`${trimTrailingSlash(apiBase)}/api/automation/start`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ source_url: sourceUrl, trigger: "extension_auto" }),
-  });
+async function startDesktopAutomation(settings, sourceUrl) {
+  const apiBase = normalizeLocalApiBase(settings.apiBase);
+  let response;
+  try {
+    response = await fetch(`${apiBase}/api/automation/start`, {
+      method: "POST",
+      headers: localApiHeaders(settings),
+      body: JSON.stringify({ source_url: sourceUrl, trigger: "extension_auto" }),
+    });
+  } catch (error) {
+    throw new Error(formatLocalApiFetchError(apiBase, error));
+  }
   const result = await response.json();
   if (!response.ok || !result.ok) {
     throw new Error(result.error || `桌面端返回状态码 ${response.status}`);
@@ -468,26 +476,33 @@ function mergeFrameResults(frameResults) {
 }
 
 async function importCards(settings, sourceUrl, merged, automationRequested = false) {
-  const response = await fetch(`${trimTrailingSlash(settings.apiBase)}/api/import/cards`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      job_title: settings.jobTitle,
-      source_url: sourceUrl,
-      cards: merged.cards,
-      meta: {
-        platform: merged.platform || settings.platform || "",
-        frames_seen: merged.framesSeen,
-        frames_with_cards: merged.framesWithCards,
-        rounds_completed: merged.roundsCompleted,
-        unique_cards: merged.cards.length,
-        automation_requested: automationRequested,
-        debug: merged.debugSummary,
+  const apiBase = normalizeLocalApiBase(settings.apiBase);
+  let response;
+  try {
+    response = await fetch(`${apiBase}/api/import/cards`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Boss-Local-Token": settings.apiToken || "",
       },
-    }),
-  });
+      body: JSON.stringify({
+        job_title: settings.jobTitle,
+        source_url: sourceUrl,
+        cards: merged.cards,
+        meta: {
+          platform: merged.platform || settings.platform || "",
+          frames_seen: merged.framesSeen,
+          frames_with_cards: merged.framesWithCards,
+          rounds_completed: merged.roundsCompleted,
+          unique_cards: merged.cards.length,
+          automation_requested: automationRequested,
+          debug: merged.debugSummary,
+        },
+      }),
+    });
+  } catch (error) {
+    throw new Error(formatLocalApiFetchError(apiBase, error));
+  }
   const result = await response.json();
   if (!response.ok || !result.ok) {
     throw new Error(result.error || `本地接口返回状态码 ${response.status}`);
@@ -553,9 +568,12 @@ function isBossUrl(value) {
 }
 
 function collectSettings() {
+  const apiBase = normalizeLocalApiBase(fields.apiBase.value.trim() || DEFAULTS.apiBase);
+  fields.apiBase.value = apiBase;
   return {
     jobTitle: fields.jobTitle.value.trim() || DEFAULTS.jobTitle,
-    apiBase: fields.apiBase.value.trim() || DEFAULTS.apiBase,
+    apiBase,
+    apiToken: fields.apiToken.value.trim(),
     scrollMode: fields.scrollMode.value,
     scrollStep: Number(fields.scrollStep.value || DEFAULTS.scrollStep),
     scrollWaitMs: Math.max(Number(fields.scrollWaitMs.value || DEFAULTS.scrollWaitMs), 0),
@@ -566,6 +584,13 @@ function collectSettings() {
     pollIntervalMs: Number(fields.pollIntervalMs.value || DEFAULTS.pollIntervalMs),
     batchActionDelayMs: Math.max(Number(fields.batchActionDelaySeconds.value || DEFAULTS.batchActionDelaySeconds), 1) * 1000,
     maxBatchSessions: Math.min(Math.max(Number(fields.maxBatchSessions.value || DEFAULTS.maxBatchSessions), 1), 50),
+  };
+}
+
+function localApiHeaders(settings) {
+  return {
+    "Content-Type": "application/json",
+    "X-Boss-Local-Token": settings.apiToken || "",
   };
 }
 
@@ -707,6 +732,32 @@ function buildKey(card) {
 
 function trimTrailingSlash(value) {
   return String(value || "").replace(/\/+$/, "");
+}
+
+function normalizeLocalApiBase(value) {
+  let raw = String(value || DEFAULTS.apiBase).trim() || DEFAULTS.apiBase;
+  if (!/^[a-z][a-z\d+.-]*:\/\//i.test(raw)) {
+    raw = `http://${raw}`;
+  }
+  try {
+    const url = new URL(raw);
+    const hostname = url.hostname.toLowerCase();
+    if (hostname === "localhost" || hostname === "::1" || hostname === "[::1]") {
+      url.hostname = "127.0.0.1";
+    }
+    return trimTrailingSlash(url.toString());
+  } catch (_error) {
+    return trimTrailingSlash(raw.replace(/^http:\/\/(?:localhost|\[::1\])(?=[:/]|$)/i, "http://127.0.0.1"));
+  }
+}
+
+function formatLocalApiFetchError(apiBase, error) {
+  return [
+    `无法连接本地接口：${apiBase}`,
+    "请确认桌面端已启动；扩展里的接口地址使用 http://127.0.0.1:17863；Token 与桌面端“设置”页面一致。",
+    "如果刚更新或重新安装过扩展，请在 chrome://extensions 里点击“重新加载”。",
+    `浏览器错误：${error?.message || String(error)}`,
+  ].join("\n");
 }
 
 function setStatus(text) {

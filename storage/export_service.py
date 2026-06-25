@@ -30,12 +30,32 @@ class ExportService:
         batch_id: int | None = None,
         keyword: str = "",
         job_title: str = "",
+        city: str = "",
+        years_min: int | str | None = None,
+        years_max: int | str | None = None,
+        profile_tag: str = "",
+        last_active_days: int | str | None = None,
+        match_role_id: int | str | None = None,
+        minimum_rating: str = "",
+        match_status: str = "",
+        recruitment_status: str = "",
+        latest_reason_code: str = "",
     ) -> ExportResult:
         rows = self.repository.get_export_rows(
             mode=mode,
             batch_id=batch_id,
             keyword=keyword,
             job_title=job_title,
+            city=city,
+            years_min=years_min,
+            years_max=years_max,
+            profile_tag=profile_tag,
+            last_active_days=last_active_days,
+            match_role_id=match_role_id,
+            minimum_rating=minimum_rating,
+            match_status=match_status,
+            recruitment_status=recruitment_status,
+            latest_reason_code=latest_reason_code,
         )
         export_format = export_format.lower().strip()
         if export_format not in EXPORT_SUFFIXES:
@@ -112,10 +132,29 @@ class ExportService:
 
         for index, row in enumerate(rows, start=1):
             name = self._stringify_value(row.get("name")) or f"候选人 {index}"
+            role_direction = self._stringify_value(row.get("job_track") or row.get("job_family"))
             lines.extend(
                 [
                     f"## {index}. {name}",
                     "",
+                    f"- 城市：{self._stringify_value(row.get('city')) or '-'}",
+                    f"- 年限：{self._stringify_value(row.get('years_experience')) or '-'}",
+                    f"- 岗位方向：{role_direction or '-'}",
+                    f"- AI匹配岗位：{self._stringify_value(row.get('role_title')) or '-'}",
+                    f"- AI评级：{self._stringify_value(row.get('latest_rating')) or '-'}",
+                    f"- AI置信度：{self._stringify_value(row.get('latest_confidence')) or '-'}",
+                    f"- AI建议：{self._stringify_value(row.get('recommended_action')) or '-'}",
+                    f"- AI证据：{self._json_summary(self._stringify_value(row.get('evidence_json')))}",
+                    f"- AI缺口：{self._json_summary(self._stringify_value(row.get('gap_json')))}",
+                    f"- AI风险：{self._json_summary(self._stringify_value(row.get('risk_json')))}",
+                    f"- 匹配状态：{self._stringify_value(row.get('match_status')) or '-'}",
+                    f"- 招聘阶段：{self._stringify_value(row.get('recruitment_status')) or '-'}",
+                    f"- 人工复核：{self._stringify_value(row.get('human_decision')) or '-'}",
+                    f"- 最近阶段变化：{self._stringify_value(row.get('latest_status_changed_at')) or '-'}",
+                    f"- 最近原因：{self._stringify_value(row.get('latest_reason_code')) or '-'}",
+                    f"- 最近备注：{self._stringify_value(row.get('latest_status_note')) or '-'}",
+                    f"- 最近活跃：{self._stringify_value(row.get('last_active_at')) or '-'}",
+                    f"- 画像完整度：{self._stringify_value(row.get('profile_completeness')) or '-'}",
                     f"- 活跃状态：{self._stringify_value(row.get('active_status')) or '-'}",
                     f"- 期望薪资：{self._stringify_value(row.get('expected_salary')) or '-'}",
                     f"- 工作经历：{self._stringify_value(row.get('work_experience_text')) or '-'}",
@@ -157,3 +196,29 @@ class ExportService:
         if value is None:
             return ""
         return str(value)
+
+    @staticmethod
+    def _json_summary(value: str) -> str:
+        try:
+            parsed = json.loads(value or "[]")
+        except json.JSONDecodeError:
+            return value or "-"
+        if not parsed:
+            return "-"
+        if isinstance(parsed, list):
+            parts: list[str] = []
+            for item in parsed[:5]:
+                if isinstance(item, dict):
+                    text = "；".join(
+                        f"{key}:{val}" for key, val in item.items() if val not in (None, "")
+                    )
+                    if text:
+                        parts.append(text)
+                else:
+                    parts.append(str(item))
+            return " / ".join(parts) or "-"
+        if isinstance(parsed, dict):
+            return "；".join(
+                f"{key}:{val}" for key, val in parsed.items() if val not in (None, "")
+            ) or "-"
+        return str(parsed)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import secrets
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable
@@ -17,6 +18,8 @@ class LocalApiServer:
         on_error: Callable[[str], None] | None = None,
         get_automation_status: Callable[[], dict[str, object]] | None = None,
         start_automation: Callable[[dict[str, object]], dict[str, object]] | None = None,
+        auth_token: str = "",
+        max_body_bytes: int = 25_000_000,
     ) -> None:
         self.host = host
         self.port = port
@@ -26,6 +29,8 @@ class LocalApiServer:
         self.on_error = on_error
         self.get_automation_status = get_automation_status
         self.start_automation = start_automation
+        self.auth_token = str(auth_token or "")
+        self.max_body_bytes = max_body_bytes
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
@@ -48,6 +53,9 @@ class LocalApiServer:
                     self._send_json(200, {"status": "ok", "endpoint": parent.endpoint})
                     return
                 if self.path == "/api/automation/status":
+                    if not self._is_authorized():
+                        self._send_json(401, {"ok": False, "error": "Unauthorized"})
+                        return
                     if parent.get_automation_status is None:
                         self._send_json(503, {"ok": False, "error": "Automation is unavailable"})
                         return
@@ -62,8 +70,14 @@ class LocalApiServer:
                 if self.path not in {"/api/import/cards", "/api/automation/start"}:
                     self._send_json(404, {"error": "Not found"})
                     return
+                if not self._is_authorized():
+                    self._send_json(401, {"ok": False, "error": "Unauthorized"})
+                    return
                 try:
                     content_length = int(self.headers.get("Content-Length", "0"))
+                    if content_length > parent.max_body_bytes:
+                        self._send_json(413, {"ok": False, "error": "Request body is too large"})
+                        return
                     body = self.rfile.read(content_length).decode("utf-8")
                     payload = json.loads(body or "{}")
                     if self.path == "/api/automation/start":
@@ -93,11 +107,18 @@ class LocalApiServer:
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.send_header("Content-Length", str(len(data)))
                 self.send_header("Access-Control-Allow-Origin", "*")
-                self.send_header("Access-Control-Allow-Headers", "Content-Type")
+                self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Boss-Local-Token")
                 self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+                self.send_header("Access-Control-Allow-Private-Network", "true")
                 self.end_headers()
                 if status_code != 204:
                     self.wfile.write(data)
+
+            def _is_authorized(self) -> bool:
+                if not parent.auth_token:
+                    return False
+                supplied = self.headers.get("X-Boss-Local-Token", "")
+                return secrets.compare_digest(str(supplied), parent.auth_token)
 
         self._server = ThreadingHTTPServer((self.host, self.port), Handler)
         self.port = int(self._server.server_address[1])

@@ -122,6 +122,16 @@ class ExportWorker(QObject):
                 batch_id=self.payload.get("batch_id"),
                 keyword=str(self.payload.get("keyword") or ""),
                 job_title=str(self.payload.get("job_title") or ""),
+                city=str(self.payload.get("city") or ""),
+                years_min=self.payload.get("years_min"),
+                years_max=self.payload.get("years_max"),
+                profile_tag=str(self.payload.get("profile_tag") or ""),
+                last_active_days=self.payload.get("last_active_days"),
+                match_role_id=self.payload.get("match_role_id"),
+                minimum_rating=str(self.payload.get("minimum_rating") or ""),
+                match_status=str(self.payload.get("match_status") or ""),
+                recruitment_status=str(self.payload.get("recruitment_status") or ""),
+                latest_reason_code=str(self.payload.get("latest_reason_code") or ""),
             )
             self.finished.emit(result)
         except Exception as exc:
@@ -167,6 +177,7 @@ class AIScreeningWorker(QObject):
                 model=str(dict(self.payload["provider"]).get("model") or ""),
                 origin=str(self.payload.get("origin") or "manual"),
                 progress_callback=self.progress.emit,
+                run_id=self.payload.get("run_id"),
             )
             self.finished.emit(result)
         except Exception as exc:

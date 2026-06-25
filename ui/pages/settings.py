@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core.models import AIProviderConfig, AppConfig
+from core.models import DEFAULT_CSV_COLUMNS, AIProviderConfig, AppConfig
 
 
 class SettingsPage(QWidget):
@@ -43,6 +43,8 @@ class SettingsPage(QWidget):
         self.job_title_input = QLineEdit()
         self.local_api_port_input = QSpinBox()
         self.local_api_port_input.setRange(1024, 65535)
+        self.local_api_token_input = QLineEdit()
+        self.local_api_token_input.setReadOnly(True)
         self.scroll_mode_combo = QComboBox()
         self.scroll_mode_combo.addItem("整页滚动", "page")
         self.scroll_mode_combo.addItem("固定步长", "fixed")
@@ -62,6 +64,7 @@ class SettingsPage(QWidget):
         base_form.addRow("目标链接", self.target_url_input)
         base_form.addRow("默认岗位名称", self.job_title_input)
         base_form.addRow("本地接口端口", self.local_api_port_input)
+        base_form.addRow("本地接口 Token", self.local_api_token_input)
         base_form.addRow("滚动模式", self.scroll_mode_combo)
         base_form.addRow("滚动步长", self.scroll_step_input)
         base_form.addRow("滚动等待秒数", self.scroll_wait_input)
@@ -102,6 +105,7 @@ class SettingsPage(QWidget):
         self.target_url_input.setText(config.target_url)
         self.job_title_input.setText(default_job_title)
         self.local_api_port_input.setValue(config.local_api_port)
+        self.local_api_token_input.setText(config.local_api_token)
         self._set_combo_data(self.scroll_mode_combo, config.scroll_mode)
         self.scroll_step_input.setValue(config.scroll_step)
         self.scroll_wait_input.setValue(config.scroll_wait_seconds)
@@ -122,6 +126,7 @@ class SettingsPage(QWidget):
             default_export_dir=self.export_dir_input.text().strip(),
             target_url=self.target_url_input.text().strip(),
             local_api_port=self.local_api_port_input.value(),
+            local_api_token=self.local_api_token_input.text().strip(),
             scroll_mode=str(self.scroll_mode_combo.currentData() or "page"),
             scroll_step=self.scroll_step_input.value(),
             scroll_wait_seconds=self.scroll_wait_input.value(),
@@ -130,7 +135,7 @@ class SettingsPage(QWidget):
             default_job_title=self.job_title_input.text().strip() or "Boss 推荐牛人",
             log_level=self.log_level_combo.currentText(),
             selectors_path=self.selectors_path_input.text().strip(),
-            csv_columns=columns or ["name", "expected_salary", "raw_card_text"],
+            csv_columns=columns or list(DEFAULT_CSV_COLUMNS),
             ai_provider=AIProviderConfig(
                 provider=self.ai_provider_input.text().strip() or "openai",
                 model=self.ai_model_input.text().strip(),

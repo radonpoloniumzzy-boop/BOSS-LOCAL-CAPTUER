@@ -3,7 +3,7 @@
 Load this folder as an unpacked Chrome extension:
 
 ```text
-D:\codex\boss_zhipin\informationcatch\extension
+D:\codex\BOSS-LOCAL-CAPTURE-review\extension
 ```
 
 Steps:
@@ -17,12 +17,12 @@ Steps:
 Collection usage:
 
 1. Start the local desktop app first
-2. Confirm the local API endpoint in the popup
+2. Confirm the local API endpoint in the popup and paste the local API token from the desktop app `Settings` page
 3. Open Boss or Liepin in a normal Chrome tab and log in manually
    - Boss recommended talent page
    - Liepin recommended page: `https://lpt.liepin.com/recommend`
 4. Open the extension popup
-5. Check `Job Title` and `Local API Base`
+5. Check `Job Title`, `Local API Base`, and `Local API Token`
 6. Click `Collect Current Page` or `Auto Scroll + Collect`
 
 One-click automation usage:

@@ -91,13 +91,20 @@ if (!globalThis.__bossLocalCaptureInjected) {
       },
     };
 
-    const response = await fetch(`${trimTrailingSlash(settings.apiBase)}/api/import/cards`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(payload),
-    });
+    const apiBase = normalizeLocalApiBase(settings.apiBase);
+    let response;
+    try {
+      response = await fetch(`${apiBase}/api/import/cards`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Boss-Local-Token": settings.apiToken || "",
+        },
+        body: JSON.stringify(payload),
+      });
+    } catch (error) {
+      throw new Error(formatLocalApiFetchError(apiBase, error));
+    }
     const result = await response.json();
     if (!response.ok || !result.ok) {
       throw new Error(result.error || `Local API returned ${response.status}`);
@@ -387,6 +394,32 @@ if (!globalThis.__bossLocalCaptureInjected) {
 
   function trimTrailingSlash(value) {
     return String(value || "").replace(/\/+$/, "");
+  }
+
+  function normalizeLocalApiBase(value) {
+    let raw = String(value || "http://127.0.0.1:17863").trim() || "http://127.0.0.1:17863";
+    if (!/^[a-z][a-z\d+.-]*:\/\//i.test(raw)) {
+      raw = `http://${raw}`;
+    }
+    try {
+      const url = new URL(raw);
+      const hostname = url.hostname.toLowerCase();
+      if (hostname === "localhost" || hostname === "::1" || hostname === "[::1]") {
+        url.hostname = "127.0.0.1";
+      }
+      return trimTrailingSlash(url.toString());
+    } catch (_error) {
+      return trimTrailingSlash(raw.replace(/^http:\/\/(?:localhost|\[::1\])(?=[:/]|$)/i, "http://127.0.0.1"));
+    }
+  }
+
+  function formatLocalApiFetchError(apiBase, error) {
+    return [
+      `无法连接本地接口：${apiBase}`,
+      "请确认桌面端已启动；扩展里的接口地址使用 http://127.0.0.1:17863；Token 与桌面端设置页一致。",
+      "如果刚更新或重新安装过扩展，请在 chrome://extensions 里点击重新加载。",
+      `浏览器错误：${error?.message || String(error)}`,
+    ].join("\n");
   }
 
   function absolutizeUrl(value) {

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
@@ -53,6 +54,8 @@ class AIScreenPage(QWidget):
     stop_requested = Signal()
     test_connection_requested = Signal(object)
     run_selected = Signal(int)
+    resume_run_requested = Signal(int)
+    retry_task_requested = Signal(int)
 
     def __init__(self, prompt_manager: PromptManager) -> None:
         super().__init__()
@@ -60,6 +63,7 @@ class AIScreenPage(QWidget):
         self.current_profile_id: int | None = None
         self.prompt_source = "generated"
         self._setting_prompt = False
+        self._result_rows: list[dict[str, object]] = []
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -177,22 +181,46 @@ class AIScreenPage(QWidget):
         result_layout = QVBoxLayout(result_group)
         result_head = QHBoxLayout()
         self.run_combo = QComboBox()
+        self.result_status_filter_combo = QComboBox()
+        self.result_status_filter_combo.addItem("全部状态", "")
+        for label, status in [
+            ("待处理", "pending"),
+            ("处理中", "running"),
+            ("等待重试", "retrying"),
+            ("失败", "failed"),
+            ("人工确认", "manual_check"),
+            ("暂缓", "hold"),
+            ("完成", "success"),
+        ]:
+            self.result_status_filter_combo.addItem(label, status)
+        self.resume_run_button = QPushButton("继续/重试")
+        self.retry_task_button = QPushButton("重试所选失败")
         self.summary_label = QLabel("尚未运行")
         result_head.addWidget(QLabel("筛选批次"))
         result_head.addWidget(self.run_combo, 1)
+        result_head.addWidget(QLabel("状态"))
+        result_head.addWidget(self.result_status_filter_combo)
+        result_head.addWidget(self.resume_run_button)
+        result_head.addWidget(self.retry_task_button)
         result_head.addWidget(self.summary_label)
         result_layout.addLayout(result_head)
 
         self.progress = QProgressBar()
         self.progress.setRange(0, 1)
         self.progress.setValue(0)
+        self.efficiency_label = QLabel("效率摘要：暂无")
+        self.efficiency_label.setWordWrap(True)
         self.status_label = QLabel("就绪")
         result_layout.addWidget(self.progress)
         result_layout.addWidget(self.status_label)
+        result_layout.addWidget(self.efficiency_label)
 
-        self.result_table = QTableWidget(0, 4)
-        self.result_table.setHorizontalHeaderLabels(["候选人", "评级", "一句话人物画像", "状态"])
+        self.result_table = QTableWidget(0, 6)
+        self.result_table.setHorizontalHeaderLabels(
+            ["候选人", "评级", "状态", "重试", "最后更新", "依据/失败原因"]
+        )
         self.result_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.result_table.setSelectionMode(QTableWidget.SingleSelection)
         self.result_table.setAlternatingRowColors(True)
         self.result_table.horizontalHeader().setStretchLastSection(True)
         result_layout.addWidget(self.result_table, 1)
@@ -215,6 +243,9 @@ class AIScreenPage(QWidget):
         self.start_button.clicked.connect(self._emit_run)
         self.stop_button.clicked.connect(self.stop_requested.emit)
         self.run_combo.currentIndexChanged.connect(self._emit_run_selected)
+        self.result_status_filter_combo.currentIndexChanged.connect(self._render_filtered_results)
+        self.resume_run_button.clicked.connect(self._emit_resume_run)
+        self.retry_task_button.clicked.connect(self._emit_retry_task)
         self._provider_changed()
 
     def load_config(self, config) -> None:
@@ -300,27 +331,204 @@ class AIScreenPage(QWidget):
         self.run_combo.blockSignals(False)
 
     def show_results(self, rows: list[dict[str, object]]) -> None:
+        self._result_rows = [dict(row) for row in rows]
+        self._render_filtered_results()
+
+    def _render_filtered_results(self, *_args: object) -> None:
+        status_filter = str(self.result_status_filter_combo.currentData() or "")
+        rows = [
+            row
+            for row in self._result_rows
+            if not status_filter or self._task_status(row) == status_filter
+        ]
         self.result_table.setRowCount(len(rows))
         counts = {rating: 0 for rating in ["UR", "SSR", "SR", "R", "N"]}
-        failures = 0
-        for row_index, row in enumerate(rows):
+        task_counts = {
+            "pending": 0,
+            "running": 0,
+            "retrying": 0,
+            "success": 0,
+            "failed": 0,
+            "manual_check": 0,
+            "hold": 0,
+        }
+        for row in self._result_rows:
             rating = str(row.get("rating") or "")
             if rating in counts:
                 counts[rating] += 1
-            if row.get("status") == "failed":
-                failures += 1
+            task_status = self._task_status(row)
+            if task_status in task_counts:
+                task_counts[task_status] += 1
+        for row_index, row in enumerate(rows):
+            rating = str(row.get("rating") or "")
+            task_status = self._task_status(row)
             values = [
                 row.get("name") or f"候选人 #{row.get('candidate_id')}",
                 rating or "-",
-                row.get("persona") or row.get("error") or "-",
-                "完成" if row.get("status") == "completed" else "失败",
+                self._display_task_status(task_status, row),
+                self._retry_summary(row),
+                self._task_last_time(row),
+                self._result_detail(row),
             ]
             for column, value in enumerate(values):
-                self.result_table.setItem(row_index, column, QTableWidgetItem(str(value)))
+                item = QTableWidgetItem(str(value))
+                if column == 0 and row.get("task_id") is not None:
+                    item.setData(Qt.UserRole, int(row["task_id"]))
+                self.result_table.setItem(row_index, column, item)
         self.result_table.resizeColumnsToContents()
-        self.result_table.setColumnWidth(2, 680)
-        summary = " / ".join(f"{key}:{value}" for key, value in counts.items())
-        self.summary_label.setText(f"{summary} / 失败:{failures}")
+        self.result_table.setColumnWidth(4, 180)
+        self.result_table.setColumnWidth(5, 720)
+        rating_summary = " / ".join(f"{key}:{value}" for key, value in counts.items())
+        task_summary = " / ".join(
+            f"{key}:{value}"
+            for key, value in task_counts.items()
+            if value or key in {"pending", "running", "retrying", "failed"}
+        )
+        visible_summary = ""
+        if status_filter:
+            visible_summary = f" / 显示 {len(rows)}/{len(self._result_rows)}"
+        self.summary_label.setText(f"{rating_summary} / {task_summary}{visible_summary}")
+
+    def show_efficiency_summary(self, summary: dict[str, int]) -> None:
+        total = int(summary.get("total", 0))
+        if total <= 0:
+            self.efficiency_label.setText("效率摘要：暂无")
+            return
+        avoided = int(summary.get("avoided_by_rules", 0))
+        recovered = int(summary.get("recovered_results", 0))
+        legacy = int(summary.get("legacy_results", 0))
+        unknown = int(summary.get("unknown_successes", 0))
+        parts = [
+            f"总任务 {total}",
+            f"进 AI {summary.get('ai_routed', 0)}",
+            f"规则节省 {avoided} ({self._percent(avoided, total)})",
+            f"人工确认 {summary.get('manual_check', 0)}",
+            f"暂缓 {summary.get('hold', 0)}",
+            f"模型调用 {summary.get('model_calls', 0)}",
+            f"缓存复用 {summary.get('cached_reuses', 0)}",
+        ]
+        if recovered:
+            parts.append(f"恢复已有 {recovered}")
+        if legacy:
+            parts.append(f"旧数据 {legacy}")
+        if unknown:
+            parts.append(f"来源未知 {unknown}")
+        parts.extend(
+            [
+                f"失败 {summary.get('failed', 0)}",
+                f"待处理 {summary.get('unfinished', 0)}",
+                f"重试 {summary.get('retry_attempts', 0)}",
+            ]
+        )
+        self.efficiency_label.setText("效率摘要：" + " / ".join(parts))
+
+    @staticmethod
+    def _result_detail(row: dict[str, object]) -> str:
+        persona = row.get("persona") or row.get("error") or row.get("task_error") or row.get("route_reason")
+        parts = [str(persona)] if persona else []
+        confidence = str(row.get("confidence") or "")
+        if confidence:
+            parts.append(f"confidence={confidence}")
+        action = str(row.get("recommended_action") or "")
+        if action:
+            parts.append(f"action={action}")
+        route_summary = AIScreenPage._route_detail(row)
+        if route_summary:
+            parts.append(route_summary)
+        return " | ".join(parts) if parts else "-"
+
+    @staticmethod
+    def _task_status(row: dict[str, object]) -> str:
+        task_status = str(row.get("task_status") or row.get("status") or "")
+        result_status = str(row.get("result_status") or row.get("status") or "")
+        if not task_status and result_status == "failed":
+            return "failed"
+        return task_status
+
+    @staticmethod
+    def _retry_summary(row: dict[str, object]) -> str:
+        retry_count = row.get("retry_count")
+        max_retry_count = row.get("max_retry_count")
+        if retry_count is None and max_retry_count is None:
+            return "-"
+        return f"{retry_count if retry_count is not None else 0}/{max_retry_count if max_retry_count is not None else 0}"
+
+    @staticmethod
+    def _task_last_time(row: dict[str, object]) -> str:
+        for key in [
+            "task_updated_at",
+            "task_finished_at",
+            "task_started_at",
+            "result_created_at",
+            "task_created_at",
+        ]:
+            value = row.get(key)
+            if value:
+                return str(value)
+        return "-"
+
+    @staticmethod
+    def _route_detail(row: dict[str, object]) -> str:
+        reason = str(row.get("route_reason") or "")
+        details_text = str(row.get("route_details_json") or "")
+        if not reason and not details_text:
+            return ""
+        labels = {
+            "no_meaningful_candidate_text": "资料过少",
+            "insufficient_candidate_evidence": "证据不足",
+            "missing_role_city": "缺少岗位城市信息",
+            "role_city_mismatch": "城市不匹配",
+            "missing_role_years": "缺少年限信息",
+            "role_years_below_minimum": "年限低于要求",
+            "missing_role_keywords": "岗位关键词缺失",
+            "sufficient_candidate_evidence": "资料足够",
+        }
+        parts = [f"rule={labels.get(reason, reason)}"] if reason else []
+        try:
+            details = json.loads(details_text) if details_text else {}
+        except json.JSONDecodeError:
+            details = {}
+        if isinstance(details, dict):
+            role = details.get("role_requirements")
+            if isinstance(role, dict):
+                min_years = role.get("min_years")
+                cities = role.get("city_terms") or []
+                required = role.get("required_terms") or []
+                if min_years is not None:
+                    parts.append(f"role_min_years={min_years}")
+                if cities:
+                    parts.append("role_city=" + ",".join(str(item) for item in cities))
+                if required:
+                    parts.append("role_keywords=" + ",".join(str(item) for item in required))
+            if details.get("candidate_years") is not None:
+                parts.append(f"candidate_years={details.get('candidate_years')}")
+            candidate_cities = details.get("candidate_cities") or []
+            if candidate_cities:
+                parts.append("candidate_city=" + ",".join(str(item) for item in candidate_cities))
+            missing = details.get("missing_required_terms") or []
+            if missing:
+                parts.append("missing=" + ",".join(str(item) for item in missing))
+        return " / ".join(parts)
+
+    @staticmethod
+    def _display_task_status(status: str, row: dict[str, object]) -> str:
+        labels = {
+            "pending": "待处理",
+            "running": "处理中",
+            "retrying": "等待重试",
+            "success": "完成",
+            "failed": "失败",
+            "manual_check": "人工确认",
+            "hold": "暂缓",
+            "completed": "完成",
+        }
+        label = labels.get(status, status or "-")
+        if status in {"retrying", "failed"}:
+            retry_count = row.get("retry_count")
+            max_retry_count = row.get("max_retry_count")
+            if retry_count is not None and max_retry_count is not None:
+                label = f"{label} ({retry_count}/{max_retry_count})"
+        return label
 
     def set_running(self, running: bool, total: int = 0) -> None:
         self.start_button.setEnabled(not running)
@@ -454,3 +662,31 @@ class AIScreenPage(QWidget):
         run_id = self.run_combo.currentData()
         if run_id is not None:
             self.run_selected.emit(int(run_id))
+
+    def _emit_resume_run(self) -> None:
+        run_id = self.run_combo.currentData()
+        if run_id is not None:
+            self.resume_run_requested.emit(int(run_id))
+
+    def selected_task_id(self) -> int | None:
+        row = self.result_table.currentRow()
+        if row < 0:
+            return None
+        item = self.result_table.item(row, 0)
+        if item is None:
+            return None
+        task_id = item.data(Qt.UserRole)
+        return int(task_id) if task_id is not None else None
+
+    def _emit_retry_task(self) -> None:
+        task_id = self.selected_task_id()
+        if task_id is None:
+            QMessageBox.information(self, "未选择任务", "请先在结果表中选择一条失败任务。")
+            return
+        self.retry_task_requested.emit(task_id)
+
+    @staticmethod
+    def _percent(value: int, total: int) -> str:
+        if total <= 0:
+            return "0%"
+        return f"{value / total:.0%}"

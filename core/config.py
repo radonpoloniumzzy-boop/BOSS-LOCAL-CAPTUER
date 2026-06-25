@@ -1,12 +1,96 @@
 from __future__ import annotations
 
 import json
+import secrets
 from dataclasses import fields
 from pathlib import Path
 from typing import Any
 
 from core.models import AIProviderConfig, AppConfig, AutomationFlowConfig
 from core.utils import deep_merge, ensure_directory, get_app_root, json_dumps
+
+
+LEGACY_CSV_COLUMNS = [
+    "name",
+    "active_status",
+    "expected_salary",
+    "work_experience_text",
+    "education_text",
+    "tags_text",
+    "summary_text",
+    "raw_card_text",
+    "job_title",
+    "source_url",
+    "capture_time",
+    "detail_url",
+    "candidate_key",
+]
+
+REVIEW_CSV_COLUMNS_V1 = [
+    "name",
+    "city",
+    "years_experience",
+    "job_family",
+    "job_track",
+    "role_title",
+    "latest_rating",
+    "latest_confidence",
+    "match_status",
+    "recruitment_status",
+    "human_decision",
+    "active_status",
+    "expected_salary",
+    "work_experience_text",
+    "education_text",
+    "tags_text",
+    "summary_text",
+    "industry_tags_json",
+    "skill_tags_json",
+    "profile_completeness",
+    "last_active_at",
+    "raw_card_text",
+    "job_title",
+    "source_url",
+    "capture_time",
+    "detail_url",
+    "candidate_key",
+]
+
+REVIEW_CSV_COLUMNS_V2 = [
+    "name",
+    "city",
+    "years_experience",
+    "job_family",
+    "job_track",
+    "role_title",
+    "latest_rating",
+    "latest_confidence",
+    "match_status",
+    "recruitment_status",
+    "latest_status_changed_at",
+    "latest_status_from",
+    "latest_status_to",
+    "latest_reason_code",
+    "latest_status_note",
+    "latest_status_operator",
+    "human_decision",
+    "active_status",
+    "expected_salary",
+    "work_experience_text",
+    "education_text",
+    "tags_text",
+    "summary_text",
+    "industry_tags_json",
+    "skill_tags_json",
+    "profile_completeness",
+    "last_active_at",
+    "raw_card_text",
+    "job_title",
+    "source_url",
+    "capture_time",
+    "detail_url",
+    "candidate_key",
+]
 
 
 class ConfigService:
@@ -27,6 +111,7 @@ class ConfigService:
             user_data_dir=str(self.default_user_data_dir),
             default_export_dir=str(self.default_export_dir),
             selectors_path=str(self.default_selectors_path),
+            local_api_token=self._new_local_api_token(),
         )
 
     def ensure_runtime_paths(self, config: AppConfig | None = None) -> AppConfig:
@@ -49,6 +134,8 @@ class ConfigService:
             merged = deep_merge(defaults.to_dict(), raw)
             config = self._build_config(merged)
             self.ensure_runtime_paths(config)
+            if not raw.get("local_api_token") or config.csv_columns != raw.get("csv_columns"):
+                self.save(config)
             return config
         except Exception as exc:
             self._log("exception", "Failed to load config from %s: %s", self.config_path, exc)
@@ -76,12 +163,15 @@ class ConfigService:
         csv_columns = clean.get("csv_columns", defaults.csv_columns)
         if not isinstance(csv_columns, list) or not all(isinstance(value, str) for value in csv_columns):
             csv_columns = list(defaults.csv_columns)
+        elif csv_columns in (LEGACY_CSV_COLUMNS, REVIEW_CSV_COLUMNS_V1, REVIEW_CSV_COLUMNS_V2):
+            csv_columns = list(defaults.csv_columns)
         clean["csv_columns"] = csv_columns
         clean["scroll_step"] = int(clean.get("scroll_step", defaults.scroll_step))
         clean["scroll_wait_seconds"] = float(clean.get("scroll_wait_seconds", defaults.scroll_wait_seconds))
         clean["max_scroll_count"] = int(clean.get("max_scroll_count", defaults.max_scroll_count))
         clean["no_new_stop_rounds"] = int(clean.get("no_new_stop_rounds", defaults.no_new_stop_rounds))
         clean["local_api_port"] = int(clean.get("local_api_port", defaults.local_api_port))
+        clean["local_api_token"] = str(clean.get("local_api_token") or defaults.local_api_token)
         clean["ai_provider"] = AIProviderConfig(**ai_provider)
         automation_keys = {field.name for field in fields(AutomationFlowConfig)}
         automation_clean = {
@@ -97,6 +187,10 @@ class ConfigService:
         )
         clean["automation_flow"] = AutomationFlowConfig(**automation_clean)
         return AppConfig(**clean)
+
+    @staticmethod
+    def _new_local_api_token() -> str:
+        return secrets.token_urlsafe(24)
 
     def _log(self, level: str, message: str, *args) -> None:
         if not self.logger:

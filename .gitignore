@@ -1,5 +1,6 @@
 __pycache__/
 *.pyc
+.venv/
 .pytest_cache/
 build/
 dist/
@@ -8,4 +9,5 @@ data/*.db
 data/config.json
 data/browser_profile/
 data/exports/
-
+*.crx
+*.pem

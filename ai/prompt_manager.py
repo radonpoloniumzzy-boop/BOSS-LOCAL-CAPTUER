@@ -12,7 +12,14 @@ OUTPUT_PROTOCOL = """
 只输出一个 JSON 对象，不要输出 Markdown 或解释：
 {
   "rating": "UR/SSR/SR/R/N 之一",
-  "persona": "一句客观人物画像，说明背景、最关键的岗位相关证据和仍需验证的核心缺口"
+  "persona": "一句客观人物画像，说明背景、最关键的岗位相关证据和仍需验证的核心缺口",
+  "confidence": "high/medium/low 之一；信息不足或证据冲突时用 low",
+  "evidence": [
+    {"item": "岗位要求或能力点", "evidence": "候选人资料中的具体证据"}
+  ],
+  "gaps": ["仍缺失或需要面试验证的信息"],
+  "risks": ["可复核的岗位相关风险；没有则返回空数组"],
+  "recommended_action": "priority_outreach/normal_review/manual_check/hold 之一"
 }
 
 人物画像要求：

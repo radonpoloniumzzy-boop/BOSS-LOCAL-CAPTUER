@@ -346,14 +346,19 @@ function testAutoScrollCanBePausedFromPopup() {
 function testAutomationAutoButtonStartsDesktopWorkflow() {
   const popup = fs.readFileSync(path.join(EXTENSION_DIR, "popup.js"), "utf8");
   const html = fs.readFileSync(path.join(EXTENSION_DIR, "popup.html"), "utf8");
+  const contentScript = fs.readFileSync(path.join(EXTENSION_DIR, "content_script.js"), "utf8");
   const manifest = JSON.parse(fs.readFileSync(path.join(EXTENSION_DIR, "manifest.json"), "utf8"));
   assert(html.includes('id="automationAuto"'));
   assert(html.includes("滚动采集 + AI 初筛"));
   assert(popup.includes("async function runAutomation"));
   assert(popup.includes("/api/automation/start"));
+  assert(popup.includes("apiToken"));
+  assert(popup.includes("X-Boss-Local-Token"));
+  assert(contentScript.includes("X-Boss-Local-Token"));
+  assert(html.includes('id="apiToken"'));
   assert(popup.includes("automation_requested"));
   assert(popup.includes("AUTO 采集完成，已提交 AI 初筛"));
-  assert.strictEqual(manifest.version, "0.3.27");
+  assert.strictEqual(manifest.version, "0.3.28");
 }
 
 function testScrollWaitDefaultsToThirtyMillisecondsAndHasAdjusters() {

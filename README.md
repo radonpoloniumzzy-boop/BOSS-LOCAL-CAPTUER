@@ -58,7 +58,7 @@ First launch creates:
 ## Collection Workflow
 
 1. Start the desktop app and keep it running.
-2. Open `Settings` and confirm the local API port, default export path, and target URL.
+2. Open `Settings` and confirm the local API port, local API token, default export path, and target URL.
 3. Load the unpacked extension from `extension/` in Chrome.
 4. Open Boss or Liepin in a normal Chrome window and log in manually.
 5. Go to the recommended talent page, such as Boss recommended talent or `https://lpt.liepin.com/recommend`.
@@ -76,7 +76,7 @@ First launch creates:
 4. Select:
 
 ```text
-C:\Users\lzyd_\Documents\Codex\boss_local_tool\extension
+D:\codex\BOSS-LOCAL-CAPTURE-review\extension
 ```
 
 5. Pin the extension if you want easier access.
@@ -85,6 +85,7 @@ The extension popup lets you set:
 
 - job title
 - local API base, default `http://127.0.0.1:17863`
+- local API token copied from the desktop app `Settings` page
 - scroll mode
 - scroll step
 - wait milliseconds
@@ -133,6 +134,8 @@ The desktop app starts a local HTTP server for the extension:
 
 - `GET /health`
 - `POST /api/import/cards`
+- `GET /api/automation/status`
+- `POST /api/automation/start`
 
 Default endpoint:
 
@@ -141,6 +144,7 @@ http://127.0.0.1:17863
 ```
 
 If you change the port in `Settings`, update the extension popup too.
+All `/api/*` endpoints require the `X-Boss-Local-Token` header. Copy the token from the desktop app `Settings` page into the extension popup.
 
 ## Project Structure
 

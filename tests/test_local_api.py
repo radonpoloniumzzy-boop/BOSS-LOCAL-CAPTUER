@@ -15,13 +15,14 @@ from storage.repository import CandidateRepository
 
 class LocalApiServerTest(unittest.TestCase):
     def setUp(self) -> None:
+        self.token = "test-local-token"
         self.temp_dir = tempfile.TemporaryDirectory()
         db_path = Path(self.temp_dir.name) / "test.db"
         self.db = DatabaseManager(db_path)
         self.db.initialize()
         self.repository = CandidateRepository(self.db)
         self.service = CardImportService(self.repository, CandidateParser())
-        self.server = LocalApiServer("127.0.0.1", 0, self.service)
+        self.server = LocalApiServer("127.0.0.1", 0, self.service, auth_token=self.token)
         self.server.start()
 
     def tearDown(self) -> None:
@@ -57,13 +58,49 @@ class LocalApiServerTest(unittest.TestCase):
             "POST",
             "/api/import/cards",
             body=body,
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "X-Boss-Local-Token": self.token,
+            },
         )
         response = connection.getresponse()
         payload = json.loads(response.read().decode("utf-8"))
         self.assertEqual(response.status, 200)
         self.assertTrue(payload["ok"])
         self.assertEqual(len(self.repository.list_candidates()), 1)
+
+    def test_import_rejects_missing_token(self) -> None:
+        body = json.dumps({"cards": [{"raw_card_text": "Mallory"}]}).encode("utf-8")
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.port, timeout=5)
+        connection.request(
+            "POST",
+            "/api/import/cards",
+            body=body,
+            headers={"Content-Type": "application/json"},
+        )
+        response = connection.getresponse()
+        payload = json.loads(response.read().decode("utf-8"))
+        self.assertEqual(response.status, 401)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(len(self.repository.list_candidates()), 0)
+
+    def test_options_allows_chrome_private_network_preflight(self) -> None:
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.port, timeout=5)
+        connection.request(
+            "OPTIONS",
+            "/api/import/cards",
+            headers={
+                "Origin": "https://www.zhipin.com",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "content-type,x-boss-local-token",
+                "Access-Control-Request-Private-Network": "true",
+            },
+        )
+        response = connection.getresponse()
+        response.read()
+        self.assertEqual(response.status, 204)
+        self.assertEqual(response.getheader("Access-Control-Allow-Origin"), "*")
+        self.assertEqual(response.getheader("Access-Control-Allow-Private-Network"), "true")
 
     def test_automation_status_and_start_endpoints(self) -> None:
         self.server.get_automation_status = lambda: {
@@ -82,7 +119,11 @@ class LocalApiServerTest(unittest.TestCase):
         }
 
         connection = http.client.HTTPConnection("127.0.0.1", self.server.port, timeout=5)
-        connection.request("GET", "/api/automation/status")
+        connection.request(
+            "GET",
+            "/api/automation/status",
+            headers={"X-Boss-Local-Token": self.token},
+        )
         status_response = connection.getresponse()
         status_payload = json.loads(status_response.read().decode("utf-8"))
         self.assertEqual(status_response.status, 200)
@@ -96,7 +137,10 @@ class LocalApiServerTest(unittest.TestCase):
             "POST",
             "/api/automation/start",
             body=body,
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "X-Boss-Local-Token": self.token,
+            },
         )
         start_response = connection.getresponse()
         start_payload = json.loads(start_response.read().decode("utf-8"))

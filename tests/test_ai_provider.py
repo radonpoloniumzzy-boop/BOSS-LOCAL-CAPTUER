@@ -71,6 +71,8 @@ class AIProviderTest(unittest.TestCase):
         schema = provider.request_payload["text"]["format"]["schema"]
         self.assertTrue(provider.request_payload["text"]["format"]["strict"])
         self.assertEqual(schema["properties"]["persona"]["maxLength"], 240)
+        self.assertIn("confidence", schema["required"])
+        self.assertIn("recommended_action", schema["properties"])
 
     def test_deepseek_uses_json_mode_and_disables_thinking(self) -> None:
         provider = _FakeDeepSeekProvider()
@@ -84,6 +86,27 @@ class AIProviderTest(unittest.TestCase):
     def test_parse_decision_rejects_unknown_rating(self) -> None:
         with self.assertRaises(AIProviderError):
             _parse_decision('{"rating":"A","persona":"invalid"}')
+
+    def test_parse_decision_keeps_structured_fields(self) -> None:
+        decision = _parse_decision(
+            """
+            {
+              "rating": "SSR",
+              "persona": "SaaS sales evidence is explicit.",
+              "confidence": "high",
+              "evidence": [{"item": "SaaS", "evidence": "5 years CRM sales"}],
+              "gaps": ["quota not shown"],
+              "risks": ["recent job change"],
+              "recommended_action": "priority_outreach"
+            }
+            """
+        )
+
+        self.assertEqual(decision.confidence, "high")
+        self.assertEqual(decision.evidence, [{"item": "SaaS", "evidence": "5 years CRM sales"}])
+        self.assertEqual(decision.gaps, ["quota not shown"])
+        self.assertEqual(decision.risks, ["recent job change"])
+        self.assertEqual(decision.recommended_action, "priority_outreach")
 
     def test_join_api_url_does_not_duplicate_endpoint(self) -> None:
         self.assertEqual(

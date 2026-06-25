@@ -23,6 +23,11 @@ class ScreeningDecision:
     rating: str
     persona: str
     raw_response: str = ""
+    confidence: str = ""
+    evidence: list[dict[str, str]] | None = None
+    gaps: list[str] | None = None
+    risks: list[str] | None = None
+    recommended_action: str = ""
 
 
 @dataclass(slots=True)

@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from core.models import CandidateRecord
+from core.models import DEFAULT_CSV_COLUMNS, CandidateRecord, ScreeningProfile, ScreeningResult
 from storage.csv_exporter import CsvExporter
 from storage.db import DatabaseManager
 from storage.export_service import ExportService
@@ -68,8 +68,137 @@ class ExportServiceTest(unittest.TestCase):
         self.assertEqual(payload["raw_card_text"], "张三 原始文本")
         self.assertEqual(payload["batch_id"], batch.id)
 
+    def test_default_csv_export_includes_reusable_recruitment_fields(self) -> None:
+        batch = self._insert_sample_candidate()
+        candidate = dict(self.repository.list_candidates()[0])
+        profile = self.repository.save_screening_profile(
+            ScreeningProfile(
+                job_title="SaaS Sales",
+                jd_text="B2B SaaS sales",
+                prompt_text="Rate sales candidates",
+            )
+        )
+        run_id = self.repository.create_screening_run(
+            profile_id=int(profile.id),
+            source_job_title="SaaS Sales",
+            batch_id=batch.id,
+            provider="fake",
+            model="fake-model",
+            total_candidates=1,
+        )
+        result_id = self.repository.save_screening_result(
+            ScreeningResult(
+                run_id=run_id,
+                candidate_id=int(candidate["id"]),
+                rating="SSR",
+                persona="Strong SaaS sales evidence.",
+                confidence="high",
+                evidence_json='[{"item":"SaaS","evidence":"5 years"}]',
+                gap_json='["quota not verified"]',
+                risk_json='["frequent job changes"]',
+                recommended_action="priority_outreach",
+            )
+        )
+        self.repository.upsert_candidate_role_match(
+            candidate_id=int(candidate["id"]),
+            role_id=int(profile.id),
+            latest_rating="SSR",
+            latest_confidence="high",
+            match_status="ai_screened",
+            screening_result_id=result_id,
+            human_decision="manual_review_passed",
+            recruitment_status="screened",
+        )
+        self.repository.record_candidate_role_status_change(
+            candidate_id=int(candidate["id"]),
+            role_id=int(profile.id),
+            to_status="screened",
+            operator="tester",
+            reason_code="priority_candidate",
+            note="Good fit for sales outreach.",
+        )
+        export_dir = Path(self.temp_dir.name) / "exports"
+
+        result = self.export_service.export(
+            export_format="csv",
+            mode="batch",
+            export_dir=export_dir,
+            columns=list(DEFAULT_CSV_COLUMNS),
+            batch_id=batch.id,
+            latest_reason_code="priority_candidate",
+            job_title="",
+        )
+
+        with Path(result.file_path).open("r", encoding="utf-8-sig", newline="") as handle:
+            rows = list(csv.DictReader(handle))
+        self.assertEqual(result.row_count, 1)
+        self.assertEqual(rows[0]["name"], "张三")
+        self.assertEqual(rows[0]["role_title"], "SaaS Sales")
+        self.assertEqual(rows[0]["latest_rating"], "SSR")
+        self.assertEqual(rows[0]["latest_confidence"], "high")
+        self.assertEqual(rows[0]["recommended_action"], "priority_outreach")
+        self.assertIn("SaaS", rows[0]["evidence_json"])
+        self.assertIn("quota not verified", rows[0]["gap_json"])
+        self.assertIn("frequent job changes", rows[0]["risk_json"])
+        self.assertEqual(rows[0]["match_status"], "ai_screened")
+        self.assertEqual(rows[0]["recruitment_status"], "screened")
+        self.assertEqual(rows[0]["human_decision"], "manual_review_passed")
+        self.assertEqual(rows[0]["latest_status_to"], "screened")
+        self.assertEqual(rows[0]["latest_reason_code"], "priority_candidate")
+        self.assertEqual(rows[0]["latest_status_note"], "Good fit for sales outreach.")
+        self.assertIn("city", rows[0])
+        self.assertIn("years_experience", rows[0])
+        self.assertIn("job_track", rows[0])
+
     def test_markdown_export_contains_summary_sections(self) -> None:
         batch = self._insert_sample_candidate()
+        candidate = dict(self.repository.list_candidates()[0])
+        profile = self.repository.save_screening_profile(
+            ScreeningProfile(
+                job_title="SaaS Sales",
+                jd_text="B2B SaaS sales",
+                prompt_text="Rate sales candidates",
+            )
+        )
+        run_id = self.repository.create_screening_run(
+            profile_id=int(profile.id),
+            source_job_title="SaaS Sales",
+            batch_id=batch.id,
+            provider="fake",
+            model="fake-model",
+            total_candidates=1,
+        )
+        result_id = self.repository.save_screening_result(
+            ScreeningResult(
+                run_id=run_id,
+                candidate_id=int(candidate["id"]),
+                rating="SSR",
+                persona="Strong SaaS sales evidence.",
+                confidence="high",
+                evidence_json='[{"item":"SaaS","evidence":"5 years"}]',
+                gap_json='["quota not verified"]',
+                risk_json='[]',
+                recommended_action="priority_outreach",
+            )
+        )
+        self.repository.upsert_candidate_role_match(
+            candidate_id=int(candidate["id"]),
+            role_id=int(profile.id),
+            latest_rating="SSR",
+            latest_confidence="high",
+            match_status="ai_screened",
+            screening_result_id=result_id,
+            human_decision="manual_review_passed",
+            recruitment_status="screened",
+        )
+        self.repository.record_candidate_role_status_change(
+            candidate_id=int(candidate["id"]),
+            role_id=int(profile.id),
+            to_status="screened",
+            operator="tester",
+            reason_code="priority_candidate",
+            note="Good fit for sales outreach.",
+        )
         export_dir = Path(self.temp_dir.name) / "exports"
 
         result = self.export_service.export(
@@ -85,6 +214,17 @@ class ExportServiceTest(unittest.TestCase):
         content = Path(result.file_path).read_text(encoding="utf-8")
         self.assertIn("# 候选人导出摘要", content)
         self.assertIn("## 1. 张三", content)
+        self.assertIn("- AI匹配岗位：SaaS Sales", content)
+        self.assertIn("- AI评级：SSR", content)
+        self.assertIn("- AI置信度：high", content)
+        self.assertIn("- AI建议：priority_outreach", content)
+        self.assertIn("SaaS", content)
+        self.assertIn("quota not verified", content)
+        self.assertIn("- 招聘阶段：screened", content)
+        self.assertIn("- 人工复核：manual_review_passed", content)
+        self.assertIn("- 最近原因：priority_candidate", content)
+        self.assertIn("- 最近备注：Good fit for sales outreach.", content)
+        self.assertIn("- 岗位方向：", content)
         self.assertIn("### 原始卡片文本", content)
         self.assertIn("张三 原始文本", content)
 

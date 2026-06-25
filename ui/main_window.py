@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 from PySide6.QtCore import QObject, Qt, QThread, Signal
@@ -74,6 +75,8 @@ class MainWindow(QMainWindow):
             self.database,
             logger=self.logging_service.get_logger("storage.repository"),
         )
+        self._refreshed_candidate_profiles = self.repository.refresh_outdated_candidate_profiles()
+        self._recovered_screening_tasks = self.repository.recover_interrupted_screening_tasks()
         self.export_service = ExportService(
             self.repository,
             logger=self.logging_service.get_logger("storage.export"),
@@ -106,6 +109,22 @@ class MainWindow(QMainWindow):
         self.refresh_dashboard_stats()
         self.refresh_automation_flow()
         self.dashboard_page.set_running(False)
+        if self._refreshed_candidate_profiles:
+            self.statusBar().showMessage(
+                f"Refreshed {self._refreshed_candidate_profiles} outdated candidate profiles."
+            )
+            self.logger.info(
+                "Refreshed %s outdated candidate profiles",
+                self._refreshed_candidate_profiles,
+            )
+        if self._recovered_screening_tasks:
+            self.statusBar().showMessage(
+                f"Recovered {self._recovered_screening_tasks} interrupted AI screening tasks."
+            )
+            self.logger.warning(
+                "Recovered %s interrupted AI screening tasks",
+                self._recovered_screening_tasks,
+            )
         self.logger.info("Application started")
 
     def _build_ui(self) -> None:
@@ -218,10 +237,15 @@ class MainWindow(QMainWindow):
         self.dashboard_page.start_capture_requested.connect(self._start_capture_from_dashboard)
         self.dashboard_page.stop_requested.connect(self.handle_stop_capture)
         self.dashboard_page.export_requested.connect(self.handle_export_latest_batch)
+        self.dashboard_page.funnel_refresh_requested.connect(self.refresh_dashboard_stats)
 
         self.candidates_page.refresh_requested.connect(self.refresh_candidates)
         self.candidates_page.export_requested.connect(self._export_candidates_view)
         self.candidates_page.candidate_selected.connect(self._load_candidate_detail)
+        self.candidates_page.status_change_requested.connect(self._record_recruitment_status_change)
+
+        self.review_page.refresh_requested.connect(self.refresh_review_queue)
+        self.review_page.status_change_requested.connect(self._record_recruitment_status_change)
 
         self.ai_page.profile_selected.connect(self._load_screening_profile)
         self.ai_page.save_profile_requested.connect(self._save_screening_profile)
@@ -230,6 +254,8 @@ class MainWindow(QMainWindow):
         self.ai_page.stop_requested.connect(self._stop_ai_screening)
         self.ai_page.test_connection_requested.connect(self._test_ai_connection)
         self.ai_page.run_selected.connect(self._load_screening_results)
+        self.ai_page.resume_run_requested.connect(self._resume_ai_screening_run)
+        self.ai_page.retry_task_requested.connect(self._retry_ai_screening_task)
 
         self.automation_flow_page.save_requested.connect(self._save_automation_flow)
         self.automation_flow_page.arm_requested.connect(self._arm_automation_flow)
@@ -263,6 +289,7 @@ class MainWindow(QMainWindow):
             on_error=self.import_bridge.error.emit,
             get_automation_status=self._automation_status_payload,
             start_automation=self._start_automation_from_extension,
+            auth_token=self.config.local_api_token,
         )
         try:
             self.local_api_server.start()
@@ -349,6 +376,16 @@ class MainWindow(QMainWindow):
             "keyword": payload.get("keyword") or "",
             "job_title": payload.get("job_title") or "",
             "batch_id": payload.get("batch_id"),
+            "city": payload.get("city") or "",
+            "years_min": payload.get("years_min") or "",
+            "years_max": payload.get("years_max") or "",
+            "profile_tag": payload.get("profile_tag") or "",
+            "last_active_days": payload.get("last_active_days") or "",
+            "match_role_id": payload.get("match_role_id"),
+            "minimum_rating": payload.get("minimum_rating") or "",
+            "match_status": payload.get("match_status") or "",
+            "recruitment_status": payload.get("recruitment_status") or "",
+            "latest_reason_code": payload.get("latest_reason_code") or "",
             "export_format": payload.get("export_format") or "csv",
         }
         self._start_export(export_payload)
@@ -360,6 +397,16 @@ class MainWindow(QMainWindow):
             "batch_id": payload.get("batch_id"),
             "keyword": payload.get("keyword", ""),
             "job_title": payload.get("job_title", ""),
+            "city": payload.get("city", ""),
+            "years_min": payload.get("years_min", ""),
+            "years_max": payload.get("years_max", ""),
+            "profile_tag": payload.get("profile_tag", ""),
+            "last_active_days": payload.get("last_active_days", ""),
+            "match_role_id": payload.get("match_role_id"),
+            "minimum_rating": payload.get("minimum_rating", ""),
+            "match_status": payload.get("match_status", ""),
+            "recruitment_status": payload.get("recruitment_status", ""),
+            "latest_reason_code": payload.get("latest_reason_code", ""),
             "export_dir": self.config.default_export_dir,
             "columns": list(self.config.csv_columns),
         }
@@ -379,11 +426,48 @@ class MainWindow(QMainWindow):
 
     def refresh_candidates(self) -> None:
         filters = self.candidates_page.current_filters()
-        rows = [dict(row) for row in self.repository.list_candidates(**filters)]
+        match_role_id = filters.pop("match_role_id", None)
+        minimum_rating = filters.pop("minimum_rating", "")
+        match_status = filters.pop("match_status", "")
+        recruitment_status = filters.pop("recruitment_status", "")
+        latest_reason_code = filters.pop("latest_reason_code", "")
+        city = str(filters.get("city") or "")
+        years_min = filters.get("years_min")
+        years_max = filters.get("years_max")
+        profile_tag = str(filters.get("profile_tag") or "")
+        last_active_days = filters.get("last_active_days")
+        if match_role_id is not None or minimum_rating or match_status or recruitment_status:
+            rows = [
+                dict(row)
+                for row in self.repository.list_candidate_role_matches(
+                    role_id=int(match_role_id) if match_role_id is not None else None,
+                    match_statuses=[str(match_status)] if match_status else None,
+                    recruitment_statuses=[str(recruitment_status)] if recruitment_status else None,
+                    minimum_rating=str(minimum_rating) if minimum_rating else None,
+                    job_title=str(filters.get("job_title") or ""),
+                    batch_id=filters.get("batch_id"),
+                    city=city,
+                    years_min=years_min,
+                    years_max=years_max,
+                    profile_tag=profile_tag,
+                    last_active_days=last_active_days,
+                    latest_reason_code=str(latest_reason_code) if latest_reason_code else "",
+                    query=str(filters.get("keyword") or ""),
+                )
+            ]
+        else:
+            rows = [
+                dict(row)
+                for row in self.repository.list_candidates(
+                    **filters,
+                    latest_reason_code=str(latest_reason_code) if latest_reason_code else "",
+                )
+            ]
         self.candidates_page.set_candidates(rows)
         self.candidates_page.set_filter_options(
             self.repository.list_job_titles(),
             [dict(batch) for batch in self.repository.list_batches()],
+            [dict(profile) for profile in self.repository.list_screening_profiles()],
         )
         if rows:
             self._load_candidate_detail(int(rows[0]["id"]))
@@ -400,6 +484,102 @@ class MainWindow(QMainWindow):
             self.dashboard_page.set_local_api_status(self.local_api_server.endpoint)
         else:
             self.dashboard_page.set_local_api_status(f"http://127.0.0.1:{self.config.local_api_port}")
+        self.dashboard_page.set_funnel_profiles(
+            [dict(profile) for profile in self.repository.list_screening_profiles()]
+        )
+        funnel_filters = self.dashboard_page.current_funnel_filters()
+        role_id = (
+            int(funnel_filters["role_id"])
+            if funnel_filters.get("role_id") is not None
+            else None
+        )
+        minimum_rating = str(funnel_filters.get("minimum_rating") or "SSR")
+        screened_since = self._funnel_screened_since(funnel_filters)
+        self.dashboard_page.set_funnel_counts(
+            self.repository.get_recruitment_funnel_counts(
+                role_id=role_id,
+                minimum_rating=minimum_rating,
+                screened_since=screened_since,
+            )
+        )
+        self.dashboard_page.set_manual_review_quality_summary(
+            self.repository.get_manual_review_quality_summary(
+                role_id=role_id,
+                minimum_rating=minimum_rating,
+                screened_since=screened_since,
+            )
+        )
+        self.dashboard_page.set_ai_rating_cohort_summary(
+            self.repository.get_ai_rating_cohort_summary(
+                role_id=role_id,
+                minimum_rating=minimum_rating,
+                screened_since=screened_since,
+            ),
+            minimum_rating,
+        )
+        self.dashboard_page.set_rating_conversion_counts(
+            [
+                dict(row)
+                for row in self.repository.get_ai_rating_conversion_counts(
+                    role_id=role_id,
+                    minimum_rating=minimum_rating,
+                    screened_since=screened_since,
+                )
+            ]
+        )
+        detail_status = str(funnel_filters.get("detail_status") or "replied")
+        detail_rating = str(funnel_filters.get("detail_rating") or "")
+        self.dashboard_page.set_funnel_detail_candidates(
+            [
+                dict(row)
+                for row in self.repository.list_recruitment_funnel_candidates(
+                    role_id=role_id,
+                    status=detail_status,
+                    rating=detail_rating or None,
+                    minimum_rating=None if detail_rating else minimum_rating,
+                    screened_since=screened_since,
+                )
+            ]
+        )
+        self.dashboard_page.set_reason_counts(
+            [
+                dict(row)
+                for row in self.repository.get_recruitment_reason_counts(
+                    role_id=role_id,
+                    minimum_rating=minimum_rating,
+                    screened_since=screened_since,
+                )
+            ]
+        )
+
+    @staticmethod
+    def _funnel_screened_since(filters: dict[str, object]) -> str | None:
+        window_days = filters.get("window_days")
+        if window_days is None or window_days == "":
+            return None
+        try:
+            days = int(window_days)
+        except (TypeError, ValueError):
+            return None
+        return (datetime.now() - timedelta(days=days)).isoformat(timespec="seconds")
+
+    def refresh_review_queue(self) -> None:
+        self.review_page.set_profiles(
+            [dict(profile) for profile in self.repository.list_screening_profiles()]
+        )
+        filters = self.review_page.current_filters()
+        rows = [
+            dict(row)
+            for row in self.repository.list_manual_review_candidates(
+                role_id=(
+                    int(filters["role_id"])
+                    if filters.get("role_id") is not None
+                    else None
+                )
+            )
+        ]
+        self.review_page.set_rows(rows)
+        self.statusBar().showMessage(f"人工复核队列已刷新：{len(rows)} 条")
 
     def _save_settings(self, config) -> None:
         config.automation_flow = self.config.automation_flow
@@ -537,6 +717,26 @@ class MainWindow(QMainWindow):
         detail = self.repository.get_candidate_detail(candidate_id)
         self.candidates_page.show_candidate_detail(detail)
 
+    def _record_recruitment_status_change(self, payload: dict[str, object]) -> None:
+        try:
+            candidate_id = int(payload["candidate_id"])
+            self.repository.record_candidate_role_status_change(
+                candidate_id=candidate_id,
+                role_id=int(payload["role_id"]),
+                to_status=str(payload["to_status"]),
+                operator="user",
+                reason_code=str(payload.get("reason_code") or ""),
+                note=str(payload.get("note") or ""),
+            )
+            self._load_candidate_detail(candidate_id)
+            self.refresh_candidates()
+            self.refresh_review_queue()
+            self.refresh_dashboard_stats()
+            self.statusBar().showMessage("招聘进展已记录")
+        except Exception as exc:
+            self.logger.exception("Failed to record recruitment status change: %s", exc)
+            QMessageBox.critical(self, "记录失败", str(exc))
+
     def refresh_ai_screen(self, selected_run_id: int | None = None) -> None:
         profiles = [dict(row) for row in self.repository.list_screening_profiles()]
         runs = [dict(row) for row in self.repository.list_screening_runs()]
@@ -549,6 +749,9 @@ class MainWindow(QMainWindow):
         run_id = selected_run_id or (int(runs[0]["id"]) if runs else None)
         if run_id is not None:
             self._load_screening_results(run_id)
+        else:
+            self.ai_page.show_results([])
+            self.ai_page.show_efficiency_summary({})
 
     def _load_screening_profile(self, profile_id: int) -> None:
         row = self.repository.get_screening_profile(profile_id)
@@ -621,6 +824,67 @@ class MainWindow(QMainWindow):
         worker_payload["candidates"] = candidates
         worker_payload["origin"] = "manual"
         self._launch_ai_screening(worker_payload, origin="manual")
+
+    def _resume_ai_screening_run(self, run_id: int, *, reset_failed: bool = True) -> None:
+        if self._ai_screening_thread is not None:
+            QMessageBox.information(self, "Task running", "An AI screening task is already running.")
+            return
+        run = self.repository.get_screening_run(run_id)
+        if run is None:
+            QMessageBox.warning(self, "Run not found", f"Screening run #{run_id} was not found.")
+            return
+        profile = self.repository.get_screening_profile(int(run["profile_id"]))
+        if profile is None:
+            QMessageBox.warning(self, "Profile missing", "The screening profile for this run no longer exists.")
+            return
+        candidates = self.repository.list_screening_run_candidates(run_id)
+        if not candidates:
+            QMessageBox.information(self, "No tasks", "This run has no persisted screening tasks to resume.")
+            return
+
+        self.repository.recover_interrupted_screening_tasks()
+        counts = self.repository.get_screening_task_counts(run_id)
+        reset_count = 0
+        if reset_failed and counts["failed"] > 0:
+            reset_count = self.repository.reset_failed_screening_tasks(run_id)
+            counts = self.repository.get_screening_task_counts(run_id)
+        unfinished = counts["pending"] + counts["running"] + counts["retrying"]
+        if unfinished == 0:
+            self.ai_page.set_status("Selected screening run has no unfinished or failed tasks.")
+            return
+        if reset_count:
+            self.ai_page.set_status(f"Reset {reset_count} failed tasks for retry.")
+
+        page_provider = self.ai_page.provider_payload()
+        provider = {
+            "provider": str(run["provider"] or page_provider.get("provider") or "openai"),
+            "model": str(run["model"] or page_provider.get("model") or ""),
+            "api_base": str(page_provider.get("api_base") or ""),
+            "api_key": str(page_provider.get("api_key") or ""),
+            "api_key_env": str(page_provider.get("api_key_env") or "OPENAI_API_KEY"),
+        }
+        worker_payload = {
+            "run_id": run_id,
+            "profile": dict(profile),
+            "provider": provider,
+            "source_job_title": str(run["source_job_title"] or ""),
+            "batch_id": run["batch_id"],
+            "candidates": candidates,
+            "origin": "manual",
+        }
+        self._launch_ai_screening(worker_payload, origin="manual")
+
+    def _retry_ai_screening_task(self, task_id: int) -> None:
+        if self._ai_screening_thread is not None:
+            QMessageBox.information(self, "Task running", "An AI screening task is already running.")
+            return
+        run_id = self.repository.reset_failed_screening_task(task_id)
+        if run_id is None:
+            QMessageBox.information(self, "无法重试", "请选择状态为失败的 AI 筛选任务。")
+            return
+        self.ai_page.set_status(f"已重置任务 #{task_id}，准备继续筛选。")
+        self.refresh_ai_screen(selected_run_id=run_id)
+        self._resume_ai_screening_run(run_id, reset_failed=False)
 
     def _launch_ai_screening(self, worker_payload: dict[str, object], origin: str) -> None:
         candidates = list(worker_payload["candidates"])
@@ -797,8 +1061,11 @@ class MainWindow(QMainWindow):
         self._ai_test_threads = [item for item in self._ai_test_threads if item[0] is not thread]
 
     def _load_screening_results(self, run_id: int) -> None:
-        rows = [dict(row) for row in self.repository.list_screening_results(run_id)]
+        rows = [dict(row) for row in self.repository.list_screening_task_results(run_id)]
         self.ai_page.show_results(rows)
+        self.ai_page.show_efficiency_summary(
+            self.repository.get_screening_efficiency_summary(run_id)
+        )
 
     def _load_automation_results(self, run_id: int) -> None:
         rows = [dict(row) for row in self.repository.list_screening_results(run_id)]
@@ -876,6 +1143,8 @@ class MainWindow(QMainWindow):
             self.refresh_candidates()
         elif page is self.ai_page:
             self.refresh_ai_screen()
+        elif page is self.review_page:
+            self.refresh_review_queue()
 
     def _append_log_line(self, message: str) -> None:
         self.log_view.appendPlainText(message)
