@@ -29,6 +29,20 @@ class ProviderSettings:
     timeout_seconds: int = 90
 
 
+def validate_provider_settings(settings: ProviderSettings) -> None:
+    provider = normalize_text(settings.provider).lower()
+    if provider not in {"openai", "deepseek", "custom"}:
+        raise AIProviderError(f"不支持的 AI 服务商：{settings.provider}")
+    if not normalize_text(settings.model):
+        raise AIProviderError("请填写 AI 模型名称。")
+    if provider == "custom" and not normalize_text(settings.api_base):
+        raise AIProviderError("自定义兼容服务必须填写 API Base。")
+    if _resolve_api_key(settings):
+        return
+    env_name = normalize_text(settings.api_key_env) or "-"
+    raise AIProviderError(f"未填写 API Key，且环境变量 {env_name} 中也未找到密钥。")
+
+
 class AIProvider:
     def __init__(self, settings: ProviderSettings, logger=None) -> None:
         self.settings = settings
@@ -44,9 +58,10 @@ class AIProvider:
         )
 
     def _api_key(self) -> str:
-        value = self.settings.api_key.strip() or os.getenv(self.settings.api_key_env, "").strip()
+        value = _resolve_api_key(self.settings)
         if not value:
-            raise AIProviderError("未填写 API Key，且环境变量中也未找到密钥。")
+            env_name = normalize_text(self.settings.api_key_env) or "-"
+            raise AIProviderError(f"未填写 API Key，且环境变量 {env_name} 中也未找到密钥。")
         return value
 
     def _post_json(self, url: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -130,6 +145,11 @@ def create_provider(settings: ProviderSettings, logger=None) -> AIProvider:
     if provider in {"deepseek", "custom"}:
         return OpenAICompatibleProvider(settings, logger=logger)
     raise AIProviderError(f"不支持的 AI 服务商：{settings.provider}")
+
+
+def _resolve_api_key(settings: ProviderSettings) -> str:
+    env_name = normalize_text(settings.api_key_env)
+    return settings.api_key.strip() or (os.getenv(env_name, "").strip() if env_name else "")
 
 
 def _screening_json_schema() -> dict[str, Any]:

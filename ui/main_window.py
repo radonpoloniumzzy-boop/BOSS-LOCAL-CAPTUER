@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 from automation.importer import CardImportService
 from automation.parser import CandidateParser
 from ai.prompt_manager import PromptManager
+from ai.provider import AIProviderError, ProviderSettings, validate_provider_settings
 from core.config import ConfigService
 from core.local_api import LocalApiServer
 from core.logger import LoggingService
@@ -887,6 +888,17 @@ class MainWindow(QMainWindow):
         self._resume_ai_screening_run(run_id, reset_failed=False)
 
     def _launch_ai_screening(self, worker_payload: dict[str, object], origin: str) -> None:
+        provider_error = self._validate_ai_provider_payload(dict(worker_payload.get("provider") or {}))
+        if provider_error:
+            if origin == "automation":
+                self.automation_flow_page.set_running(False)
+                self.automation_flow_page.set_status(f"AI 配置不完整：{provider_error}")
+            else:
+                self.ai_page.set_running(False)
+                self.ai_page.set_status(f"AI 配置不完整：{provider_error}")
+                QMessageBox.warning(self, "AI 配置不完整", provider_error)
+            self.statusBar().showMessage("AI 配置不完整")
+            return
         candidates = list(worker_payload["candidates"])
         thread = QThread(self)
         worker = AIScreeningWorker(
@@ -918,6 +930,21 @@ class MainWindow(QMainWindow):
             self.ai_page.set_status(f"准备筛选 {len(candidates)} 位候选人...")
             self.statusBar().showMessage("AI 初筛已启动")
         thread.start()
+
+    def _validate_ai_provider_payload(self, provider_payload: dict[str, object]) -> str:
+        try:
+            validate_provider_settings(
+                ProviderSettings(
+                    provider=str(provider_payload.get("provider") or "openai"),
+                    model=str(provider_payload.get("model") or ""),
+                    api_base=str(provider_payload.get("api_base") or ""),
+                    api_key=str(provider_payload.get("api_key") or ""),
+                    api_key_env=str(provider_payload.get("api_key_env") or "OPENAI_API_KEY"),
+                )
+            )
+        except AIProviderError as exc:
+            return str(exc)
+        return ""
 
     def _queue_automation_screening(self, capture_result: dict[str, object]) -> None:
         with self._automation_config_lock:

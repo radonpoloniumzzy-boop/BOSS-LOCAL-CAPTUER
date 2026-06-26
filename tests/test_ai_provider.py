@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from ai.provider import (
     AIProviderError,
@@ -9,6 +10,7 @@ from ai.provider import (
     ProviderSettings,
     _join_api_url,
     _parse_decision,
+    validate_provider_settings,
 )
 
 
@@ -113,6 +115,29 @@ class AIProviderTest(unittest.TestCase):
             _join_api_url("https://example.com/v1/responses", "responses"),
             "https://example.com/v1/responses",
         )
+
+    def test_validate_provider_settings_requires_api_key_before_batch_run(self) -> None:
+        with patch.dict("os.environ", {}, clear=True):
+            with self.assertRaisesRegex(AIProviderError, "OPENAI_API_KEY"):
+                validate_provider_settings(
+                    ProviderSettings(
+                        provider="openai",
+                        model="gpt-5.4-mini",
+                        api_base="https://api.openai.com/v1",
+                        api_key_env="OPENAI_API_KEY",
+                    )
+                )
+
+    def test_validate_provider_settings_accepts_environment_api_key(self) -> None:
+        with patch.dict("os.environ", {"DEEPSEEK_API_KEY": "test-key"}, clear=True):
+            validate_provider_settings(
+                ProviderSettings(
+                    provider="deepseek",
+                    model="deepseek-v4-flash",
+                    api_base="https://api.deepseek.com",
+                    api_key_env="DEEPSEEK_API_KEY",
+                )
+            )
 
 
 if __name__ == "__main__":
