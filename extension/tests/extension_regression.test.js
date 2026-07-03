@@ -358,7 +358,7 @@ function testAutomationAutoButtonStartsDesktopWorkflow() {
   assert(html.includes('id="apiToken"'));
   assert(popup.includes("automation_requested"));
   assert(popup.includes("AUTO 采集完成，已提交 AI 初筛"));
-  assert.strictEqual(manifest.version, "0.3.29");
+  assert.strictEqual(manifest.version, "0.3.30");
 }
 
 function testChatAutomationIsOptIn() {
@@ -389,6 +389,23 @@ function testScrollWaitDefaultsToThirtyMillisecondsAndHasAdjusters() {
   assert(html.includes('id="scrollWaitUp"'));
   assert(html.includes('value="30"'));
   assert(html.includes('step="30"'));
+}
+
+function testHoldEndScrollStrategyIsDefault() {
+  const collector = fs.readFileSync(path.join(EXTENSION_DIR, "collector.js"), "utf8");
+  const popup = fs.readFileSync(path.join(EXTENSION_DIR, "popup.js"), "utf8");
+  const html = fs.readFileSync(path.join(EXTENSION_DIR, "popup.html"), "utf8");
+  assert(popup.includes('scrollMode: "hold_end"'));
+  assert(popup.includes("scrollModeDefaultVersion"));
+  assert(html.includes('value="hold_end"'));
+  assert(html.includes("长按 End 键到底"));
+  assert(html.includes('value="end"'));
+  assert(collector.includes("async function holdEndScroll"));
+  assert(collector.includes("dispatchEndKeyDown(target, false)"));
+  assert(collector.includes("dispatchEndKeyDown(target, true)"));
+  assert(collector.includes("dispatchEndKeyUp(target)"));
+  assert(collector.includes("bottom-reached"));
+  assert(collector.includes("paused-by-user"));
 }
 
 function testRuntimeFingerprintAndVersionAwareRunnerInjection() {
@@ -427,6 +444,7 @@ async function main() {
   testAutomationAutoButtonStartsDesktopWorkflow();
   testChatAutomationIsOptIn();
   testScrollWaitDefaultsToThirtyMillisecondsAndHasAdjusters();
+  testHoldEndScrollStrategyIsDefault();
   testRuntimeFingerprintAndVersionAwareRunnerInjection();
   console.log("extension regression tests passed");
 }

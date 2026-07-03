@@ -118,6 +118,9 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
       },
     },
   ];
+  const HOLD_END_TICK_MS = 120;
+  const HOLD_END_STABLE_TICKS = 6;
+  const HOLD_END_MIN_TICKS = 50;
 
   globalThis.__bossLocalCollectorPlatforms = PLATFORM_ADAPTERS.map((platform) => ({
     id: platform.id,
@@ -188,8 +191,7 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
     let stopReason = autoScroll ? "max-rounds" : "current-page-only";
     const maxScrollCount = Math.max(Number(settings.maxScrollCount || 0), 0);
     const noNewStopRounds = Math.max(Number(settings.noNewStopRounds || 0), 1);
-
-    while (true) {
+    const mergeLoadedCards = (countNoNewRound = true) => {
       const beforeCount = cardsByKey.size;
       const extracted = extractLoadedCards(platform);
       lastDebug = extracted.debug;
@@ -198,8 +200,17 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
       }
 
       const newCount = cardsByKey.size - beforeCount;
-      noNewRounds = newCount > 0 ? 0 : noNewRounds + 1;
+      if (countNoNewRound) {
+        noNewRounds = newCount > 0 ? 0 : noNewRounds + 1;
+      } else if (newCount > 0) {
+        noNewRounds = 0;
+      }
       noMoreDetected = noMoreDetected || hasNoMoreText(platform);
+      return newCount;
+    };
+
+    while (true) {
+      mergeLoadedCards(true);
 
       if (!autoScroll) {
         break;
@@ -222,11 +233,19 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
       }
 
       const previousSnapshot = getScrollSnapshot(platform);
-      const scrollResult = performScroll(platform, settings.scrollMode, settings.scrollStep);
-      roundsCompleted += 1;
+      const scrollResult = await performScroll(platform, settings, () => mergeLoadedCards(false));
+      roundsCompleted += Math.max(Number(scrollResult.rounds ?? 1), 0);
       await waitForContentSettled(platform, settings.scrollWaitMs);
+      if (settings.scrollMode === "hold_end") {
+        mergeLoadedCards(false);
+      }
       if (isScrollPauseRequested()) {
         stopReason = "paused-by-user";
+        break;
+      }
+      if (scrollResult.stopReason) {
+        stopReason = scrollResult.stopReason;
+        break;
       }
 
       const currentSnapshot = getScrollSnapshot(platform);
@@ -338,7 +357,9 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
     }
   }
 
-  function performScroll(platform, mode, step) {
+  async function performScroll(platform, settings, onHoldTick) {
+    const mode = String(settings.scrollMode || "end");
+    const step = settings.scrollStep;
     const scrollRoot = getScrollRoot(platform);
     focusScrollTargets(scrollRoot);
     const before = getScrollTop(scrollRoot);
@@ -347,15 +368,18 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
       scrollByAmount(scrollRoot, Number(step || 900));
     } else if (mode === "page") {
       scrollByAmount(scrollRoot, window.innerHeight || Number(step || 900));
+    } else if (mode === "hold_end") {
+      return holdEndScroll(scrollRoot, settings, onHoldTick);
     } else {
       triggerEndScroll(scrollRoot);
     }
 
     const after = getScrollTop(scrollRoot);
-    const atBottom = after + getClientHeight(scrollRoot) >= getScrollHeight(scrollRoot) - 4;
     return {
       moved: after > before + 1,
-      atBottom,
+      atBottom: isAtBottom(scrollRoot),
+      rounds: 1,
+      stopReason: "",
     };
   }
 
@@ -400,16 +424,112 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
     }
   }
 
+  async function holdEndScroll(scrollRoot, settings, onHoldTick) {
+    const before = getScrollTop(scrollRoot);
+    const targets = getEndKeyTargets(scrollRoot);
+    const tickMs = Math.max(Number(settings.scrollWaitMs || 0), HOLD_END_TICK_MS);
+    const maxTicks = Math.max(Math.max(Number(settings.maxScrollCount || 0), 1) * 10, HOLD_END_MIN_TICKS);
+    let lastTop = before;
+    let lastHeight = getScrollHeight(scrollRoot);
+    let stableBottomTicks = 0;
+    let rounds = 0;
+    let moved = false;
+
+    for (const target of targets) {
+      dispatchEndKeyDown(target, false);
+    }
+
+    try {
+      while (rounds < maxTicks) {
+        if (isScrollPauseRequested()) {
+          return { moved, atBottom: isAtBottom(scrollRoot), rounds, stopReason: "paused-by-user" };
+        }
+
+        rounds += 1;
+        for (const target of targets) {
+          dispatchEndKeyDown(target, true);
+        }
+        pushScrollRootToBottom(scrollRoot);
+        await delay(tickMs);
+        if (typeof onHoldTick === "function") {
+          onHoldTick({ rounds, scrollTop: getScrollTop(scrollRoot), scrollHeight: getScrollHeight(scrollRoot) });
+        }
+
+        const currentTop = getScrollTop(scrollRoot);
+        const currentHeight = getScrollHeight(scrollRoot);
+        const atBottom = isAtBottom(scrollRoot);
+        moved = moved || currentTop > before + 1 || currentHeight > lastHeight + 4;
+        if (atBottom && Math.abs(currentHeight - lastHeight) <= 4 && Math.abs(currentTop - lastTop) <= 4) {
+          stableBottomTicks += 1;
+        } else {
+          stableBottomTicks = 0;
+        }
+        lastTop = currentTop;
+        lastHeight = currentHeight;
+
+        if (atBottom && stableBottomTicks >= HOLD_END_STABLE_TICKS) {
+          return { moved, atBottom: true, rounds, stopReason: "bottom-reached" };
+        }
+      }
+      return { moved, atBottom: isAtBottom(scrollRoot), rounds, stopReason: "max-hold-ticks" };
+    } finally {
+      for (const target of targets) {
+        dispatchEndKeyUp(target);
+      }
+    }
+  }
+
+  function pushScrollRootToBottom(scrollRoot) {
+    const height = getScrollHeight(scrollRoot);
+    if (isDocumentScrollRoot(scrollRoot)) {
+      window.scrollTo(0, height);
+      if (document.documentElement) {
+        document.documentElement.scrollTop = height;
+      }
+      if (document.body) {
+        document.body.scrollTop = height;
+      }
+      window.dispatchEvent(new Event("scroll", { bubbles: true }));
+      return;
+    }
+    scrollRoot.scrollTop = height;
+    scrollRoot.dispatchEvent(new Event("scroll", { bubbles: true }));
+  }
+
+  function isAtBottom(scrollRoot) {
+    return getScrollTop(scrollRoot) + getClientHeight(scrollRoot) >= getScrollHeight(scrollRoot) - 4;
+  }
+
+  function getEndKeyTargets(scrollRoot) {
+    return uniqueElements(
+      [
+        document,
+        document.body,
+        scrollRoot instanceof HTMLElement ? scrollRoot : null,
+        document.activeElement instanceof HTMLElement ? document.activeElement : null,
+      ].filter(Boolean),
+    );
+  }
+
   function dispatchEndKey(target) {
+    dispatchEndKeyDown(target, false);
+    dispatchEndKeyUp(target);
+  }
+
+  function dispatchEndKeyDown(target, repeat) {
     target.dispatchEvent(
       new KeyboardEvent("keydown", {
         key: "End",
         code: "End",
         keyCode: 35,
         which: 35,
+        repeat: Boolean(repeat),
         bubbles: true,
       }),
     );
+  }
+
+  function dispatchEndKeyUp(target) {
     target.dispatchEvent(
       new KeyboardEvent("keyup", {
         key: "End",

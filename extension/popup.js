@@ -2,7 +2,7 @@ const DEFAULTS = {
   jobTitle: "Boss 推荐牛人",
   apiBase: "http://127.0.0.1:17863",
   apiToken: "",
-  scrollMode: "end",
+  scrollMode: "hold_end",
   scrollStep: 900,
   scrollWaitMs: 30,
   maxScrollCount: 80,
@@ -17,6 +17,7 @@ const DEFAULTS = {
 
 const OLD_DEFAULT_SCROLL_WAIT_MS = 1500;
 const SCROLL_WAIT_DEFAULT_VERSION = 2;
+const SCROLL_MODE_DEFAULT_VERSION = 2;
 
 const COLLECT_PLATFORMS = [
   {
@@ -82,7 +83,11 @@ window.addEventListener("beforeunload", () => {
 void init();
 
 async function init() {
-  const stored = await chrome.storage.local.get({ ...DEFAULTS, scrollWaitDefaultVersion: null });
+  const stored = await chrome.storage.local.get({
+    ...DEFAULTS,
+    scrollWaitDefaultVersion: null,
+    scrollModeDefaultVersion: null,
+  });
   if (stored.scrollWaitDefaultVersion === null && Number(stored.scrollWaitMs) === OLD_DEFAULT_SCROLL_WAIT_MS) {
     stored.scrollWaitMs = DEFAULTS.scrollWaitMs;
     await chrome.storage.local.set({
@@ -91,6 +96,15 @@ async function init() {
     });
   } else if (stored.scrollWaitDefaultVersion === null) {
     await chrome.storage.local.set({ scrollWaitDefaultVersion: SCROLL_WAIT_DEFAULT_VERSION });
+  }
+  if (stored.scrollModeDefaultVersion === null && stored.scrollMode === "end") {
+    stored.scrollMode = DEFAULTS.scrollMode;
+    await chrome.storage.local.set({
+      scrollMode: stored.scrollMode,
+      scrollModeDefaultVersion: SCROLL_MODE_DEFAULT_VERSION,
+    });
+  } else if (stored.scrollModeDefaultVersion === null) {
+    await chrome.storage.local.set({ scrollModeDefaultVersion: SCROLL_MODE_DEFAULT_VERSION });
   }
   for (const [key, element] of Object.entries(fields)) {
     if (element) {
