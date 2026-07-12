@@ -5,6 +5,7 @@ from typing import Any
 
 from ai.role_requirements import RoleRequirementExtractor
 from core.utils import normalize_multiline_text, normalize_text
+from talent.role_taxonomy import EvidencePolicy
 
 
 PASS_TO_AI = "pass_to_ai"
@@ -34,66 +35,6 @@ class RulePrescreener:
         "summary_text",
         "raw_card_text",
     )
-    finance_trading_role_terms = (
-        "证券交易员",
-        "交易员",
-        "股票交易员",
-        "期货交易员",
-        "操盘手",
-        "证券",
-        "股票",
-        "期货",
-        "账户操作",
-        "行情",
-        "投资",
-        "资管",
-    )
-    finance_market_terms = (
-        "金融",
-        "证券",
-        "股票",
-        "期货",
-        "基金",
-        "私募",
-        "资管",
-        "投资",
-        "A股",
-        "港股",
-        "美股",
-        "债券",
-        "可转债",
-        "ETF",
-        "期权",
-        "外汇",
-        "量化",
-    )
-    finance_trading_action_terms = (
-        "交易",
-        "下单",
-        "买卖",
-        "操盘",
-        "账户操作",
-        "行情",
-        "盘口",
-        "止损",
-        "风控",
-        "盯盘",
-        "交易计划",
-        "价格波动",
-    )
-    finance_trading_specific_terms = (
-        "证券交易",
-        "股票交易",
-        "期货交易",
-        "基金交易",
-        "A股交易",
-        "港股交易",
-        "美股交易",
-        "交易员",
-        "操盘手",
-        "账户操作",
-    )
-
     def __init__(self, requirement_extractor: RoleRequirementExtractor | None = None) -> None:
         self.requirement_extractor = requirement_extractor or RoleRequirementExtractor()
 
@@ -108,11 +49,18 @@ class RulePrescreener:
         missing_required_terms = [
             term for term in requirements.required_terms if term not in candidate_terms
         ]
-        keyword_signal = self._has_required_keyword_signal(
-            profile,
-            requirements.to_dict(),
-            candidate_terms,
+        role_track = self.requirement_extractor.role_taxonomy.get_track(
+            requirements.job_family,
+            requirements.job_track,
+        )
+        evidence_details = self._evaluate_evidence_policy(
+            role_track.evidence_policy if role_track else None,
             text,
+        )
+        keyword_signal = (
+            bool(evidence_details["keyword_signal"])
+            if evidence_details
+            else bool(set(requirements.required_terms).intersection(candidate_terms))
         )
 
         details = {
@@ -126,6 +74,7 @@ class RulePrescreener:
             "missing_required_terms": missing_required_terms,
             "keyword_signal": keyword_signal,
         }
+        details.update(evidence_details)
         if len(text) < 8:
             return PrescreenDecision(
                 route=HOLD,
@@ -170,12 +119,16 @@ class RulePrescreener:
         if requirements.required_terms and not keyword_signal:
             return PrescreenDecision(
                 route=MANUAL_CHECK,
-                reason="missing_role_keywords",
+                reason=str(
+                    evidence_details.get("route_reason") or "missing_role_keywords"
+                ),
                 details=details,
             )
         return PrescreenDecision(
             route=PASS_TO_AI,
-            reason="sufficient_candidate_evidence",
+            reason=str(
+                evidence_details.get("route_reason") or "sufficient_candidate_evidence"
+            ),
             details=details,
         )
 
@@ -191,44 +144,31 @@ class RulePrescreener:
                 count += 1
         return count
 
-    def _has_required_keyword_signal(
-        self,
-        profile: dict[str, object],
-        requirements: dict[str, object],
-        candidate_terms: list[str],
+    @staticmethod
+    def _evaluate_evidence_policy(
+        policy: EvidencePolicy | None,
         candidate_text: str,
-    ) -> bool:
-        required_terms = [str(term) for term in requirements.get("required_terms") or []]
-        if not self._is_finance_trading_role(profile, requirements):
-            return bool(set(required_terms).intersection(candidate_terms))
-        return self._has_finance_trading_candidate_signal(candidate_text)
+    ) -> dict[str, object]:
+        if policy is None:
+            return {}
 
-    def _is_finance_trading_role(
-        self,
-        profile: dict[str, object],
-        requirements: dict[str, object],
-    ) -> bool:
-        role_text = normalize_multiline_text(
-            "\n".join(
-                [
-                    str(profile.get("job_title") or ""),
-                    str(profile.get("jd_text") or ""),
-                    str(requirements.get("job_family") or ""),
-                    str(requirements.get("job_track") or ""),
-                    " ".join(str(term) for term in requirements.get("required_terms") or []),
-                ]
-            )
-        ).lower()
-        return any(term.lower() in role_text for term in self.finance_trading_role_terms)
-
-    def _has_finance_trading_candidate_signal(self, candidate_text: str) -> bool:
         text = normalize_text(candidate_text).lower()
-        if any(term.lower() in text for term in self.finance_trading_specific_terms):
-            return True
-        has_market = any(term.lower() in text for term in self.finance_market_terms)
-        has_action = any(term.lower() in text for term in self.finance_trading_action_terms)
-        has_trading_context = any(
-            term.lower() in text
-            for term in ("行情判断", "交易计划", "价格波动", "买卖操作", "风控纪律")
-        )
-        return has_market or (has_action and has_trading_context)
+
+        def matched(terms: tuple[str, ...]) -> list[str]:
+            return [term for term in terms if term.lower() in text]
+
+        direct = matched(policy.direct_evidence)
+        market = matched(policy.market_terms)
+        action = matched(policy.action_terms)
+        exclusions = matched(policy.exclusion_terms)
+        keyword_signal = bool(direct or (market and action and not exclusions))
+        route_reason = policy.matched_reason if keyword_signal else policy.unmatched_reason
+        return {
+            "evidence_policy": policy.name,
+            "matched_direct_evidence": direct,
+            "matched_market_terms": market,
+            "matched_action_terms": action,
+            "matched_exclusion_terms": exclusions,
+            "keyword_signal": keyword_signal,
+            "route_reason": route_reason,
+        }

@@ -280,6 +280,8 @@ class ReviewPage(QWidget):
             "role_years_below_minimum": "年限低于要求",
             "missing_role_keywords": "岗位关键词缺失",
             "sufficient_candidate_evidence": "资料足够",
+            "matched_securities_trading_evidence": "证券交易证据匹配",
+            "generic_transaction_without_market_context": "泛交易描述，缺少证券市场证据",
         }
         lines = [labels.get(reason, reason)] if reason else ["-"]
         if isinstance(details, dict):
@@ -302,6 +304,19 @@ class ReviewPage(QWidget):
             missing = details.get("missing_required_terms") or []
             if missing:
                 lines.append("- 缺失关键词：" + "、".join(str(item) for item in missing))
+            evidence_policy = details.get("evidence_policy")
+            if evidence_policy:
+                lines.append(f"- 证据策略：{evidence_policy}")
+            evidence_fields = (
+                ("matched_direct_evidence", "直接证据"),
+                ("matched_market_terms", "市场证据"),
+                ("matched_action_terms", "动作证据"),
+                ("matched_exclusion_terms", "排除证据"),
+            )
+            for field, label in evidence_fields:
+                matches = details.get(field) or []
+                if matches:
+                    lines.append(f"- {label}：" + "、".join(str(item) for item in matches))
         return "\n".join(lines)
 
     @staticmethod

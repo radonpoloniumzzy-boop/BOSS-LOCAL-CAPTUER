@@ -31,6 +31,17 @@ class RoleTaxonomyTest(unittest.TestCase):
             ("金融", "证券交易员"),
         )
 
+    def test_securities_trader_exposes_versioned_evidence_policy(self) -> None:
+        track = self.taxonomy.get_track("金融", "证券交易员")
+
+        self.assertIsNotNone(track)
+        policy = track.to_dict()["evidence_policy"]
+        self.assertEqual(policy["name"], "securities_trader:v1")
+        self.assertIn("股票交易", policy["direct_evidence"])
+        self.assertIn("A股", policy["market_terms"])
+        self.assertIn("下单", policy["action_terms"])
+        self.assertIn("电商交易", policy["exclusion_terms"])
+
     def test_profile_builder_uses_shared_taxonomy(self) -> None:
         profile = StandardProfileBuilder(role_taxonomy=self.taxonomy).build(
             {

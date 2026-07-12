@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import unittest
 from pathlib import Path
@@ -59,6 +60,29 @@ class AIScreenPageTest(unittest.TestCase):
         self.assertEqual(page.result_table.item(0, 4).text(), "2026-06-25T10:00:00")
         self.assertIn("network down", page.result_table.item(0, 5).text())
         self.assertEqual(page.result_table.item(0, 0).data(Qt.UserRole), 101)
+
+    def test_route_detail_shows_evidence_policy_matches(self) -> None:
+        detail = AIScreenPage._route_detail(
+            {
+                "route_reason": "matched_securities_trading_evidence",
+                "route_details_json": json.dumps(
+                    {
+                        "evidence_policy": "securities_trader:v1",
+                        "matched_direct_evidence": ["股票交易"],
+                        "matched_market_terms": ["A股"],
+                        "matched_action_terms": ["下单", "风控"],
+                        "matched_exclusion_terms": [],
+                    },
+                    ensure_ascii=False,
+                ),
+            }
+        )
+
+        self.assertIn("证券交易证据匹配", detail)
+        self.assertIn("policy=securities_trader:v1", detail)
+        self.assertIn("direct=股票交易", detail)
+        self.assertIn("market=A股", detail)
+        self.assertIn("action=下单,风控", detail)
 
 
 if __name__ == "__main__":

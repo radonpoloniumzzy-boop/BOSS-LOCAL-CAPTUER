@@ -135,8 +135,12 @@ class RulePrescreenerTest(unittest.TestCase):
         )
 
         self.assertEqual(decision.route, PASS_TO_AI)
-        self.assertEqual(decision.reason, "sufficient_candidate_evidence")
+        self.assertEqual(decision.reason, "matched_securities_trading_evidence")
         self.assertTrue(decision.details["keyword_signal"])
+        self.assertEqual(decision.details["evidence_policy"], "securities_trader:v1")
+        self.assertIn("股票交易", decision.details["matched_direct_evidence"])
+        self.assertIn("A股", decision.details["matched_market_terms"])
+        self.assertIn("下单", decision.details["matched_action_terms"])
 
     def test_generic_transaction_mentions_still_need_manual_check_for_trader_role(self) -> None:
         decision = self.prescreener.evaluate(
@@ -152,8 +156,80 @@ class RulePrescreenerTest(unittest.TestCase):
         )
 
         self.assertEqual(decision.route, MANUAL_CHECK)
-        self.assertEqual(decision.reason, "missing_role_keywords")
+        self.assertEqual(decision.reason, "generic_transaction_without_market_context")
         self.assertFalse(decision.details["keyword_signal"])
+        self.assertEqual(decision.details["evidence_policy"], "securities_trader:v1")
+        self.assertIn("电商交易", decision.details["matched_exclusion_terms"])
+
+    def test_market_and_action_evidence_passes_to_ai_without_direct_phrase(self) -> None:
+        decision = self.prescreener.evaluate(
+            {
+                "name": "Mei",
+                "work_experience_text": "负责A股账户日常下单与盘中风险控制。",
+                "education_text": "本科",
+                "tags_text": "A股 | 下单 | 风控",
+                "summary_text": "根据行情变化执行止损纪律。",
+                "raw_card_text": "有二级市场账户操作经验。",
+            },
+            self.trader_profile,
+        )
+
+        self.assertEqual(decision.route, PASS_TO_AI)
+        self.assertEqual(decision.reason, "matched_securities_trading_evidence")
+        self.assertIn("A股", decision.details["matched_market_terms"])
+        self.assertIn("下单", decision.details["matched_action_terms"])
+
+    def test_action_only_evidence_stays_in_manual_check(self) -> None:
+        decision = self.prescreener.evaluate(
+            {
+                "name": "Kai",
+                "work_experience_text": "负责交易数据复盘与订单协同。",
+                "education_text": "本科",
+                "tags_text": "交易 | 数据分析",
+                "summary_text": "跟进业务交易流程。",
+                "raw_card_text": "其余职业经历信息较少。",
+            },
+            self.trader_profile,
+        )
+
+        self.assertEqual(decision.route, MANUAL_CHECK)
+        self.assertEqual(decision.reason, "generic_transaction_without_market_context")
+        self.assertIn("交易", decision.details["matched_action_terms"])
+
+    def test_exclusion_blocks_market_and_action_combination(self) -> None:
+        decision = self.prescreener.evaluate(
+            {
+                "name": "Chen",
+                "work_experience_text": "负责股票类电商交易产品的订单下单流程。",
+                "education_text": "本科",
+                "tags_text": "股票 | 下单 | 电商交易",
+                "summary_text": "优化商城交易链路。",
+                "raw_card_text": "电商平台运营岗位。",
+            },
+            self.trader_profile,
+        )
+
+        self.assertEqual(decision.route, MANUAL_CHECK)
+        self.assertIn("股票", decision.details["matched_market_terms"])
+        self.assertIn("下单", decision.details["matched_action_terms"])
+        self.assertIn("电商交易", decision.details["matched_exclusion_terms"])
+
+    def test_direct_evidence_overrides_generic_transaction_exclusion(self) -> None:
+        decision = self.prescreener.evaluate(
+            {
+                "name": "Zhou",
+                "work_experience_text": "早期负责电商交易，后转岗从事股票交易。",
+                "education_text": "本科",
+                "tags_text": "股票交易 | 电商交易",
+                "summary_text": "执行A股账户买卖计划。",
+                "raw_card_text": "有明确二级市场交易经历。",
+            },
+            self.trader_profile,
+        )
+
+        self.assertEqual(decision.route, PASS_TO_AI)
+        self.assertIn("股票交易", decision.details["matched_direct_evidence"])
+        self.assertIn("电商交易", decision.details["matched_exclusion_terms"])
 
 
 if __name__ == "__main__":

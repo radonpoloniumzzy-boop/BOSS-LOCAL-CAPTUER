@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import unittest
 
@@ -46,6 +47,28 @@ class ReviewPageTest(unittest.TestCase):
         self.assertEqual(emitted[0]["reason_code"], "manual_review_passed")
         self.assertIn("Manual review passed", emitted[0]["note"])
         self.assertEqual(page.summary_label.text(), "待复核 1")
+
+    def test_route_detail_explains_generic_transaction_exclusion(self) -> None:
+        detail = ReviewPage._route_detail(
+            {
+                "route_reason": "generic_transaction_without_market_context",
+                "route_details_json": json.dumps(
+                    {
+                        "evidence_policy": "securities_trader:v1",
+                        "matched_direct_evidence": [],
+                        "matched_market_terms": [],
+                        "matched_action_terms": ["交易"],
+                        "matched_exclusion_terms": ["电商交易"],
+                    },
+                    ensure_ascii=False,
+                ),
+            }
+        )
+
+        self.assertIn("泛交易描述，缺少证券市场证据", detail)
+        self.assertIn("- 证据策略：securities_trader:v1", detail)
+        self.assertIn("- 动作证据：交易", detail)
+        self.assertIn("- 排除证据：电商交易", detail)
 
 
 if __name__ == "__main__":

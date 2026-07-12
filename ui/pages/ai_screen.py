@@ -491,6 +491,8 @@ class AIScreenPage(QWidget):
             "role_years_below_minimum": "年限低于要求",
             "missing_role_keywords": "岗位关键词缺失",
             "sufficient_candidate_evidence": "资料足够",
+            "matched_securities_trading_evidence": "证券交易证据匹配",
+            "generic_transaction_without_market_context": "泛交易描述，缺少证券市场证据",
         }
         parts = [f"rule={labels.get(reason, reason)}"] if reason else []
         try:
@@ -517,6 +519,19 @@ class AIScreenPage(QWidget):
             missing = details.get("missing_required_terms") or []
             if missing:
                 parts.append("missing=" + ",".join(str(item) for item in missing))
+            evidence_policy = details.get("evidence_policy")
+            if evidence_policy:
+                parts.append(f"policy={evidence_policy}")
+            evidence_fields = (
+                ("matched_direct_evidence", "direct"),
+                ("matched_market_terms", "market"),
+                ("matched_action_terms", "action"),
+                ("matched_exclusion_terms", "exclusion"),
+            )
+            for field, label in evidence_fields:
+                matches = details.get(field) or []
+                if matches:
+                    parts.append(f"{label}=" + ",".join(str(item) for item in matches))
         return " / ".join(parts)
 
     @staticmethod

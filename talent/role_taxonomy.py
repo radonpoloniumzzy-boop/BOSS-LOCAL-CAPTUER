@@ -7,6 +7,28 @@ from core.utils import normalize_multiline_text
 
 
 @dataclass(frozen=True, slots=True)
+class EvidencePolicy:
+    name: str
+    matched_reason: str = "matched_role_evidence"
+    unmatched_reason: str = "insufficient_role_evidence"
+    direct_evidence: tuple[str, ...] = field(default_factory=tuple)
+    market_terms: tuple[str, ...] = field(default_factory=tuple)
+    action_terms: tuple[str, ...] = field(default_factory=tuple)
+    exclusion_terms: tuple[str, ...] = field(default_factory=tuple)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "name": self.name,
+            "matched_reason": self.matched_reason,
+            "unmatched_reason": self.unmatched_reason,
+            "direct_evidence": list(self.direct_evidence),
+            "market_terms": list(self.market_terms),
+            "action_terms": list(self.action_terms),
+            "exclusion_terms": list(self.exclusion_terms),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class RoleTrackDefinition:
     family: str
     track: str
@@ -16,6 +38,7 @@ class RoleTrackDefinition:
     risk_flags: tuple[str, ...] = field(default_factory=tuple)
     interview_checks: tuple[str, ...] = field(default_factory=tuple)
     exclusion_terms: tuple[str, ...] = field(default_factory=tuple)
+    evidence_policy: EvidencePolicy | None = None
 
     def all_terms(self) -> tuple[str, ...]:
         return self.aliases + self.must_have + self.nice_to_have
@@ -30,6 +53,7 @@ class RoleTrackDefinition:
             "risk_flags": list(self.risk_flags),
             "interview_checks": list(self.interview_checks),
             "exclusion_terms": list(self.exclusion_terms),
+            "evidence_policy": self.evidence_policy.to_dict() if self.evidence_policy else None,
         }
 
 
@@ -42,6 +66,63 @@ DEFAULT_ROLE_TRACKS = (
         nice_to_have=("基金", "私募", "资管", "A股", "港股", "美股", "债券", "ETF", "量化"),
         risk_flags=("只有电商交易或订单交易经验", "无证券市场或账户操作证据"),
         interview_checks=("交易品种", "账户规模", "交易频率", "风控纪律", "行情判断依据"),
+        evidence_policy=EvidencePolicy(
+            name="securities_trader:v1",
+            matched_reason="matched_securities_trading_evidence",
+            unmatched_reason="generic_transaction_without_market_context",
+            direct_evidence=(
+                "股票交易",
+                "证券交易",
+                "期货交易",
+                "A股交易",
+                "港股交易",
+                "美股交易",
+                "账户下单",
+                "账户操作",
+                "操盘",
+                "盯盘",
+                "行情判断",
+                "止损",
+                "风控",
+                "基金交易",
+                "私募交易",
+                "资管交易",
+                "投资交易",
+            ),
+            market_terms=(
+                "证券",
+                "股票",
+                "期货",
+                "A股",
+                "港股",
+                "美股",
+                "基金",
+                "私募",
+                "资管",
+                "投资",
+                "债券",
+                "可转债",
+                "ETF",
+                "期权",
+                "外汇",
+                "量化",
+            ),
+            action_terms=(
+                "交易",
+                "下单",
+                "买卖",
+                "操盘",
+                "账户操作",
+                "行情",
+                "盘口",
+                "止损",
+                "风控",
+                "盯盘",
+                "交易计划",
+                "价格波动",
+            ),
+            exclusion_terms=("电商交易", "订单交易", "支付交易", "外贸交易"),
+        ),
     ),
     RoleTrackDefinition(
         family="销售",
