@@ -134,7 +134,15 @@ class ConfigService:
             merged = deep_merge(defaults.to_dict(), raw)
             config = self._build_config(merged)
             self.ensure_runtime_paths(config)
-            if not raw.get("local_api_token") or config.csv_columns != raw.get("csv_columns"):
+            legacy_secret = any(
+                isinstance(raw.get(section), dict) and "api_key" in raw[section]
+                for section in ("ai_provider", "automation_flow")
+            )
+            if (
+                not raw.get("local_api_token")
+                or config.csv_columns != raw.get("csv_columns")
+                or legacy_secret
+            ):
                 self.save(config)
             return config
         except Exception as exc:
@@ -157,6 +165,8 @@ class ConfigService:
         ai_provider = clean.get("ai_provider", {})
         if not isinstance(ai_provider, dict):
             ai_provider = defaults.ai_provider.to_dict()
+        ai_provider_keys = {field.name for field in fields(AIProviderConfig)}
+        ai_provider = {key: value for key, value in ai_provider.items() if key in ai_provider_keys}
         automation_flow = clean.get("automation_flow", {})
         if not isinstance(automation_flow, dict):
             automation_flow = defaults.automation_flow.to_dict()

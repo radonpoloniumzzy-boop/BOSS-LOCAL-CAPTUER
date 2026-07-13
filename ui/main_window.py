@@ -25,6 +25,7 @@ from automation.parser import CandidateParser
 from ai.prompt_manager import PromptManager
 from ai.provider import AIProviderError, ProviderSettings, validate_provider_settings
 from core.config import ConfigService
+from core.credentials import CredentialStore
 from core.local_api import LocalApiServer
 from core.logger import LoggingService
 from core.models import AutomationFlowConfig, ScreeningProfile
@@ -37,7 +38,14 @@ from ui.pages.candidates import CandidatesPage
 from ui.pages.dashboard import DashboardPage
 from ui.pages.review import ReviewPage
 from ui.pages.settings import SettingsPage
-from ui.workers import AIConnectionTestWorker, AIScreeningWorker, AutomationWorker, ExportWorker
+from ui.workers import (
+    AIConnectionTestWorker,
+    AIScreeningWorker,
+    AutomationWorker,
+    CandidatePageWorker,
+    ExportWorker,
+    ProfileRefreshWorker,
+)
 
 
 class _LogBridge(QObject):
@@ -54,6 +62,8 @@ class MainWindow(QMainWindow):
     start_capture_requested = Signal(object)
     stop_capture_requested = Signal()
     shutdown_requested = Signal()
+    candidate_query_requested = Signal(object)
+    ai_connection_test_requested = Signal(object)
 
     def __init__(self) -> None:
         super().__init__()
@@ -64,6 +74,7 @@ class MainWindow(QMainWindow):
         self.logging_service = LoggingService(self.config_service.logs_dir, level="INFO")
         self.config_service.logger = self.logging_service.get_logger("core")
         self.config = self.config_service.load()
+        self.credential_store = CredentialStore()
         self.logging_service.configure(self.config.log_level)
         self.logger = self.logging_service.get_logger("ui.main_window")
 
@@ -76,7 +87,7 @@ class MainWindow(QMainWindow):
             self.database,
             logger=self.logging_service.get_logger("storage.repository"),
         )
-        self._refreshed_candidate_profiles = self.repository.refresh_outdated_candidate_profiles()
+        self._refreshed_candidate_profiles = 0
         self._recovered_screening_tasks = self.repository.recover_interrupted_screening_tasks()
         self.export_service = ExportService(
             self.repository,
@@ -88,13 +99,18 @@ class MainWindow(QMainWindow):
             logger=self.logging_service.get_logger("automation.importer"),
         )
         self.prompt_manager = PromptManager(self.config_service.app_root / "assets" / "prompts")
+        self._ensure_builtin_screening_profiles()
 
         self.local_api_server: LocalApiServer | None = None
         self.import_bridge = _ImportBridge()
         self._export_threads: list[tuple[QThread, ExportWorker]] = []
+        self._candidate_request_id = 0
+        self._page_request_kind: dict[int, str] = {}
+        self._latest_page_request: dict[str, int] = {}
         self._ai_screening_thread: tuple[QThread, AIScreeningWorker] | None = None
         self._ai_screening_origin = "manual"
-        self._ai_test_threads: list[tuple[QThread, AIConnectionTestWorker]] = []
+        self._ai_test_running = False
+        self._ai_test_context: dict[str, object] = {}
         self._automation_armed = False
         self._queued_automation_batches: list[dict[str, object]] = []
         self._automation_config_lock = threading.RLock()
@@ -103,6 +119,9 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._setup_logging_panel()
         self._setup_automation_worker()
+        self._setup_candidate_query_worker()
+        self._setup_ai_connection_test_worker()
+        self._setup_profile_refresh_worker()
         self._connect_signals()
         self._load_config_into_pages()
         self._start_local_api_server()
@@ -222,6 +241,45 @@ class MainWindow(QMainWindow):
         self.automation_worker.error.connect(self._on_worker_error)
         self.automation_thread.start()
 
+    def _setup_candidate_query_worker(self) -> None:
+        self.candidate_query_thread = QThread(self)
+        self.candidate_query_worker = CandidatePageWorker(self.repository)
+        self.candidate_query_worker.moveToThread(self.candidate_query_thread)
+        self.candidate_query_requested.connect(self.candidate_query_worker.run)
+        self.candidate_query_worker.finished.connect(self._on_candidate_page_loaded)
+        self.candidate_query_worker.error.connect(self._on_candidate_page_failed)
+        self.candidate_query_thread.start()
+
+    def _setup_ai_connection_test_worker(self) -> None:
+        self.ai_test_thread = QThread(self)
+        self.ai_test_worker = AIConnectionTestWorker(
+            logger=self.logging_service.get_logger("ai.connection_test")
+        )
+        self.ai_test_worker.moveToThread(self.ai_test_thread)
+        self.ai_connection_test_requested.connect(self.ai_test_worker.run)
+        self.ai_test_worker.finished.connect(self._on_ai_connection_test_finished)
+        self.ai_test_worker.error.connect(self._on_ai_connection_test_error)
+        self.ai_test_thread.start()
+
+    def _setup_profile_refresh_worker(self) -> None:
+        self.profile_refresh_thread = QThread(self)
+        self.profile_refresh_worker = ProfileRefreshWorker(self.repository)
+        self.profile_refresh_worker.moveToThread(self.profile_refresh_thread)
+        self.profile_refresh_thread.started.connect(self.profile_refresh_worker.run)
+        self.profile_refresh_worker.finished.connect(self._on_profile_refresh_finished)
+        self.profile_refresh_worker.error.connect(self._on_profile_refresh_failed)
+        self.profile_refresh_worker.finished.connect(self.profile_refresh_thread.quit)
+        self.profile_refresh_worker.error.connect(self.profile_refresh_thread.quit)
+        self._profile_refresh_started = False
+
+    def _on_profile_refresh_finished(self, count: int) -> None:
+        self._refreshed_candidate_profiles = int(count)
+        if count:
+            self.logger.info("Refreshed %s outdated candidate profiles in background", count)
+
+    def _on_profile_refresh_failed(self, message: str) -> None:
+        self.logger.warning("Background candidate profile refresh failed: %s", message)
+
     def _connect_signals(self) -> None:
         self.navigation.currentRowChanged.connect(self.stack.setCurrentIndex)
         self.navigation.currentRowChanged.connect(self._on_page_changed)
@@ -250,10 +308,13 @@ class MainWindow(QMainWindow):
 
         self.ai_page.profile_selected.connect(self._load_screening_profile)
         self.ai_page.save_profile_requested.connect(self._save_screening_profile)
+        self.ai_page.clone_profile_requested.connect(self._clone_screening_profile)
         self.ai_page.delete_profile_requested.connect(self._delete_screening_profile)
         self.ai_page.run_requested.connect(self._start_ai_screening)
         self.ai_page.stop_requested.connect(self._stop_ai_screening)
         self.ai_page.test_connection_requested.connect(self._test_ai_connection)
+        self.ai_page.cancel_connection_test_requested.connect(self._cancel_ai_connection_test)
+        self.ai_page.delete_credential_requested.connect(self._delete_ai_credential)
         self.ai_page.run_selected.connect(self._load_screening_results)
         self.ai_page.resume_run_requested.connect(self._resume_ai_screening_run)
         self.ai_page.retry_task_requested.connect(self._retry_ai_screening_task)
@@ -290,6 +351,7 @@ class MainWindow(QMainWindow):
             on_error=self.import_bridge.error.emit,
             get_automation_status=self._automation_status_payload,
             start_automation=self._start_automation_from_extension,
+            get_extension_config=self._extension_config_payload,
             auth_token=self.config.local_api_token,
         )
         try:
@@ -300,6 +362,14 @@ class MainWindow(QMainWindow):
             self.dashboard_page.set_local_api_status("不可用")
             self.logger.exception("Failed to start local API server: %s", exc)
             QMessageBox.critical(self, "本地接口异常", f"扩展接收接口启动失败。\n{exc}")
+
+    def _extension_config_payload(self) -> dict[str, object]:
+        with self._automation_config_lock:
+            self.config = self.config_service.load()
+        return {
+            "resume_filename_template": self.config.resume_filename_template,
+            "job_title": self.config.default_job_title,
+        }
 
     def handle_open_browser(self) -> None:
         url = self.dashboard_page.source_url_input.text().strip() or self.config.target_url
@@ -410,6 +480,7 @@ class MainWindow(QMainWindow):
             "latest_reason_code": payload.get("latest_reason_code", ""),
             "export_dir": self.config.default_export_dir,
             "columns": list(self.config.csv_columns),
+            "filename_template": self.config.export_filename_template,
         }
         thread = QThread(self)
         worker = ExportWorker(self.export_service, export_payload)
@@ -420,59 +491,78 @@ class MainWindow(QMainWindow):
         worker.finished.connect(thread.quit)
         worker.error.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
         self._export_threads.append((thread, worker))
         thread.start()
         self.statusBar().showMessage(f"正在导出 {str(export_payload['export_format']).upper()}...")
 
     def refresh_candidates(self) -> None:
-        filters = self.candidates_page.current_filters()
-        match_role_id = filters.pop("match_role_id", None)
-        minimum_rating = filters.pop("minimum_rating", "")
-        match_status = filters.pop("match_status", "")
-        recruitment_status = filters.pop("recruitment_status", "")
-        latest_reason_code = filters.pop("latest_reason_code", "")
-        city = str(filters.get("city") or "")
-        years_min = filters.get("years_min")
-        years_max = filters.get("years_max")
-        profile_tag = str(filters.get("profile_tag") or "")
-        last_active_days = filters.get("last_active_days")
-        if match_role_id is not None or minimum_rating or match_status or recruitment_status:
-            rows = [
-                dict(row)
-                for row in self.repository.list_candidate_role_matches(
-                    role_id=int(match_role_id) if match_role_id is not None else None,
-                    match_statuses=[str(match_status)] if match_status else None,
-                    recruitment_statuses=[str(recruitment_status)] if recruitment_status else None,
-                    minimum_rating=str(minimum_rating) if minimum_rating else None,
-                    job_title=str(filters.get("job_title") or ""),
-                    batch_id=filters.get("batch_id"),
-                    city=city,
-                    years_min=years_min,
-                    years_max=years_max,
-                    profile_tag=profile_tag,
-                    last_active_days=last_active_days,
-                    latest_reason_code=str(latest_reason_code) if latest_reason_code else "",
-                    query=str(filters.get("keyword") or ""),
-                )
-            ]
-        else:
-            rows = [
-                dict(row)
-                for row in self.repository.list_candidates(
-                    **filters,
-                    latest_reason_code=str(latest_reason_code) if latest_reason_code else "",
-                )
-            ]
-        self.candidates_page.set_candidates(rows)
         self.candidates_page.set_filter_options(
             self.repository.list_job_titles(),
             [dict(batch) for batch in self.repository.list_batches()],
             [dict(profile) for profile in self.repository.list_screening_profiles()],
         )
-        if rows:
-            self._load_candidate_detail(int(rows[0]["id"]))
-        self.statusBar().showMessage(f"候选人列表已刷新：{len(rows)} 条")
+        self._candidate_request_id += 1
+        request_id = self._candidate_request_id
+        self._page_request_kind[request_id] = "candidates"
+        self._latest_page_request["candidates"] = request_id
+        self.candidate_query_requested.emit(
+            {
+                "request_id": request_id,
+                "filters": self.candidates_page.current_filters(),
+                "page": self.candidates_page.current_page(),
+                "page_size": self.candidates_page.page_size(),
+            }
+        )
+        self.statusBar().showMessage("正在加载候选人...")
+
+    def _on_candidate_page_loaded(self, request_id: int, result: dict[str, object]) -> None:
+        kind = str(result.get("kind") or "candidates")
+        if self._page_request_kind.pop(request_id, "") != kind:
+            return
+        if self._latest_page_request.get(kind) != request_id:
+            return
+        rows = list(result["rows"])
+        if kind == "review":
+            self.review_page.set_page_result(
+                rows,
+                total=int(result["total"]),
+                page=int(result["page"]),
+                page_size=int(result["page_size"]),
+            )
+            self.statusBar().showMessage(f"人工复核：当前 {len(rows)} 条，共 {result['total']} 条")
+            return
+        if kind == "screening_results":
+            self.ai_page.set_result_page(
+                rows,
+                total=int(result["total"]),
+                page=int(result["page"]),
+                page_size=int(result["page_size"]),
+            )
+            self.ai_page.show_efficiency_summary(
+                self.repository.get_screening_efficiency_summary(int(result["run_id"]))
+            )
+            return
+        self.candidates_page.set_page_result(
+            rows,
+            total=int(result["total"]),
+            page=int(result["page"]),
+            page_size=int(result["page_size"]),
+        )
+        self.statusBar().showMessage(
+            f"候选人已加载：当前 {len(rows)} 条，共 {result['total']} 条"
+        )
+        if not self._profile_refresh_started:
+            self._profile_refresh_started = True
+            self.profile_refresh_thread.start()
+
+    def _on_candidate_page_failed(self, request_id: int, message: str) -> None:
+        kind = self._page_request_kind.pop(request_id, "")
+        if not kind or self._latest_page_request.get(kind) != request_id:
+            return
+        if kind == "candidates":
+            self.statusBar().showMessage(f"候选人加载失败：{message}")
+        else:
+            self.statusBar().showMessage(f"{kind} 加载失败：{message}")
 
     def refresh_dashboard_stats(self) -> None:
         stats = self.repository.get_dashboard_stats()
@@ -569,18 +659,20 @@ class MainWindow(QMainWindow):
             [dict(profile) for profile in self.repository.list_screening_profiles()]
         )
         filters = self.review_page.current_filters()
-        rows = [
-            dict(row)
-            for row in self.repository.list_manual_review_candidates(
-                role_id=(
-                    int(filters["role_id"])
-                    if filters.get("role_id") is not None
-                    else None
-                )
-            )
-        ]
-        self.review_page.set_rows(rows)
-        self.statusBar().showMessage(f"人工复核队列已刷新：{len(rows)} 条")
+        self._candidate_request_id += 1
+        request_id = self._candidate_request_id
+        self._page_request_kind[request_id] = "review"
+        self._latest_page_request["review"] = request_id
+        self.candidate_query_requested.emit(
+            {
+                "request_id": request_id,
+                "kind": "review",
+                "filters": filters,
+                "page": self.review_page.current_page(),
+                "page_size": self.review_page.page_size(),
+            }
+        )
+        self.statusBar().showMessage("正在加载人工复核队列...")
 
     def _save_settings(self, config) -> None:
         config.automation_flow = self.config.automation_flow
@@ -758,28 +850,71 @@ class MainWindow(QMainWindow):
         row = self.repository.get_screening_profile(profile_id)
         self.ai_page.show_profile(dict(row) if row else None)
 
+    def _ensure_builtin_screening_profiles(self) -> None:
+        if any(str(row.get("job_title") or "") == "证券交易员" for row in self.repository.list_screening_profiles()):
+            return
+        profile = ScreeningProfile(
+            job_title="证券交易员",
+            jd_text="负责证券交易执行、交易风险控制、交易记录复盘与异常处理。",
+            prompt_text="",
+            must_have=["候选人资料中存在明确的证券或金融产品交易证据"],
+            nice_to_have=["实盘权限、交易规模、收益或风险控制结果有明确证据"],
+            risk_flags=["只出现‘交易’字样但未说明交易品种、职责、权限或结果"],
+            exclusions=["仅有模拟盘、课程作业或与证券无关的泛交易描述"],
+            interview_checks=["核验交易品种、账户权限、独立决策范围与风控边界"],
+            evidence_policy={
+                "explicit_evidence_required": True,
+                "generic_trading_requires_manual_review": True,
+            },
+        )
+        profile.prompt_text = self.prompt_manager.build_structured(profile)
+        self.repository.save_screening_profile(profile)
+
     def _save_screening_profile(self, payload: dict[str, object]) -> ScreeningProfile | None:
         try:
+            evidence_policy = dict(payload.get("evidence_policy") or {})
+            if "_invalid" in evidence_policy:
+                raise ValueError("证据策略必须是有效 JSON")
+            structured_profile = ScreeningProfile(
+                id=int(payload["id"]) if payload.get("id") is not None else None,
+                job_title=str(payload.get("job_title") or "").strip(),
+                jd_text=str(payload.get("jd_text") or "").strip(),
+                prompt_text=str(payload.get("prompt_text") or ""),
+                prompt_source=str(payload.get("prompt_source") or "generated"),
+                must_have=list(payload.get("must_have") or []),
+                nice_to_have=list(payload.get("nice_to_have") or []),
+                risk_flags=list(payload.get("risk_flags") or []),
+                exclusions=list(payload.get("exclusions") or []),
+                interview_checks=list(payload.get("interview_checks") or []),
+                evidence_policy=evidence_policy,
+            )
             prompt_text = str(payload.get("prompt_text") or "")
             prompt_source = str(payload.get("prompt_source") or "generated")
             if not prompt_text:
-                prompt_text = self.prompt_manager.build_from_jd(
-                    str(payload.get("job_title") or ""),
-                    str(payload.get("jd_text") or ""),
+                prompt_text = (
+                    self.prompt_manager.build_structured(structured_profile)
+                    if any(
+                        [
+                            structured_profile.must_have,
+                            structured_profile.nice_to_have,
+                            structured_profile.risk_flags,
+                            structured_profile.exclusions,
+                            structured_profile.interview_checks,
+                            structured_profile.evidence_policy,
+                        ]
+                    )
+                    else self.prompt_manager.build_from_jd(
+                        structured_profile.job_title,
+                        structured_profile.jd_text,
+                    )
                 )
                 prompt_source = "generated"
             errors = self.prompt_manager.validate_screening_criteria(prompt_text)
             if errors:
                 raise ValueError("筛选条件包含不能用于自动招聘评级的条件：" + "、".join(errors))
-            profile = self.repository.save_screening_profile(
-                ScreeningProfile(
-                    id=int(payload["id"]) if payload.get("id") is not None else None,
-                    job_title=str(payload.get("job_title") or "").strip(),
-                    jd_text=str(payload.get("jd_text") or "").strip(),
-                    prompt_text=prompt_text,
-                    prompt_source=prompt_source,
-                )
-            )
+            structured_profile.prompt_text = prompt_text
+            structured_profile.prompt_source = prompt_source
+            profile = self.repository.save_screening_profile(structured_profile)
             self.ai_page.current_profile_id = profile.id
             self.refresh_ai_screen()
             self.refresh_automation_flow()
@@ -789,6 +924,16 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.warning(self, "无法保存筛选方案", str(exc))
             return None
+
+    def _clone_screening_profile(self, profile_id: int, new_job_title: str) -> None:
+        try:
+            profile = self.repository.clone_screening_profile(profile_id, new_job_title)
+            self.ai_page.current_profile_id = profile.id
+            self.refresh_ai_screen()
+            self._load_screening_profile(int(profile.id))
+            self.statusBar().showMessage(f"已复制筛选方案：{new_job_title}")
+        except Exception as exc:
+            QMessageBox.warning(self, "无法复制筛选方案", str(exc))
 
     def _delete_screening_profile(self, profile_id: int) -> None:
         self.repository.delete_screening_profile(profile_id)
@@ -888,7 +1033,10 @@ class MainWindow(QMainWindow):
         self._resume_ai_screening_run(run_id, reset_failed=False)
 
     def _launch_ai_screening(self, worker_payload: dict[str, object], origin: str) -> None:
-        provider_error = self._validate_ai_provider_payload(dict(worker_payload.get("provider") or {}))
+        worker_payload["provider"] = self._prepare_provider_payload(
+            dict(worker_payload.get("provider") or {})
+        )
+        provider_error = self._validate_ai_provider_payload(dict(worker_payload["provider"]))
         if provider_error:
             if origin == "automation":
                 self.automation_flow_page.set_running(False)
@@ -945,6 +1093,19 @@ class MainWindow(QMainWindow):
         except AIProviderError as exc:
             return str(exc)
         return ""
+
+    def _prepare_provider_payload(self, provider_payload: dict[str, object]) -> dict[str, object]:
+        payload = dict(provider_payload)
+        provider = str(payload.get("provider") or "openai")
+        api_base = str(payload.get("api_base") or "")
+        if api_base:
+            payload["api_key"] = self.credential_store.resolve(
+                provider,
+                api_base,
+                str(payload.get("api_key") or ""),
+                str(payload.get("api_key_env") or ""),
+            )
+        return payload
 
     def _queue_automation_screening(self, capture_result: dict[str, object]) -> None:
         with self._automation_config_lock:
@@ -1064,34 +1225,82 @@ class MainWindow(QMainWindow):
 
     def _test_ai_connection(self, provider_payload: dict[str, object], target: str = "ai") -> None:
         status_page = self.automation_flow_page if target == "automation" else self.ai_page
-        thread = QThread(self)
-        worker = AIConnectionTestWorker(
-            provider_payload=provider_payload,
-            logger=self.logging_service.get_logger("ai.connection_test"),
-        )
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.finished.connect(lambda result: status_page.set_status(f"API 连接成功：{result.persona}"))
-        worker.finished.connect(lambda _result: self.statusBar().showMessage("AI API 连接成功"))
-        worker.error.connect(lambda message: status_page.set_status(f"API 连接失败：{message}"))
-        worker.error.connect(lambda message: QMessageBox.warning(self, "API 连接失败", message))
-        worker.finished.connect(thread.quit)
-        worker.error.connect(thread.quit)
-        thread.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(lambda: self._remove_ai_test_thread(thread))
-        self._ai_test_threads.append((thread, worker))
+        if self._ai_test_running:
+            status_page.set_status("API 连接测试正在进行，请等待当前测试完成。")
+            return
+        typed_key = str(provider_payload.get("api_key") or "").strip()
+        provider_payload = self._prepare_provider_payload(provider_payload)
+        provider_error = self._validate_ai_provider_payload(provider_payload)
+        if provider_error:
+            status_page.set_status(f"API 配置无效：{provider_error}")
+            return
+        self._ai_test_context = {
+            "target": target,
+            "provider_payload": provider_payload,
+            "typed_key": typed_key,
+        }
+        self._ai_test_running = True
         status_page.set_status("正在测试 AI API 连接...")
-        thread.start()
+        self.ai_connection_test_requested.emit(provider_payload)
 
-    def _remove_ai_test_thread(self, thread: QThread) -> None:
-        self._ai_test_threads = [item for item in self._ai_test_threads if item[0] is not thread]
+    def _on_ai_connection_test_finished(self, result: object) -> None:
+        self._ai_test_running = False
+        target = str(self._ai_test_context.get("target") or "ai")
+        status_page = self.automation_flow_page if target == "automation" else self.ai_page
+        status_page.set_status(f"API 连接成功：{getattr(result, 'persona', '')}")
+        self.statusBar().showMessage("AI API 连接成功")
+        typed_key = str(self._ai_test_context.get("typed_key") or "")
+        if typed_key:
+            self._save_test_credential(
+                dict(self._ai_test_context.get("provider_payload") or {}), typed_key
+            )
+
+    def _on_ai_connection_test_error(self, message: str) -> None:
+        self._ai_test_running = False
+        target = str(self._ai_test_context.get("target") or "ai")
+        status_page = self.automation_flow_page if target == "automation" else self.ai_page
+        status_page.set_status(f"API 连接失败：{message}")
+        self.statusBar().showMessage("AI API 连接失败")
+
+    def _cancel_ai_connection_test(self) -> None:
+        if self._ai_test_running:
+            self.ai_test_worker.request_cancel()
+        self.ai_page.set_status("已请求取消 API 连接测试。")
+
+    def _delete_ai_credential(self, payload: dict[str, object]) -> None:
+        try:
+            deleted = self.credential_store.delete(
+                str(payload.get("provider") or "openai"),
+                str(payload.get("api_base") or ""),
+            )
+            message = "已删除保存的 API Key。" if deleted else "没有找到已保存的 API Key。"
+            self.ai_page.set_status(message)
+        except Exception as exc:
+            self.ai_page.set_status(f"删除 API Key 失败：{exc}")
+
+    def _save_test_credential(self, provider_payload: dict[str, object], api_key: str) -> None:
+        try:
+            self.credential_store.save(
+                str(provider_payload.get("provider") or "openai"),
+                str(provider_payload.get("api_base") or ""),
+                api_key,
+            )
+        except Exception as exc:
+            self.logger.warning("Could not save API credential: %s", exc)
 
     def _load_screening_results(self, run_id: int) -> None:
-        rows = [dict(row) for row in self.repository.list_screening_task_results(run_id)]
-        self.ai_page.show_results(rows)
-        self.ai_page.show_efficiency_summary(
-            self.repository.get_screening_efficiency_summary(run_id)
+        self._candidate_request_id += 1
+        request_id = self._candidate_request_id
+        self._page_request_kind[request_id] = "screening_results"
+        self._latest_page_request["screening_results"] = request_id
+        self.candidate_query_requested.emit(
+            {
+                "request_id": request_id,
+                "kind": "screening_results",
+                "run_id": run_id,
+                "page": self.ai_page.result_page(),
+                "page_size": self.ai_page.result_page_size(),
+            }
         )
 
     def _load_automation_results(self, run_id: int) -> None:
@@ -1184,15 +1393,22 @@ class MainWindow(QMainWindow):
             self._ai_screening_thread[1].request_stop()
             self._ai_screening_thread[0].quit()
             self._ai_screening_thread[0].wait(2_000)
-        for thread, _worker in list(self._ai_test_threads):
-            thread.quit()
-            thread.wait(2_000)
+        self.ai_test_worker.request_cancel()
+        self.ai_test_thread.quit()
+        self.ai_test_thread.wait(16_000)
         self.shutdown_requested.emit()
         self.automation_thread.quit()
         self.automation_thread.wait(5_000)
         for thread, _worker in list(self._export_threads):
-            thread.quit()
-            thread.wait(2_000)
+            if thread.isRunning():
+                thread.quit()
+                thread.wait(2_000)
+        self.candidate_query_thread.quit()
+        self.candidate_query_thread.wait(2_000)
+        self.profile_refresh_worker.request_stop()
+        self.profile_refresh_thread.quit()
+        self.profile_refresh_thread.wait(5_000)
         self.logging_service.unsubscribe(self.log_bridge.message.emit)
+        self.logging_service.close()
         self.database.close_thread_connection()
         super().closeEvent(event)

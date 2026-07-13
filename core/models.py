@@ -86,6 +86,8 @@ class AppConfig:
     max_scroll_count: int = 60
     no_new_stop_rounds: int = 3
     default_job_title: str = "Boss Recommended Talent"
+    export_filename_template: str = "{job_title}_{date}_{time}_batch{batch_id}_{type}"
+    resume_filename_template: str = "{candidate_name}_{job_title}_{date}_{original_name}"
     log_level: str = "INFO"
     selectors_path: str = ""
     csv_columns: list[str] = field(default_factory=lambda: list(DEFAULT_CSV_COLUMNS))
@@ -222,6 +224,14 @@ class ScreeningProfile:
     jd_text: str
     prompt_text: str
     prompt_source: str = "generated"
+    must_have: list[str] = field(default_factory=list)
+    nice_to_have: list[str] = field(default_factory=list)
+    risk_flags: list[str] = field(default_factory=list)
+    exclusions: list[str] = field(default_factory=list)
+    interview_checks: list[str] = field(default_factory=list)
+    evidence_policy: dict[str, Any] = field(default_factory=dict)
+    version: int = 1
+    parent_profile_id: int | None = None
     id: int | None = None
     created_at: str = ""
     updated_at: str = ""

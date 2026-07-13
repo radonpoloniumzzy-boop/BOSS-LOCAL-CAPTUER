@@ -70,6 +70,23 @@ class LocalApiServerTest(unittest.TestCase):
         self.assertEqual(unauthorized_response.status, 401)
         self.assertFalse(unauthorized_payload["ok"])
 
+    def test_extension_config_requires_token_and_returns_naming_template(self) -> None:
+        self.server.get_extension_config = lambda: {
+            "resume_filename_template": "{candidate_name}_{original_name}",
+            "job_title": "证券交易员",
+        }
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.port, timeout=5)
+        connection.request(
+            "GET",
+            "/api/extension/config",
+            headers={"X-Boss-Local-Token": self.token},
+        )
+        response = connection.getresponse()
+        payload = json.loads(response.read().decode("utf-8"))
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(payload["result"]["job_title"], "证券交易员")
+
     def test_import_endpoint(self) -> None:
         body = json.dumps(
             {

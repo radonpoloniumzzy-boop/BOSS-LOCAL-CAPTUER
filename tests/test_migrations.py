@@ -60,7 +60,7 @@ class MigrationTest(unittest.TestCase):
             self.assertIn("next_attempt_at", task_columns)
             self.assertIn("failure_category", task_columns)
             self.assertIn("idx_screening_tasks_claim", indexes)
-            self.assertEqual(version, 12)
+            self.assertEqual(version, 13)
             connection.close()
 
     def test_existing_screening_runs_table_gets_origin_column(self) -> None:
@@ -144,7 +144,7 @@ class MigrationTest(unittest.TestCase):
             self.assertIn("industry_tags_json", profile_columns)
             self.assertIn("skill_tags_json", profile_columns)
             self.assertIn("profile_completeness", profile_columns)
-            self.assertEqual(version, 12)
+            self.assertEqual(version, 13)
             connection.close()
 
     def test_existing_screening_results_are_backfilled_as_tasks(self) -> None:
@@ -311,7 +311,7 @@ class MigrationTest(unittest.TestCase):
             self.assertEqual(tuple(event_row), (1, 1, "", "screened", "migration_backfill"))
             self.assertEqual(tuple(profile_row), (1, "Legacy Candidate", "Sales", "", ""))
             self.assertEqual(tuple(result_row), ("", "[]", "[]", "[]", ""))
-            self.assertEqual(version, 12)
+            self.assertEqual(version, 13)
             connection.close()
 
 

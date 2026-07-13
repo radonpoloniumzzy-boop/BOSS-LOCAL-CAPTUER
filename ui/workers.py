@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import threading
 
 from PySide6.QtCore import QObject, Signal, Slot
 
@@ -132,12 +133,117 @@ class ExportWorker(QObject):
                 match_status=str(self.payload.get("match_status") or ""),
                 recruitment_status=str(self.payload.get("recruitment_status") or ""),
                 latest_reason_code=str(self.payload.get("latest_reason_code") or ""),
+                filename_template=str(self.payload.get("filename_template") or ""),
             )
             self.finished.emit(result)
         except Exception as exc:
             self.error.emit(str(exc))
         finally:
             self.export_service.repository.db.close_thread_connection()
+
+
+class CandidatePageWorker(QObject):
+    finished = Signal(int, object)
+    error = Signal(int, str)
+
+    def __init__(self, repository: CandidateRepository) -> None:
+        super().__init__()
+        self.repository = repository
+
+    @Slot(object)
+    def run(self, payload: object) -> None:
+        request = dict(payload or {})
+        request_id = int(request["request_id"])
+        kind = str(request.get("kind") or "candidates")
+        filters = dict(request.get("filters") or {})
+        page = int(request.get("page") or 1)
+        page_size = int(request.get("page_size") or 100)
+        try:
+            if kind == "review":
+                result = self.repository.page_manual_review_candidates(
+                    role_id=(int(filters["role_id"]) if filters.get("role_id") is not None else None),
+                    page=page,
+                    page_size=page_size,
+                )
+                result["kind"] = kind
+                result["rows"] = [dict(row) for row in result["rows"]]
+                self.finished.emit(request_id, result)
+                return
+            if kind == "screening_results":
+                result = self.repository.page_screening_task_results(
+                    int(request["run_id"]), page=page, page_size=page_size
+                )
+                result["kind"] = kind
+                result["run_id"] = int(request["run_id"])
+                result["rows"] = [dict(row) for row in result["rows"]]
+                self.finished.emit(request_id, result)
+                return
+            match_role_id = filters.pop("match_role_id", None)
+            minimum_rating = filters.pop("minimum_rating", "")
+            match_status = filters.pop("match_status", "")
+            recruitment_status = filters.pop("recruitment_status", "")
+            latest_reason_code = filters.pop("latest_reason_code", "")
+            if match_role_id is not None or minimum_rating or match_status or recruitment_status:
+                result = self.repository.page_candidate_role_matches(
+                    role_id=int(match_role_id) if match_role_id is not None else None,
+                    match_statuses=[str(match_status)] if match_status else None,
+                    recruitment_statuses=[str(recruitment_status)] if recruitment_status else None,
+                    minimum_rating=str(minimum_rating) if minimum_rating else None,
+                    job_title=str(filters.get("job_title") or ""),
+                    batch_id=filters.get("batch_id"),
+                    city=str(filters.get("city") or ""),
+                    years_min=filters.get("years_min"),
+                    years_max=filters.get("years_max"),
+                    profile_tag=str(filters.get("profile_tag") or ""),
+                    last_active_days=filters.get("last_active_days"),
+                    latest_reason_code=str(latest_reason_code or ""),
+                    query=str(filters.get("keyword") or ""),
+                    page=page,
+                    page_size=page_size,
+                )
+            else:
+                result = self.repository.page_candidates(
+                    **filters,
+                    latest_reason_code=str(latest_reason_code or ""),
+                    page=page,
+                    page_size=page_size,
+                )
+            result["rows"] = [dict(row) for row in result["rows"]]
+            result["kind"] = kind
+            self.finished.emit(request_id, result)
+        except Exception as exc:
+            self.error.emit(request_id, str(exc))
+        finally:
+            self.repository.db.close_thread_connection()
+
+
+class ProfileRefreshWorker(QObject):
+    finished = Signal(int)
+    error = Signal(str)
+
+    def __init__(self, repository: CandidateRepository, chunk_size: int = 500) -> None:
+        super().__init__()
+        self.repository = repository
+        self.chunk_size = max(1, int(chunk_size))
+        self._stop_requested = threading.Event()
+
+    @Slot()
+    def run(self) -> None:
+        total = 0
+        try:
+            while not self._stop_requested.is_set():
+                refreshed = self.repository.refresh_outdated_candidate_profiles(limit=self.chunk_size)
+                total += refreshed
+                if refreshed < self.chunk_size:
+                    break
+            self.finished.emit(total)
+        except Exception as exc:
+            self.error.emit(str(exc))
+        finally:
+            self.repository.db.close_thread_connection()
+
+    def request_stop(self) -> None:
+        self._stop_requested.set()
 
 
 class AIScreeningWorker(QObject):
@@ -193,13 +299,16 @@ class AIConnectionTestWorker(QObject):
     finished = Signal(object)
     error = Signal(str)
 
-    def __init__(self, provider_payload: dict[str, object], logger) -> None:
+    def __init__(self, logger) -> None:
         super().__init__()
-        self.provider_payload = provider_payload
+        self.provider_payload: dict[str, object] = {}
         self.logger = logger
+        self._cancelled = threading.Event()
 
-    @Slot()
-    def run(self) -> None:
+    @Slot(object)
+    def run(self, provider_payload: object) -> None:
+        self.provider_payload = dict(provider_payload or {})
+        self._cancelled.clear()
         try:
             settings = ProviderSettings(
                 provider=str(self.provider_payload.get("provider") or "openai"),
@@ -207,8 +316,15 @@ class AIConnectionTestWorker(QObject):
                 api_base=str(self.provider_payload.get("api_base") or ""),
                 api_key=str(self.provider_payload.get("api_key") or ""),
                 api_key_env=str(self.provider_payload.get("api_key_env") or "OPENAI_API_KEY"),
+                timeout_seconds=15,
             )
             result = create_provider(settings, logger=self.logger).test_connection()
-            self.finished.emit(result)
+            if self._cancelled.is_set():
+                self.error.emit("API 连接测试已取消")
+            else:
+                self.finished.emit(result)
         except Exception as exc:
-            self.error.emit(str(exc))
+            self.error.emit("API 连接测试已取消" if self._cancelled.is_set() else str(exc))
+
+    def request_cancel(self) -> None:
+        self._cancelled.set()

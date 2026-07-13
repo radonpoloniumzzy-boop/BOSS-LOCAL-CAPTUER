@@ -43,6 +43,8 @@ class SettingsPage(QWidget):
         self.selectors_path_input = self._create_path_row(base_form, "选择器文件", "file")
         self.target_url_input = QLineEdit()
         self.job_title_input = QLineEdit()
+        self.export_filename_template_input = QLineEdit()
+        self.resume_filename_template_input = QLineEdit()
         self.local_api_port_input = QSpinBox()
         self.local_api_port_input.setRange(1024, 65535)
         self.local_api_token_input = QLineEdit()
@@ -71,6 +73,8 @@ class SettingsPage(QWidget):
 
         base_form.addRow("目标链接", self.target_url_input)
         base_form.addRow("默认岗位名称", self.job_title_input)
+        base_form.addRow("导出文件命名模板", self.export_filename_template_input)
+        base_form.addRow("简历文件命名模板", self.resume_filename_template_input)
         base_form.addRow("本地接口端口", self.local_api_port_input)
         base_form.addRow("扩展连接", token_wrapper)
         base_form.addRow("滚动模式", self.scroll_mode_combo)
@@ -113,6 +117,8 @@ class SettingsPage(QWidget):
         self.selectors_path_input.setText(config.selectors_path)
         self.target_url_input.setText(config.target_url)
         self.job_title_input.setText(default_job_title)
+        self.export_filename_template_input.setText(config.export_filename_template)
+        self.resume_filename_template_input.setText(config.resume_filename_template)
         self.local_api_port_input.setValue(config.local_api_port)
         self.local_api_token_input.setText(config.local_api_token)
         self.copy_pairing_code_button.setText("复制扩展连接码")
@@ -143,6 +149,10 @@ class SettingsPage(QWidget):
             max_scroll_count=self.max_scroll_input.value(),
             no_new_stop_rounds=self.no_new_stop_input.value(),
             default_job_title=self.job_title_input.text().strip() or "Boss 推荐牛人",
+            export_filename_template=self.export_filename_template_input.text().strip()
+            or "{job_title}_{date}_{time}_batch{batch_id}_{type}",
+            resume_filename_template=self.resume_filename_template_input.text().strip()
+            or "{candidate_name}_{job_title}_{date}_{original_name}",
             log_level=self.log_level_combo.currentText(),
             selectors_path=self.selectors_path_input.text().strip(),
             csv_columns=columns or list(DEFAULT_CSV_COLUMNS),

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import io
 import unittest
+import urllib.error
 from unittest.mock import patch
 
 from ai.provider import (
@@ -136,6 +138,40 @@ class AIProviderTest(unittest.TestCase):
                     model="deepseek-v4-flash",
                     api_base="https://api.deepseek.com",
                     api_key_env="DEEPSEEK_API_KEY",
+                )
+            )
+
+    def test_http_errors_redact_api_key_from_status_message(self) -> None:
+        provider = OpenAICompatibleProvider(
+            ProviderSettings(
+                provider="custom",
+                model="model",
+                api_base="https://example.com/v1",
+                api_key="top-secret-key",
+            )
+        )
+        error = urllib.error.HTTPError(
+            "https://example.com/v1/chat/completions",
+            401,
+            "Unauthorized",
+            {},
+            io.BytesIO(b'{"error":{"message":"bad top-secret-key"}}'),
+        )
+        with patch("urllib.request.urlopen", side_effect=error):
+            with self.assertRaises(AIProviderError) as raised:
+                provider.screen("system", "candidate")
+
+        self.assertNotIn("top-secret-key", str(raised.exception))
+        self.assertIn("[REDACTED]", str(raised.exception))
+
+    def test_validate_provider_settings_rejects_invalid_api_base_before_network(self) -> None:
+        with self.assertRaises(AIProviderError):
+            validate_provider_settings(
+                ProviderSettings(
+                    provider="custom",
+                    model="model",
+                    api_base="not-a-url",
+                    api_key="key",
                 )
             )
 

@@ -321,7 +321,7 @@ class CandidateRepositoryTest(unittest.TestCase):
         self.assertEqual(automation_runs[0]["id"], automation_run_id)
         self.assertEqual(automation_runs[0]["origin"], "automation")
         version = self.db.get_connection().execute("SELECT version FROM schema_version").fetchone()
-        self.assertEqual(version["version"], 12)
+        self.assertEqual(version["version"], 13)
 
     def test_interrupted_screening_tasks_are_recovered(self) -> None:
         batch = self.repository.create_batch("Sales", "https://example.com")

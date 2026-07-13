@@ -1,0 +1,33 @@
+[
+  {
+    "template": "{candidate_name}_{job_title}_{date}_{original_name}",
+    "values": {
+      "candidate_name": "张三",
+      "job_title": "证券/交易员",
+      "date": "20260713",
+      "original_name": "个人简历.pdf"
+    },
+    "expected": "张三_证券_交易员_20260713_个人简历"
+  },
+  {
+    "template": "{candidate_name}_{job_title}_{date}_{original_name}",
+    "values": {
+      "candidate_name": "",
+      "job_title": "",
+      "date": "20260713",
+      "original_name": "../CON.pdf"
+    },
+    "expected": "unknown_unknown_20260713_CON"
+  },
+  {
+    "template": "{job_title}_{date}_{time}_batch{batch_id}_{type}",
+    "values": {
+      "job_title": "证券交易员",
+      "date": "20260713",
+      "time": "235959",
+      "batch_id": "42",
+      "type": "候选人列表"
+    },
+    "expected": "证券交易员_20260713_235959_batch42_候选人列表"
+  }
+]

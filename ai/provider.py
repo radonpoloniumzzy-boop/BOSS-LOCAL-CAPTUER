@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ai.schemas import ScreeningDecision
+from core.credentials import normalize_api_base
 from core.utils import normalize_text
 
 
@@ -16,7 +17,9 @@ RATINGS = {"UR", "SSR", "SR", "R", "N"}
 
 
 class AIProviderError(RuntimeError):
-    pass
+    def __init__(self, message: str, category: str = "provider") -> None:
+        super().__init__(message)
+        self.category = category
 
 
 @dataclass(slots=True)
@@ -37,6 +40,11 @@ def validate_provider_settings(settings: ProviderSettings) -> None:
         raise AIProviderError("请填写 AI 模型名称。")
     if provider == "custom" and not normalize_text(settings.api_base):
         raise AIProviderError("自定义兼容服务必须填写 API Base。")
+    if normalize_text(settings.api_base):
+        try:
+            normalize_api_base(settings.api_base)
+        except ValueError as exc:
+            raise AIProviderError(str(exc)) from exc
     if _resolve_api_key(settings):
         return
     env_name = normalize_text(settings.api_key_env) or "-"
@@ -80,7 +88,10 @@ class AIProvider:
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
-            message = _extract_api_error(body) or f"HTTP {exc.code}"
+            message = _redact_secret(
+                _extract_api_error(body) or f"HTTP {exc.code}",
+                self._api_key(),
+            )
             raise AIProviderError(f"AI 接口请求失败：{message}") from exc
         except urllib.error.URLError as exc:
             raise AIProviderError(f"无法连接 AI 接口：{exc.reason}") from exc
@@ -293,3 +304,8 @@ def _extract_api_error(body: str) -> str:
         return normalize_text(str(error or payload.get("message") or ""))
     except json.JSONDecodeError:
         return normalize_text(body)[:300]
+
+
+def _redact_secret(message: str, secret: str) -> str:
+    value = str(secret or "")
+    return str(message or "").replace(value, "[REDACTED]") if value else str(message or "")

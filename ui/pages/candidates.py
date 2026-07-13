@@ -6,6 +6,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QGroupBox,
+    QHeaderView,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -75,9 +76,13 @@ class CandidatesPage(QWidget):
     export_requested = Signal(object)
     candidate_selected = Signal(int)
     status_change_requested = Signal(object)
+    page_requested = Signal(int)
 
     def __init__(self) -> None:
         super().__init__()
+        self._page = 1
+        self._page_size = 100
+        self._total = 0
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -190,6 +195,9 @@ class CandidatesPage(QWidget):
         self.table.setSelectionMode(QTableWidget.SingleSelection)
         self.table.setAlternatingRowColors(True)
         self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        for index, width in enumerate([110, 70, 55, 130, 90, 90, 120, 120, 55, 90, 90, 100, 150, 135]):
+            self.table.setColumnWidth(index, width)
 
         detail_group = QGroupBox("候选人详情")
         detail_layout = QVBoxLayout(detail_group)
@@ -228,23 +236,35 @@ class CandidatesPage(QWidget):
         root_layout.addWidget(filter_group)
         root_layout.addWidget(splitter, 1)
 
-        self.refresh_button.clicked.connect(self.refresh_requested.emit)
+        pagination_layout = QHBoxLayout()
+        pagination_layout.addStretch(1)
+        self.previous_page_button = QPushButton("上一页")
+        self.next_page_button = QPushButton("下一页")
+        self.page_label = QLabel("第 1 页 / 共 0 条")
+        pagination_layout.addWidget(self.previous_page_button)
+        pagination_layout.addWidget(self.page_label)
+        pagination_layout.addWidget(self.next_page_button)
+        root_layout.addLayout(pagination_layout)
+
+        self.refresh_button.clicked.connect(self._request_first_page)
         self.export_csv_button.clicked.connect(lambda: self._emit_export("csv"))
         self.export_jsonl_button.clicked.connect(lambda: self._emit_export("jsonl"))
         self.export_markdown_button.clicked.connect(lambda: self._emit_export("markdown"))
-        self.search_input.returnPressed.connect(self.refresh_requested.emit)
-        self.city_input.returnPressed.connect(self.refresh_requested.emit)
-        self.years_min_input.returnPressed.connect(self.refresh_requested.emit)
-        self.years_max_input.returnPressed.connect(self.refresh_requested.emit)
-        self.profile_tag_input.returnPressed.connect(self.refresh_requested.emit)
-        self.last_active_combo.currentIndexChanged.connect(self.refresh_requested.emit)
-        self.job_title_combo.currentIndexChanged.connect(self.refresh_requested.emit)
-        self.batch_combo.currentIndexChanged.connect(self.refresh_requested.emit)
-        self.match_role_combo.currentIndexChanged.connect(self.refresh_requested.emit)
-        self.rating_combo.currentIndexChanged.connect(self.refresh_requested.emit)
-        self.match_status_combo.currentIndexChanged.connect(self.refresh_requested.emit)
-        self.recruitment_status_filter_combo.currentIndexChanged.connect(self.refresh_requested.emit)
-        self.latest_reason_filter_combo.currentIndexChanged.connect(self.refresh_requested.emit)
+        self.search_input.returnPressed.connect(self._request_first_page)
+        self.city_input.returnPressed.connect(self._request_first_page)
+        self.years_min_input.returnPressed.connect(self._request_first_page)
+        self.years_max_input.returnPressed.connect(self._request_first_page)
+        self.profile_tag_input.returnPressed.connect(self._request_first_page)
+        self.last_active_combo.currentIndexChanged.connect(self._request_first_page)
+        self.job_title_combo.currentIndexChanged.connect(self._request_first_page)
+        self.batch_combo.currentIndexChanged.connect(self._request_first_page)
+        self.match_role_combo.currentIndexChanged.connect(self._request_first_page)
+        self.rating_combo.currentIndexChanged.connect(self._request_first_page)
+        self.match_status_combo.currentIndexChanged.connect(self._request_first_page)
+        self.recruitment_status_filter_combo.currentIndexChanged.connect(self._request_first_page)
+        self.latest_reason_filter_combo.currentIndexChanged.connect(self._request_first_page)
+        self.previous_page_button.clicked.connect(lambda: self._request_page(self._page - 1))
+        self.next_page_button.clicked.connect(lambda: self._request_page(self._page + 1))
         self.table.itemSelectionChanged.connect(self._emit_selection)
         self.record_status_button.clicked.connect(self._emit_status_change)
 
@@ -293,11 +313,41 @@ class CandidatesPage(QWidget):
                 if col_index == 0:
                     item.setData(Qt.UserRole, int(row["id"]))
                 self.table.setItem(row_index, col_index, item)
-        self.table.resizeColumnsToContents()
         if rows:
             self.table.selectRow(0)
         else:
             self.detail_text.setPlainText("暂无数据。")
+
+    def set_page_result(
+        self,
+        rows: list[dict[str, object]],
+        *,
+        total: int,
+        page: int,
+        page_size: int,
+    ) -> None:
+        self._total = max(0, int(total))
+        self._page = max(1, int(page))
+        self._page_size = max(1, int(page_size))
+        page_count = max(1, (self._total + self._page_size - 1) // self._page_size)
+        self.page_label.setText(f"第 {self._page} / {page_count} 页，共 {self._total} 条")
+        self.previous_page_button.setEnabled(self._page > 1)
+        self.next_page_button.setEnabled(self._page < page_count)
+        self.set_candidates(rows)
+
+    def current_page(self) -> int:
+        return self._page
+
+    def page_size(self) -> int:
+        return self._page_size
+
+    def _request_first_page(self, *_args: object) -> None:
+        self._request_page(1)
+
+    def _request_page(self, page: int) -> None:
+        self._page = max(1, int(page))
+        self.page_requested.emit(self._page)
+        self.refresh_requested.emit()
 
     def set_filter_options(
         self,

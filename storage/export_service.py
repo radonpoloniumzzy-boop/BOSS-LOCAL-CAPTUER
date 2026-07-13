@@ -4,8 +4,9 @@ import csv
 import json
 from pathlib import Path
 
+from core.filename_templates import DEFAULT_EXPORT_TEMPLATE, render_filename, unique_path
 from core.models import ExportResult
-from core.utils import ensure_directory, now_iso, sanitize_filename
+from core.utils import ensure_directory, now_iso
 from storage.repository import CandidateRepository
 
 
@@ -40,6 +41,7 @@ class ExportService:
         match_status: str = "",
         recruitment_status: str = "",
         latest_reason_code: str = "",
+        filename_template: str = "",
     ) -> ExportResult:
         rows = self.repository.get_export_rows(
             mode=mode,
@@ -63,8 +65,10 @@ class ExportService:
 
         ensure_directory(export_dir)
         resolved_job_title = job_title or self._infer_job_title(rows)
-        filename = self._build_filename(resolved_job_title, batch_id, export_format)
-        target_path = export_dir / filename
+        filename = self._build_filename(
+            resolved_job_title, batch_id, export_format, filename_template=filename_template
+        )
+        target_path = unique_path(export_dir / filename)
 
         if export_format == "csv":
             self._export_csv(target_path, rows, columns)
@@ -178,12 +182,28 @@ class ExportService:
 
         target_path.write_text("\n".join(lines), encoding="utf-8")
 
-    def _build_filename(self, job_title: str, batch_id: int | None, export_format: str) -> str:
+    def _build_filename(
+        self,
+        job_title: str,
+        batch_id: int | None,
+        export_format: str,
+        *,
+        filename_template: str = "",
+    ) -> str:
         label, extension = EXPORT_SUFFIXES[export_format]
-        title = sanitize_filename(job_title or "Boss 候选人", fallback="Boss 候选人")
-        suffix = f"_batch{batch_id}" if batch_id is not None else ""
-        timestamp = now_iso().replace(":", "").replace("-", "").replace("T", "_")
-        return f"{title}_{timestamp}{suffix}_{label}.{extension}"
+        timestamp = now_iso()
+        stem = render_filename(
+            filename_template or DEFAULT_EXPORT_TEMPLATE,
+            {
+                "job_title": job_title or "Boss 候选人",
+                "batch_id": batch_id if batch_id is not None else "all",
+                "date": timestamp[:10].replace("-", ""),
+                "time": timestamp[11:19].replace(":", ""),
+                "format": extension,
+                "type": label,
+            },
+        )
+        return f"{stem}.{extension}"
 
     @staticmethod
     def _infer_job_title(rows: list[dict[str, object]]) -> str:

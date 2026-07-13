@@ -47,7 +47,7 @@ class LoggingService:
             "%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
         )
-        self._logger.handlers.clear()
+        self._close_handlers()
         self._logger.setLevel(getattr(logging, level.upper(), logging.INFO))
 
         file_handler = RotatingFileHandler(
@@ -63,6 +63,14 @@ class LoggingService:
 
         self._logger.addHandler(file_handler)
         self._logger.addHandler(callback_handler)
+
+    def close(self) -> None:
+        self._close_handlers()
+
+    def _close_handlers(self) -> None:
+        for handler in list(self._logger.handlers):
+            self._logger.removeHandler(handler)
+            handler.close()
 
     def get_logger(self, name: str | None = None) -> logging.Logger:
         return self._logger if not name else self._logger.getChild(name)

@@ -637,6 +637,33 @@ def apply_migrations(connection) -> None:
         )
         """
     )
+    profile_columns = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(screening_profiles)").fetchall()
+    }
+    structured_columns = {
+        "must_have_json": "TEXT NOT NULL DEFAULT '[]'",
+        "nice_to_have_json": "TEXT NOT NULL DEFAULT '[]'",
+        "risk_flags_json": "TEXT NOT NULL DEFAULT '[]'",
+        "exclusions_json": "TEXT NOT NULL DEFAULT '[]'",
+        "interview_checks_json": "TEXT NOT NULL DEFAULT '[]'",
+        "evidence_policy_json": "TEXT NOT NULL DEFAULT '{}'",
+        "version": "INTEGER NOT NULL DEFAULT 1",
+        "parent_profile_id": "INTEGER",
+    }
+    for column, declaration in structured_columns.items():
+        if column not in profile_columns:
+            connection.execute(f"ALTER TABLE screening_profiles ADD COLUMN {column} {declaration}")
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_candidates_job_updated ON candidates(job_title, updated_at DESC)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_candidate_profiles_city_active "
+        "ON candidate_profiles(city, last_active_at DESC, candidate_id)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_role_matches_role_recruitment_rating_updated "
+        "ON candidate_role_matches(role_id, recruitment_status, latest_rating, updated_at DESC)"
+    )
     connection.execute("DELETE FROM schema_version")
-    connection.execute("INSERT INTO schema_version(version) VALUES (12)")
+    connection.execute("INSERT INTO schema_version(version) VALUES (13)")
     connection.commit()

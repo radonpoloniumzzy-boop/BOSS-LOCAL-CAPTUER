@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
 from ai.schemas import PromptTemplate
 from core.utils import normalize_multiline_text, normalize_text
+from core.models import ScreeningProfile
 
 
 OUTPUT_PROTOCOL = """
@@ -90,6 +92,33 @@ class PromptManager:
         if not jd:
             raise ValueError("请先上传或粘贴 JD。")
         return DEFAULT_JD_PROTOCOL.format(job_title=title, jd_text=jd, output_protocol=OUTPUT_PROTOCOL)
+
+    def build_structured(self, profile: ScreeningProfile) -> str:
+        def section(title: str, values: list[str]) -> str:
+            normalized = [normalize_text(value) for value in values if normalize_text(value)]
+            lines = [f"- {value}" for value in normalized] or ["- 无"]
+            return f"## {title}\n" + "\n".join(lines)
+
+        evidence_policy = json.dumps(
+            profile.evidence_policy or {},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return "\n\n".join(
+            [
+                f"# {normalize_text(profile.job_title) or '目标岗位'}结构化筛选方案",
+                "## 原始岗位 JD\n" + (normalize_multiline_text(profile.jd_text) or "无"),
+                section("必须项", profile.must_have),
+                section("加分项", profile.nice_to_have),
+                section("风险项", profile.risk_flags),
+                section("排除项", profile.exclusions),
+                section("面试核验项", profile.interview_checks),
+                "## 证据策略\n" + evidence_policy,
+                "所有判断必须引用候选人资料中的明确证据；信息不足时进入人工确认，不得脑补。",
+                OUTPUT_PROTOCOL,
+            ]
+        )
 
     def finalize_custom_prompt(self, prompt_text: str, job_title: str, jd_text: str) -> str:
         prompt = normalize_multiline_text(prompt_text)

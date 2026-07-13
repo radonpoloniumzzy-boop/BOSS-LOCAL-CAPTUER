@@ -18,6 +18,7 @@ class LocalApiServer:
         on_error: Callable[[str], None] | None = None,
         get_automation_status: Callable[[], dict[str, object]] | None = None,
         start_automation: Callable[[dict[str, object]], dict[str, object]] | None = None,
+        get_extension_config: Callable[[], dict[str, object]] | None = None,
         auth_token: str = "",
         max_body_bytes: int = 25_000_000,
     ) -> None:
@@ -29,6 +30,7 @@ class LocalApiServer:
         self.on_error = on_error
         self.get_automation_status = get_automation_status
         self.start_automation = start_automation
+        self.get_extension_config = get_extension_config
         self.auth_token = str(auth_token or "")
         self.max_body_bytes = max_body_bytes
         self._server: ThreadingHTTPServer | None = None
@@ -84,6 +86,13 @@ class LocalApiServer:
                         self._send_json(200, {"ok": True, "result": parent.get_automation_status()})
                     except Exception as exc:
                         self._send_json(400, {"ok": False, "error": str(exc)})
+                    return
+                if self.path == "/api/extension/config":
+                    if not self._is_authorized():
+                        self._send_json(401, {"ok": False, "error": "Unauthorized"})
+                        return
+                    result = parent.get_extension_config() if parent.get_extension_config else {}
+                    self._send_json(200, {"ok": True, "result": result})
                     return
                 self._send_json(404, {"error": "Not found"})
 

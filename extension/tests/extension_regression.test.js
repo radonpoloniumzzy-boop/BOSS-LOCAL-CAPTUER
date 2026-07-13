@@ -358,7 +358,7 @@ function testAutomationAutoButtonStartsDesktopWorkflow() {
   assert(html.includes('id="apiToken"'));
   assert(popup.includes("automation_requested"));
   assert(popup.includes("AUTO 采集完成，已提交 AI 初筛"));
-  assert.strictEqual(manifest.version, "0.3.31");
+  assert.strictEqual(manifest.version, "0.4.0");
 }
 
 function testChatAutomationIsOptIn() {
@@ -454,6 +454,28 @@ function testPopupSupportsPairingAndAuthenticatedConnectionCheck() {
   assert(popup.includes("Token 不正确"));
 }
 
+function testFilenameTemplatesMatchDesktopFixtures() {
+  const source = fs.readFileSync(path.join(EXTENSION_DIR, "chat_batch_runner.js"), "utf8");
+  const start = source.indexOf("function renderFilenameTemplate(");
+  assert(start >= 0, "renderFilenameTemplate must exist");
+  const bodyStart = source.indexOf("{", start);
+  let depth = 0;
+  let end = bodyStart;
+  for (; end < source.length; end += 1) {
+    if (source[end] === "{") depth += 1;
+    if (source[end] === "}") depth -= 1;
+    if (depth === 0) break;
+  }
+  const functionSource = source.slice(start, end + 1);
+  const render = vm.runInNewContext(`(${functionSource})`);
+  const fixtures = JSON.parse(
+    fs.readFileSync(path.resolve(EXTENSION_DIR, "..", "tests", "fixtures", "filename_templates.json"), "utf8"),
+  );
+  for (const fixture of fixtures) {
+    assert.strictEqual(render(fixture.template, fixture.values), fixture.expected);
+  }
+}
+
 async function main() {
   await testDownloadEndpointValidation();
   await testStopGuardIgnoresStaleProgress();
@@ -477,6 +499,7 @@ async function main() {
   testRuntimeFingerprintAndVersionAwareRunnerInjection();
   testPairingCodeParsesAndRejectsInvalidInput();
   testPopupSupportsPairingAndAuthenticatedConnectionCheck();
+  testFilenameTemplatesMatchDesktopFixtures();
   console.log("extension regression tests passed");
 }
 

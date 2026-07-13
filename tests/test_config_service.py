@@ -119,6 +119,22 @@ class ConfigServiceTest(unittest.TestCase):
 
             self.assertEqual(loaded.csv_columns, ["name", "raw_card_text"])
 
+    def test_load_removes_legacy_plaintext_api_keys_without_resetting_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = ConfigService(app_root=Path(tmp_dir))
+            payload = service.default_config().to_dict()
+            payload["default_job_title"] = "Keep this role"
+            payload["ai_provider"]["api_key"] = "legacy-secret"
+            payload["automation_flow"]["api_key"] = "legacy-automation-secret"
+            service.config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+            loaded = service.load()
+            raw = json.loads(service.config_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(loaded.default_job_title, "Keep this role")
+            self.assertNotIn("api_key", raw["ai_provider"])
+            self.assertNotIn("api_key", raw["automation_flow"])
+
 
 if __name__ == "__main__":
     unittest.main()

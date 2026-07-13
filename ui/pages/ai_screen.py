@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -49,10 +50,13 @@ PROVIDER_DEFAULTS = {
 class AIScreenPage(QWidget):
     profile_selected = Signal(int)
     save_profile_requested = Signal(object)
+    clone_profile_requested = Signal(int, str)
     delete_profile_requested = Signal(int)
     run_requested = Signal(object)
     stop_requested = Signal()
     test_connection_requested = Signal(object)
+    cancel_connection_test_requested = Signal()
+    delete_credential_requested = Signal(object)
     run_selected = Signal(int)
     resume_run_requested = Signal(int)
     retry_task_requested = Signal(int)
@@ -64,6 +68,9 @@ class AIScreenPage(QWidget):
         self.prompt_source = "generated"
         self._setting_prompt = False
         self._result_rows: list[dict[str, object]] = []
+        self._result_page = 1
+        self._result_page_size = 100
+        self._result_total = 0
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -86,8 +93,10 @@ class AIScreenPage(QWidget):
         self.delete_profile_button = QPushButton("删除")
         profile_row.addWidget(QLabel("方案"))
         profile_row.addWidget(self.profile_combo, 1)
+        self.clone_profile_button = QPushButton("复制")
         profile_row.addWidget(self.new_profile_button)
         profile_row.addWidget(self.save_profile_button)
+        profile_row.addWidget(self.clone_profile_button)
         profile_row.addWidget(self.delete_profile_button)
         profile_layout.addLayout(profile_row)
 
@@ -95,6 +104,23 @@ class AIScreenPage(QWidget):
         self.job_title_input.setPlaceholderText("例如：私募基金市场销售")
         profile_layout.addWidget(QLabel("筛选岗位名称"))
         profile_layout.addWidget(self.job_title_input)
+        self.must_have_input = QLineEdit()
+        self.nice_to_have_input = QLineEdit()
+        self.risk_flags_input = QLineEdit()
+        self.exclusions_input = QLineEdit()
+        self.interview_checks_input = QLineEdit()
+        self.evidence_policy_input = QLineEdit()
+        self.evidence_policy_input.setPlaceholderText('{"explicit_evidence_required":true}')
+        for label, widget in [
+            ("必须项（用分号分隔）", self.must_have_input),
+            ("加分项（用分号分隔）", self.nice_to_have_input),
+            ("风险项（用分号分隔）", self.risk_flags_input),
+            ("排除项（用分号分隔）", self.exclusions_input),
+            ("面试核验项（用分号分隔）", self.interview_checks_input),
+            ("证据策略 JSON", self.evidence_policy_input),
+        ]:
+            profile_layout.addWidget(QLabel(label))
+            profile_layout.addWidget(widget)
 
         text_splitter = QSplitter(Qt.Horizontal)
         jd_group = QGroupBox("岗位 JD（必填）")
@@ -169,9 +195,13 @@ class AIScreenPage(QWidget):
         self.test_button = QPushButton("测试连接")
         self.start_button = QPushButton("开始 AI 初筛")
         self.stop_button = QPushButton("停止")
+        self.cancel_test_button = QPushButton("取消测试")
+        self.delete_credential_button = QPushButton("删除已保存密钥")
         self.stop_button.setEnabled(False)
         action_row.addStretch(1)
         action_row.addWidget(self.test_button)
+        action_row.addWidget(self.cancel_test_button)
+        action_row.addWidget(self.delete_credential_button)
         action_row.addWidget(self.start_button)
         action_row.addWidget(self.stop_button)
         run_form.addRow(action_row)
@@ -203,6 +233,12 @@ class AIScreenPage(QWidget):
         result_head.addWidget(self.resume_run_button)
         result_head.addWidget(self.retry_task_button)
         result_head.addWidget(self.summary_label)
+        self.previous_result_page_button = QPushButton("上一页")
+        self.next_result_page_button = QPushButton("下一页")
+        self.result_page_label = QLabel("第 1 页 / 共 0 条")
+        result_head.addWidget(self.previous_result_page_button)
+        result_head.addWidget(self.result_page_label)
+        result_head.addWidget(self.next_result_page_button)
         result_layout.addLayout(result_head)
 
         self.progress = QProgressBar()
@@ -233,6 +269,7 @@ class AIScreenPage(QWidget):
         self.profile_combo.currentIndexChanged.connect(self._emit_profile_selected)
         self.new_profile_button.clicked.connect(self.clear_profile)
         self.save_profile_button.clicked.connect(self._emit_save_profile)
+        self.clone_profile_button.clicked.connect(self._emit_clone_profile)
         self.delete_profile_button.clicked.connect(self._emit_delete_profile)
         self.upload_jd_button.clicked.connect(self._upload_jd)
         self.upload_prompt_button.clicked.connect(self._upload_prompt)
@@ -240,12 +277,22 @@ class AIScreenPage(QWidget):
         self.prompt_text.textChanged.connect(self._mark_prompt_custom)
         self.provider_combo.currentIndexChanged.connect(self._provider_changed)
         self.test_button.clicked.connect(lambda: self.test_connection_requested.emit(self.provider_payload()))
+        self.cancel_test_button.clicked.connect(self.cancel_connection_test_requested.emit)
+        self.delete_credential_button.clicked.connect(
+            lambda: self.delete_credential_requested.emit(self.provider_payload())
+        )
         self.start_button.clicked.connect(self._emit_run)
         self.stop_button.clicked.connect(self.stop_requested.emit)
         self.run_combo.currentIndexChanged.connect(self._emit_run_selected)
         self.result_status_filter_combo.currentIndexChanged.connect(self._render_filtered_results)
         self.resume_run_button.clicked.connect(self._emit_resume_run)
         self.retry_task_button.clicked.connect(self._emit_retry_task)
+        self.previous_result_page_button.clicked.connect(
+            lambda: self._request_result_page(self._result_page - 1)
+        )
+        self.next_result_page_button.clicked.connect(
+            lambda: self._request_result_page(self._result_page + 1)
+        )
         self._provider_changed()
 
     def load_config(self, config) -> None:
@@ -279,6 +326,14 @@ class AIScreenPage(QWidget):
         self.job_title_input.setText(job_title)
         self.jd_text.setPlainText(str(row.get("jd_text") or ""))
         self.prompt_source = str(row.get("prompt_source") or "generated")
+        self.must_have_input.setText("；".join(row.get("must_have") or []))
+        self.nice_to_have_input.setText("；".join(row.get("nice_to_have") or []))
+        self.risk_flags_input.setText("；".join(row.get("risk_flags") or []))
+        self.exclusions_input.setText("；".join(row.get("exclusions") or []))
+        self.interview_checks_input.setText("；".join(row.get("interview_checks") or []))
+        self.evidence_policy_input.setText(
+            json.dumps(row.get("evidence_policy") or {}, ensure_ascii=False, sort_keys=True)
+        )
         self._setting_prompt = True
         self.prompt_text.setPlainText(str(row.get("prompt_text") or ""))
         self._setting_prompt = False
@@ -297,6 +352,15 @@ class AIScreenPage(QWidget):
         self.prompt_text.clear()
         self._setting_prompt = False
         self.prompt_source = "generated"
+        for widget in [
+            self.must_have_input,
+            self.nice_to_have_input,
+            self.risk_flags_input,
+            self.exclusions_input,
+            self.interview_checks_input,
+            self.evidence_policy_input,
+        ]:
+            widget.clear()
 
     def set_source_options(self, job_titles: list[str], batches: list[dict[str, object]]) -> None:
         current_job = self.source_job_combo.currentData()
@@ -333,6 +397,37 @@ class AIScreenPage(QWidget):
     def show_results(self, rows: list[dict[str, object]]) -> None:
         self._result_rows = [dict(row) for row in rows]
         self._render_filtered_results()
+
+    def set_result_page(
+        self,
+        rows: list[dict[str, object]],
+        *,
+        total: int,
+        page: int,
+        page_size: int,
+    ) -> None:
+        self._result_total = max(0, int(total))
+        self._result_page = max(1, int(page))
+        self._result_page_size = max(1, int(page_size))
+        page_count = max(1, (self._result_total + self._result_page_size - 1) // self._result_page_size)
+        self.result_page_label.setText(
+            f"第 {self._result_page} / {page_count} 页，共 {self._result_total} 条"
+        )
+        self.previous_result_page_button.setEnabled(self._result_page > 1)
+        self.next_result_page_button.setEnabled(self._result_page < page_count)
+        self.show_results(rows)
+
+    def result_page(self) -> int:
+        return self._result_page
+
+    def result_page_size(self) -> int:
+        return self._result_page_size
+
+    def _request_result_page(self, page: int) -> None:
+        self._result_page = max(1, int(page))
+        run_id = self.run_combo.currentData()
+        if run_id is not None:
+            self.run_selected.emit(int(run_id))
 
     def _render_filtered_results(self, *_args: object) -> None:
         status_filter = str(self.result_status_filter_combo.currentData() or "")
@@ -375,7 +470,6 @@ class AIScreenPage(QWidget):
                 if column == 0 and row.get("task_id") is not None:
                     item.setData(Qt.UserRole, int(row["task_id"]))
                 self.result_table.setItem(row_index, column, item)
-        self.result_table.resizeColumnsToContents()
         self.result_table.setColumnWidth(4, 180)
         self.result_table.setColumnWidth(5, 720)
         rating_summary = " / ".join(f"{key}:{value}" for key, value in counts.items())
@@ -573,12 +667,26 @@ class AIScreenPage(QWidget):
         self.status_label.setText(text)
 
     def profile_payload(self) -> dict[str, object]:
+        def items(widget: QLineEdit) -> list[str]:
+            text = widget.text().replace(";", "；")
+            return [value.strip() for value in text.split("；") if value.strip()]
+
+        try:
+            evidence_policy = json.loads(self.evidence_policy_input.text().strip() or "{}")
+        except json.JSONDecodeError:
+            evidence_policy = {"_invalid": self.evidence_policy_input.text().strip()}
         return {
             "id": self.current_profile_id,
             "job_title": self.job_title_input.text().strip(),
             "jd_text": self.jd_text.toPlainText().strip(),
             "prompt_text": self.prompt_text.toPlainText().strip(),
             "prompt_source": self.prompt_source,
+            "must_have": items(self.must_have_input),
+            "nice_to_have": items(self.nice_to_have_input),
+            "risk_flags": items(self.risk_flags_input),
+            "exclusions": items(self.exclusions_input),
+            "interview_checks": items(self.interview_checks_input),
+            "evidence_policy": evidence_policy,
         }
 
     def provider_payload(self) -> dict[str, object]:
@@ -664,6 +772,18 @@ class AIScreenPage(QWidget):
             return
         self.save_profile_requested.emit(payload)
 
+    def _emit_clone_profile(self) -> None:
+        if self.current_profile_id is None:
+            return
+        title, accepted = QInputDialog.getText(
+            self,
+            "复制筛选方案",
+            "新方案名称",
+            text=f"{self.job_title_input.text().strip()} - 副本",
+        )
+        if accepted and title.strip():
+            self.clone_profile_requested.emit(self.current_profile_id, title.strip())
+
     def _emit_delete_profile(self) -> None:
         if self.current_profile_id is None:
             return
@@ -683,6 +803,7 @@ class AIScreenPage(QWidget):
         self.run_requested.emit(payload)
 
     def _emit_run_selected(self) -> None:
+        self._result_page = 1
         run_id = self.run_combo.currentData()
         if run_id is not None:
             self.run_selected.emit(int(run_id))

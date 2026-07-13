@@ -1,5 +1,5 @@
 if (!globalThis.__bossLocalChatBatchRunner) {
-  const CHAT_RUNNER_VERSION = "0.3.25";
+  const CHAT_RUNNER_VERSION = "0.4.0";
   const TEXTS = {
     requestResume: ["求简历", "索要简历", "请求简历"],
     send: ["发送", "发 送", "发送消息"],
@@ -75,6 +75,7 @@ if (!globalThis.__bossLocalChatBatchRunner) {
   globalThis.__bossLocalChatBatchRunner = {
     state: runnerState,
     version: CHAT_RUNNER_VERSION,
+    renderFilenameTemplate,
     dispose(reason = "") {
       runnerState.stopRequested = true;
       runnerState.running = false;
@@ -173,7 +174,7 @@ if (!globalThis.__bossLocalChatBatchRunner) {
     runnerState.stopRequested = false;
     runnerState.runToken = runToken;
     runnerState.mode = normalizeBatchMode(mode);
-    runnerState.settings = normalizeSettings(settings);
+    runnerState.settings = await loadDesktopNamingConfig(normalizeSettings(settings));
     runnerState.processedKeys = new Set();
     runnerState.downloadedAttachmentKeys = new Set();
     runnerState.stats = createEmptyStats();
@@ -582,7 +583,7 @@ if (!globalThis.__bossLocalChatBatchRunner) {
       appendRunnerLog(`preview download probe: ${attachment.fileName || attachment.id} | ${uiDownload.summary || (uiDownload.ok ? "ok" : "failed")}`);
       if (uiDownload.ok && uiDownload.downloadTriggered) {
         runnerState.stats.downloaded += 1;
-        const fileName = uiDownload.observedDownload?.filename || buildDownloadFileName(attachment.fileName || "", settings.downloadFolder || "BossResumes");
+        const fileName = uiDownload.observedDownload?.filename || buildDownloadFileName(attachment.fileName || "", settings.downloadFolder || "BossResumes", settings);
         await closeAttachmentPreview({ force: true });
         return {
           ok: true,
@@ -612,7 +613,7 @@ if (!globalThis.__bossLocalChatBatchRunner) {
       return { ok: false, error: `已找到附件简历卡片，但没有拿到可下载的 PDF 链接。${resolveSummary ? ` ${resolveSummary}` : ""}` };
     }
 
-    const fileName = buildDownloadFileName(attachment.fileName || "", settings.downloadFolder || "BossResumes");
+    const fileName = buildDownloadFileName(attachment.fileName || "", settings.downloadFolder || "BossResumes", settings);
     if (shouldAbortRunner(options)) {
       if (previewOpened) {
         await closeAttachmentPreview({ force: true });
@@ -3088,7 +3089,33 @@ if (!globalThis.__bossLocalChatBatchRunner) {
       scrollWaitMs: Math.max(Number(settings.scrollWaitMs || 1500), 500),
       noNewStopRounds: Math.max(Number(settings.noNewStopRounds || 4), 1),
       downloadFolder: String(settings.downloadFolder || "BossResumes").trim() || "BossResumes",
+      apiBase: String(settings.apiBase || "http://127.0.0.1:17863").replace(/\/+$/, ""),
+      apiToken: String(settings.apiToken || "").trim(),
+      resumeFilenameTemplate: String(settings.resumeFilenameTemplate || "{candidate_name}_{job_title}_{date}_{original_name}"),
+      jobTitle: String(settings.jobTitle || "").trim(),
     };
+  }
+
+  async function loadDesktopNamingConfig(settings) {
+    if (!settings.apiToken) {
+      return settings;
+    }
+    try {
+      const response = await fetch(`${settings.apiBase}/api/extension/config`, {
+        headers: { "X-Boss-Local-Token": settings.apiToken },
+      });
+      const payload = await response.json();
+      if (response.ok && payload?.ok) {
+        return {
+          ...settings,
+          resumeFilenameTemplate: String(payload.result?.resume_filename_template || settings.resumeFilenameTemplate),
+          jobTitle: String(payload.result?.job_title || settings.jobTitle),
+        };
+      }
+    } catch (_error) {
+      // Desktop config is optional; keep the local defaults when unavailable.
+    }
+    return settings;
   }
 
   function normalizeBatchMode(value) {
@@ -3110,11 +3137,47 @@ if (!globalThis.__bossLocalChatBatchRunner) {
     };
   }
 
-  function buildDownloadFileName(fileName, folder) {
-    const baseName = sanitizeFileName(fileName || `resume_${timestampToken(new Date())}.pdf`);
-    const normalizedBase = /\.pdf$/i.test(baseName) ? baseName : `${baseName}.pdf`;
-    const safeFolder = String(folder || "BossResumes").replace(/[\\/:*?"<>|]+/g, "_");
+  function buildDownloadFileName(fileName, folder, settings = {}) {
+    const now = new Date();
+    const stem = renderFilenameTemplate(
+      settings.resumeFilenameTemplate || "{candidate_name}_{job_title}_{date}_{original_name}",
+      {
+        candidate_name: runnerState.currentSession,
+        job_title: settings.jobTitle,
+        date: timestampToken(now).slice(0, 8),
+        time: timestampToken(now).slice(9),
+        original_name: String(fileName || "").replace(/\.pdf$/i, ""),
+        index: "1",
+      },
+    );
+    const normalizedBase = `${stem}.pdf`;
+    const safeFolder = String(folder || "BossResumes")
+      .replace(/\.\./g, "_")
+      .replace(/[\\/:*?"<>|]+/g, "_")
+      .replace(/^[ ._]+|[ ._]+$/g, "") || "BossResumes";
     return `${safeFolder}/${normalizedBase}`;
+  }
+
+  function renderFilenameTemplate(template, values) {
+    const fallback = "unknown";
+    const rendered = String(template || "")
+      .replace(/\{([a-z_][a-z0-9_]*)\}/gi, (_match, name) => {
+        let value = String(values?.[name] || "").trim();
+        if (name === "original_name" && value) {
+          value = value.replace(/\\/g, "/").split("/").pop().replace(/\.[^.]+$/, "");
+        }
+        value = value
+          .replace(/\.\./g, "_")
+          .replace(/[\\/:*?"<>|\x00-\x1f]+/g, "_")
+          .replace(/\s+/g, " ")
+          .replace(/^[ ._]+|[ ._]+$/g, "");
+        return value || fallback;
+      })
+      .replace(/\.\./g, "_")
+      .replace(/[\\/:*?"<>|\x00-\x1f]+/g, "_")
+      .replace(/\s+/g, " ")
+      .replace(/^[ ._]+|[ ._]+$/g, "");
+    return rendered || fallback;
   }
 
   function buildAttachmentRunKey(sessionKey, attachment) {

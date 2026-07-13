@@ -28,6 +28,9 @@ class ReviewPage(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self._rows: list[dict[str, object]] = []
+        self._page = 1
+        self._page_size = 100
+        self._total = 0
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -100,9 +103,20 @@ class ReviewPage(QWidget):
 
         root_layout.addWidget(filter_group)
         root_layout.addWidget(splitter, 1)
+        page_row = QHBoxLayout()
+        page_row.addStretch(1)
+        self.previous_page_button = QPushButton("上一页")
+        self.next_page_button = QPushButton("下一页")
+        self.page_label = QLabel("第 1 页 / 共 0 条")
+        page_row.addWidget(self.previous_page_button)
+        page_row.addWidget(self.page_label)
+        page_row.addWidget(self.next_page_button)
+        root_layout.addLayout(page_row)
 
-        self.refresh_button.clicked.connect(self.refresh_requested.emit)
-        self.role_combo.currentIndexChanged.connect(self.refresh_requested.emit)
+        self.refresh_button.clicked.connect(self._request_first_page)
+        self.role_combo.currentIndexChanged.connect(self._request_first_page)
+        self.previous_page_button.clicked.connect(lambda: self._request_page(self._page - 1))
+        self.next_page_button.clicked.connect(lambda: self._request_page(self._page + 1))
         self.table.itemSelectionChanged.connect(self._show_selected_detail)
         self.record_status_button.clicked.connect(self._emit_status_change)
         self.pass_review_button.clicked.connect(
@@ -143,7 +157,7 @@ class ReviewPage(QWidget):
 
     def set_rows(self, rows: list[dict[str, object]]) -> None:
         self._rows = rows
-        self.summary_label.setText(f"待复核 {len(rows)}")
+        self.summary_label.setText(f"待复核 {self._total or len(rows)}")
         self.table.setRowCount(len(rows))
         for row_index, row in enumerate(rows):
             values = [
@@ -164,7 +178,6 @@ class ReviewPage(QWidget):
                 if column == 0:
                     item.setData(Qt.UserRole, row_index)
                 self.table.setItem(row_index, column, item)
-        self.table.resizeColumnsToContents()
         if rows:
             self.table.selectRow(0)
         else:
@@ -173,6 +186,36 @@ class ReviewPage(QWidget):
         self.pass_review_button.setEnabled(bool(rows))
         self.reject_review_button.setEnabled(bool(rows))
         self.talent_pool_button.setEnabled(bool(rows))
+
+    def set_page_result(
+        self,
+        rows: list[dict[str, object]],
+        *,
+        total: int,
+        page: int,
+        page_size: int,
+    ) -> None:
+        self._total = max(0, int(total))
+        self._page = max(1, int(page))
+        self._page_size = max(1, int(page_size))
+        page_count = max(1, (self._total + self._page_size - 1) // self._page_size)
+        self.page_label.setText(f"第 {self._page} / {page_count} 页，共 {self._total} 条")
+        self.previous_page_button.setEnabled(self._page > 1)
+        self.next_page_button.setEnabled(self._page < page_count)
+        self.set_rows(rows)
+
+    def current_page(self) -> int:
+        return self._page
+
+    def page_size(self) -> int:
+        return self._page_size
+
+    def _request_first_page(self, *_args: object) -> None:
+        self._request_page(1)
+
+    def _request_page(self, page: int) -> None:
+        self._page = max(1, int(page))
+        self.refresh_requested.emit()
 
     def _show_selected_detail(self) -> None:
         row = self._selected_review_row()

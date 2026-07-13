@@ -207,71 +207,27 @@ class CandidateRepository:
         profile_tag: str = "",
         last_active_days: int | str | None = None,
         latest_reason_code: str = "",
+        limit: int | None = None,
+        offset: int = 0,
+        candidate_ids: Iterable[int] | None = None,
     ) -> list[sqlite3.Row]:
         connection = self.db.get_connection()
-        params: list[object] = []
-        joins = " LEFT JOIN candidate_profiles cp ON cp.candidate_id = c.id "
-        filters = []
-
-        if batch_id is not None:
-            joins += " JOIN capture_batch_items bi ON bi.candidate_id = c.id "
-            filters.append("bi.batch_id = ?")
-            params.append(batch_id)
-
-        if keyword:
-            filters.append(
-                """
-                (
-                    c.name LIKE ?
-                    OR c.active_status LIKE ?
-                    OR c.expected_salary LIKE ?
-                    OR c.work_experience_text LIKE ?
-                    OR c.tags_text LIKE ?
-                    OR c.summary_text LIKE ?
-                    OR c.raw_card_text LIKE ?
-                )
-                """
-            )
-            token = f"%{keyword}%"
-            params.extend([token, token, token, token, token, token, token])
-
-        if job_title:
-            filters.append("c.job_title = ?")
-            params.append(job_title)
-        if city:
-            filters.append("cp.city = ?")
-            params.append(city.strip())
-        min_years = self._optional_int(years_min)
-        if min_years is not None:
-            filters.append("cp.years_experience >= ?")
-            params.append(min_years)
-        max_years = self._optional_int(years_max)
-        if max_years is not None:
-            filters.append("cp.years_experience <= ?")
-            params.append(max_years)
-        for profile_token in self._profile_tag_tokens(profile_tag):
-            tag = f"%{profile_token}%"
-            filters.append(
-                """
-                (
-                    cp.industry_tags_json LIKE ?
-                    OR cp.skill_tags_json LIKE ?
-                    OR cp.job_family LIKE ?
-                    OR cp.job_track LIKE ?
-                )
-                """
-            )
-            params.extend([tag, tag, tag, tag])
-        last_active_since = self._last_active_since(last_active_days)
-        if last_active_since:
-            filters.append("cp.last_active_at >= ?")
-            params.append(last_active_since)
-        normalized_latest_reason = str(latest_reason_code or "").strip()
-        if normalized_latest_reason:
-            filters.append("le.reason_code = ?")
-            params.append(self._normalize_reason_code(normalized_latest_reason))
-
-        where_sql = f"WHERE {' AND '.join(filters)}" if filters else ""
+        joins, where_sql, params = self._candidate_filter_sql(
+            keyword=keyword,
+            job_title=job_title,
+            batch_id=batch_id,
+            city=city,
+            years_min=years_min,
+            years_max=years_max,
+            profile_tag=profile_tag,
+            last_active_days=last_active_days,
+            latest_reason_code=latest_reason_code,
+            candidate_ids=candidate_ids,
+        )
+        pagination_sql = ""
+        if limit is not None:
+            pagination_sql = "LIMIT ? OFFSET ?"
+            params.extend([max(1, int(limit)), max(0, int(offset))])
         query = f"""
         SELECT
             c.*,
@@ -336,9 +292,157 @@ class CandidateRepository:
         {joins}
         {where_sql}
         GROUP BY c.id
-        ORDER BY c.updated_at DESC
+        ORDER BY c.updated_at DESC, c.id DESC
+        {pagination_sql}
         """
         return list(connection.execute(query, params).fetchall())
+
+    def page_candidates(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = 100,
+        **filters: object,
+    ) -> dict[str, object]:
+        page, page_size, offset = self._normalize_page(page, page_size)
+        joins, where_sql, params = self._candidate_filter_sql(**filters)
+        if str(filters.get("latest_reason_code") or "").strip():
+            count_sql = f"""
+                SELECT COUNT(*)
+                FROM (
+                    SELECT c.id
+                    FROM candidates c
+                    LEFT JOIN candidate_role_matches lm ON lm.id = (
+                        SELECT m2.id FROM candidate_role_matches m2
+                        WHERE m2.candidate_id = c.id
+                        ORDER BY
+                            CASE m2.latest_rating
+                                WHEN 'UR' THEN 1 WHEN 'SSR' THEN 2 WHEN 'SR' THEN 3
+                                WHEN 'R' THEN 4 WHEN 'N' THEN 5 ELSE 6
+                            END,
+                            m2.updated_at DESC, m2.id DESC
+                        LIMIT 1
+                    )
+                    LEFT JOIN candidate_role_status_events le ON le.id = (
+                        SELECT e2.id FROM candidate_role_status_events e2
+                        WHERE e2.candidate_id = c.id AND e2.role_id = lm.role_id
+                        ORDER BY e2.changed_at DESC, e2.id DESC LIMIT 1
+                    )
+                    {joins}
+                    {where_sql}
+                    GROUP BY c.id
+                ) filtered_candidates
+            """
+        else:
+            count_sql = f"""
+                SELECT COUNT(DISTINCT c.id)
+                FROM candidates c
+                {joins}
+                {where_sql}
+            """
+        total = int(
+            self.db.get_connection().execute(count_sql, params).fetchone()[0]
+        )
+        id_joins = joins
+        if str(filters.get("latest_reason_code") or "").strip():
+            id_joins += """
+                LEFT JOIN candidate_role_matches lm ON lm.id = (
+                    SELECT m2.id FROM candidate_role_matches m2
+                    WHERE m2.candidate_id = c.id
+                    ORDER BY m2.updated_at DESC, m2.id DESC LIMIT 1
+                )
+                LEFT JOIN candidate_role_status_events le ON le.id = (
+                    SELECT e2.id FROM candidate_role_status_events e2
+                    WHERE e2.candidate_id = c.id AND e2.role_id = lm.role_id
+                    ORDER BY e2.changed_at DESC, e2.id DESC LIMIT 1
+                )
+            """
+        id_params = list(params)
+        id_params.extend([page_size, offset])
+        id_rows = self.db.get_connection().execute(
+            f"""
+            SELECT DISTINCT c.id, c.updated_at
+            FROM candidates c
+            {id_joins}
+            {where_sql}
+            ORDER BY c.updated_at DESC, c.id DESC
+            LIMIT ? OFFSET ?
+            """,
+            id_params,
+        ).fetchall()
+        ids = [int(row["id"]) for row in id_rows]
+        rows = self.list_candidates(**filters, candidate_ids=ids) if ids else []
+        return {"rows": rows, "total": total, "page": page, "page_size": page_size}
+
+    def _candidate_filter_sql(
+        self,
+        keyword: str = "",
+        job_title: str = "",
+        batch_id: int | None = None,
+        city: str = "",
+        years_min: int | str | None = None,
+        years_max: int | str | None = None,
+        profile_tag: str = "",
+        last_active_days: int | str | None = None,
+        latest_reason_code: str = "",
+        candidate_ids: Iterable[int] | None = None,
+        **_unused: object,
+    ) -> tuple[str, str, list[object]]:
+        params: list[object] = []
+        joins = " LEFT JOIN candidate_profiles cp ON cp.candidate_id = c.id "
+        filters: list[str] = []
+        if batch_id is not None:
+            joins += " JOIN capture_batch_items bi ON bi.candidate_id = c.id "
+            filters.append("bi.batch_id = ?")
+            params.append(batch_id)
+        if keyword:
+            token = f"%{keyword}%"
+            filters.append(
+                "(c.name LIKE ? OR c.active_status LIKE ? OR c.expected_salary LIKE ? "
+                "OR c.work_experience_text LIKE ? OR c.tags_text LIKE ? "
+                "OR c.summary_text LIKE ? OR c.raw_card_text LIKE ?)"
+            )
+            params.extend([token] * 7)
+        if job_title:
+            filters.append("c.job_title = ?")
+            params.append(job_title)
+        if city:
+            filters.append("cp.city = ?")
+            params.append(city.strip())
+        min_years = self._optional_int(years_min)
+        if min_years is not None:
+            filters.append("cp.years_experience >= ?")
+            params.append(min_years)
+        max_years = self._optional_int(years_max)
+        if max_years is not None:
+            filters.append("cp.years_experience <= ?")
+            params.append(max_years)
+        for profile_token in self._profile_tag_tokens(profile_tag):
+            tag = f"%{profile_token}%"
+            filters.append(
+                "(cp.industry_tags_json LIKE ? OR cp.skill_tags_json LIKE ? "
+                "OR cp.job_family LIKE ? OR cp.job_track LIKE ?)"
+            )
+            params.extend([tag] * 4)
+        last_active_since = self._last_active_since(last_active_days)
+        if last_active_since:
+            filters.append("cp.last_active_at >= ?")
+            params.append(last_active_since)
+        if str(latest_reason_code or "").strip():
+            filters.append("le.reason_code = ?")
+            params.append(self._normalize_reason_code(str(latest_reason_code)))
+        normalized_ids = [int(value) for value in (candidate_ids or [])]
+        if normalized_ids:
+            filters.append(f"c.id IN ({','.join('?' for _ in normalized_ids)})")
+            params.extend(normalized_ids)
+        where_sql = f"WHERE {' AND '.join(filters)}" if filters else ""
+        return joins, where_sql, params
+
+    @staticmethod
+    def _normalize_page(page: int, page_size: int) -> tuple[int, int, int]:
+        normalized_page = max(1, int(page))
+        normalized_size = max(1, min(int(page_size), 200))
+        return normalized_page, normalized_size, (normalized_page - 1) * normalized_size
 
     def _upsert_candidate_profile(self, connection: sqlite3.Connection, candidate: CandidateRecord) -> None:
         if candidate.id is None:
@@ -573,50 +677,117 @@ class CandidateRepository:
         existing = None
         if profile.id is not None:
             existing = connection.execute(
-                "SELECT id, created_at FROM screening_profiles WHERE id = ?",
+                "SELECT id, created_at, version FROM screening_profiles WHERE id = ?",
                 (profile.id,),
             ).fetchone()
         if existing is None:
             existing = connection.execute(
-                "SELECT id, created_at FROM screening_profiles WHERE job_title = ?",
+                "SELECT id, created_at, version FROM screening_profiles WHERE job_title = ?",
                 (profile.job_title,),
             ).fetchone()
 
+        values = (
+            profile.job_title,
+            profile.jd_text,
+            profile.prompt_text,
+            profile.prompt_source,
+            json.dumps(profile.must_have, ensure_ascii=False),
+            json.dumps(profile.nice_to_have, ensure_ascii=False),
+            json.dumps(profile.risk_flags, ensure_ascii=False),
+            json.dumps(profile.exclusions, ensure_ascii=False),
+            json.dumps(profile.interview_checks, ensure_ascii=False),
+            json.dumps(profile.evidence_policy, ensure_ascii=False, sort_keys=True),
+        )
         if existing is None:
             cursor = connection.execute(
                 """
                 INSERT INTO screening_profiles(
-                    job_title, jd_text, prompt_text, prompt_source, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    job_title, jd_text, prompt_text, prompt_source,
+                    must_have_json, nice_to_have_json, risk_flags_json, exclusions_json,
+                    interview_checks_json, evidence_policy_json, version, parent_profile_id,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (profile.job_title, profile.jd_text, profile.prompt_text, profile.prompt_source, timestamp, timestamp),
+                (*values, max(1, int(profile.version)), profile.parent_profile_id, timestamp, timestamp),
             )
             profile.id = int(cursor.lastrowid)
             profile.created_at = timestamp
         else:
             profile.id = int(existing["id"])
             profile.created_at = str(existing["created_at"])
+            profile.version = int(existing["version"] or 1) + 1
             connection.execute(
                 """
                 UPDATE screening_profiles
-                SET job_title = ?, jd_text = ?, prompt_text = ?, prompt_source = ?, updated_at = ?
+                SET job_title = ?, jd_text = ?, prompt_text = ?, prompt_source = ?,
+                    must_have_json = ?, nice_to_have_json = ?, risk_flags_json = ?,
+                    exclusions_json = ?, interview_checks_json = ?, evidence_policy_json = ?,
+                    version = ?, parent_profile_id = ?, updated_at = ?
                 WHERE id = ?
                 """,
-                (profile.job_title, profile.jd_text, profile.prompt_text, profile.prompt_source, timestamp, profile.id),
+                (*values, profile.version, profile.parent_profile_id, timestamp, profile.id),
             )
         profile.updated_at = timestamp
         connection.commit()
         return profile
 
-    def list_screening_profiles(self) -> list[sqlite3.Row]:
+    def list_screening_profiles(self) -> list[dict[str, object]]:
         connection = self.db.get_connection()
-        return list(connection.execute("SELECT * FROM screening_profiles ORDER BY updated_at DESC").fetchall())
+        rows = connection.execute("SELECT * FROM screening_profiles ORDER BY updated_at DESC").fetchall()
+        return [self._decode_screening_profile(row) for row in rows]
 
-    def get_screening_profile(self, profile_id: int) -> sqlite3.Row | None:
-        return self.db.get_connection().execute(
+    def get_screening_profile(self, profile_id: int) -> dict[str, object] | None:
+        row = self.db.get_connection().execute(
             "SELECT * FROM screening_profiles WHERE id = ?",
             (profile_id,),
         ).fetchone()
+        return self._decode_screening_profile(row) if row is not None else None
+
+    @staticmethod
+    def _decode_screening_profile(row: sqlite3.Row) -> dict[str, object]:
+        result = dict(row)
+        for target, source in [
+            ("must_have", "must_have_json"),
+            ("nice_to_have", "nice_to_have_json"),
+            ("risk_flags", "risk_flags_json"),
+            ("exclusions", "exclusions_json"),
+            ("interview_checks", "interview_checks_json"),
+            ("evidence_policy", "evidence_policy_json"),
+        ]:
+            try:
+                result[target] = json.loads(str(result.get(source) or "[]"))
+            except (TypeError, json.JSONDecodeError):
+                result[target] = {} if target == "evidence_policy" else []
+        return result
+
+    def clone_screening_profile(self, profile_id: int, new_job_title: str) -> ScreeningProfile:
+        source = self.get_screening_profile(profile_id)
+        if source is None:
+            raise ValueError("筛选方案不存在")
+        title = str(new_job_title or "").strip()
+        if not title:
+            raise ValueError("复制方案必须填写新名称")
+        duplicate = self.db.get_connection().execute(
+            "SELECT id FROM screening_profiles WHERE job_title = ?",
+            (title,),
+        ).fetchone()
+        if duplicate is not None:
+            raise ValueError("同名筛选方案已存在")
+        return self.save_screening_profile(
+            ScreeningProfile(
+                job_title=title,
+                jd_text=str(source.get("jd_text") or ""),
+                prompt_text=str(source.get("prompt_text") or ""),
+                prompt_source=str(source.get("prompt_source") or "generated"),
+                must_have=list(source.get("must_have") or []),
+                nice_to_have=list(source.get("nice_to_have") or []),
+                risk_flags=list(source.get("risk_flags") or []),
+                exclusions=list(source.get("exclusions") or []),
+                interview_checks=list(source.get("interview_checks") or []),
+                evidence_policy=dict(source.get("evidence_policy") or {}),
+                parent_profile_id=profile_id,
+            )
+        )
 
     def delete_screening_profile(self, profile_id: int) -> None:
         connection = self.db.get_connection()
@@ -1842,11 +2013,24 @@ class CandidateRepository:
             ).fetchall()
         )
 
-    def list_screening_task_results(self, run_id: int) -> list[sqlite3.Row]:
+    def list_screening_task_results(
+        self,
+        run_id: int,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+        include_total: bool = False,
+    ) -> list[sqlite3.Row]:
         connection = self.db.get_connection()
+        total_select = ", COUNT(*) OVER() AS _page_total" if include_total else ""
+        pagination_sql = ""
+        params: list[object] = [run_id]
+        if limit is not None:
+            pagination_sql = "LIMIT ? OFFSET ?"
+            params.extend([max(1, int(limit)), max(0, int(offset))])
         return list(
             connection.execute(
-                """
+                f"""
                 SELECT
                     t.id AS task_id,
                     t.run_id,
@@ -1882,6 +2066,7 @@ class CandidateRepository:
                     c.name,
                     c.job_title,
                     c.raw_card_text
+                    {total_select}
                 FROM screening_tasks t
                 JOIN candidates c ON c.id = t.candidate_id
                 LEFT JOIN screening_results r ON r.id = t.result_id
@@ -1902,10 +2087,28 @@ class CandidateRepository:
                         WHEN 'R' THEN 4 WHEN 'N' THEN 5 ELSE 6
                     END,
                     t.id
+                {pagination_sql}
                 """,
-                (run_id,),
+                params,
             ).fetchall()
         )
+
+    def page_screening_task_results(
+        self,
+        run_id: int,
+        *,
+        page: int = 1,
+        page_size: int = 100,
+    ) -> dict[str, object]:
+        page, page_size, offset = self._normalize_page(page, page_size)
+        rows = self.list_screening_task_results(
+            run_id,
+            limit=page_size,
+            offset=offset,
+            include_total=True,
+        )
+        total = int(rows[0]["_page_total"]) if rows else 0
+        return {"rows": rows, "total": total, "page": page, "page_size": page_size}
 
     def list_candidate_role_matches(
         self,
@@ -1924,6 +2127,8 @@ class CandidateRepository:
         latest_reason_code: str = "",
         query: str = "",
         limit: int = 200,
+        offset: int = 0,
+        include_total: bool = False,
     ) -> list[sqlite3.Row]:
         connection = self.db.get_connection()
         joins = ""
@@ -2013,7 +2218,8 @@ class CandidateRepository:
             )
             params.extend([like, like, like, like, like, like, like])
         where_sql = f"WHERE {' AND '.join(where)}" if where else ""
-        params.append(max(1, min(int(limit), 1000)))
+        total_select = ", COUNT(*) OVER() AS _page_total" if include_total else ""
+        params.extend([max(1, min(int(limit), 1000)), max(0, int(offset))])
         return list(
             connection.execute(
                 f"""
@@ -2058,6 +2264,7 @@ class CandidateRepository:
                     cp.last_active_at,
                     cp.profile_completeness,
                     p.job_title AS role_title
+                    {total_select}
                 FROM candidate_role_matches m
                 JOIN candidates c ON c.id = m.candidate_id
                 JOIN screening_profiles p ON p.id = m.role_id
@@ -2080,17 +2287,36 @@ class CandidateRepository:
                     END,
                     m.updated_at DESC,
                     c.name COLLATE NOCASE
-                LIMIT ?
+                LIMIT ? OFFSET ?
                 """,
                 params,
             ).fetchall()
         )
+
+    def page_candidate_role_matches(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = 100,
+        **filters: object,
+    ) -> dict[str, object]:
+        page, page_size, offset = self._normalize_page(page, page_size)
+        rows = self.list_candidate_role_matches(
+            **filters,
+            limit=page_size,
+            offset=offset,
+            include_total=True,
+        )
+        total = int(rows[0]["_page_total"]) if rows else 0
+        return {"rows": rows, "total": total, "page": page, "page_size": page_size}
 
     def list_manual_review_candidates(
         self,
         *,
         role_id: int | None = None,
         limit: int = 300,
+        offset: int = 0,
+        include_total: bool = False,
     ) -> list[sqlite3.Row]:
         connection = self.db.get_connection()
         where = [
@@ -2109,7 +2335,8 @@ class CandidateRepository:
             where.append("m.role_id = ?")
             params.append(role_id)
         where_sql = "WHERE " + " AND ".join(where)
-        params.append(max(1, min(int(limit), 1000)))
+        total_select = ", COUNT(*) OVER() AS _page_total" if include_total else ""
+        params.extend([max(1, min(int(limit), 1000)), max(0, int(offset))])
         return list(
             connection.execute(
                 f"""
@@ -2161,6 +2388,7 @@ class CandidateRepository:
                         WHEN TRIM(COALESCE(r.risk_json, '')) NOT IN ('', '[]') THEN '模型识别到风险'
                         ELSE '需要复核'
                     END AS review_reason
+                    {total_select}
                 FROM candidate_role_matches m
                 JOIN candidates c ON c.id = m.candidate_id
                 JOIN screening_profiles p ON p.id = m.role_id
@@ -2186,11 +2414,28 @@ class CandidateRepository:
                         ELSE 6
                     END,
                     m.updated_at DESC
-                LIMIT ?
+                LIMIT ? OFFSET ?
                 """,
                 params,
             ).fetchall()
         )
+
+    def page_manual_review_candidates(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = 100,
+        **filters: object,
+    ) -> dict[str, object]:
+        page, page_size, offset = self._normalize_page(page, page_size)
+        rows = self.list_manual_review_candidates(
+            **filters,
+            limit=page_size,
+            offset=offset,
+            include_total=True,
+        )
+        total = int(rows[0]["_page_total"]) if rows else 0
+        return {"rows": rows, "total": total, "page": page, "page_size": page_size}
 
     def get_manual_review_quality_summary(
         self,
