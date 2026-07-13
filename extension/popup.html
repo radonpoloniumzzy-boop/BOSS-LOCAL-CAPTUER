@@ -123,6 +123,11 @@
     <label for="jobTitle">岗位名称</label>
     <input id="jobTitle" type="text" placeholder="Boss 推荐牛人 / 猎聘推荐人才">
 
+    <label for="pairingCode">桌面端连接码</label>
+    <input id="pairingCode" type="password" placeholder="粘贴桌面端复制的连接码">
+    <button id="applyPairingCode" type="button">应用连接码并测试</button>
+    <div class="hint">在桌面端“设置”点击“复制扩展连接码”，粘贴到这里即可自动配置。</div>
+
     <label for="apiBase">本地接口地址</label>
     <input id="apiBase" type="text" value="http://127.0.0.1:17863">
 
@@ -228,6 +233,7 @@
 
     <div id="status" class="status-box">就绪。</div>
 
+    <script src="pairing.js"></script>
     <script src="popup.js"></script>
   </body>
 </html>

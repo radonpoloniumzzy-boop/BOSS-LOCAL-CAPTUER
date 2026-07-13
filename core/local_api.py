@@ -49,8 +49,29 @@ class LocalApiServer:
                 self._send_json(204, {})
 
             def do_GET(self) -> None:
+                if self.path == "/":
+                    self._send_json(
+                        200,
+                        {
+                            "status": "ok",
+                            "service": "Boss Local Capture API",
+                            "endpoint": parent.endpoint,
+                            "health": "/health",
+                            "connection_check": "/api/connection/check",
+                        },
+                    )
+                    return
                 if self.path == "/health":
                     self._send_json(200, {"status": "ok", "endpoint": parent.endpoint})
+                    return
+                if self.path == "/api/connection/check":
+                    if not self._is_authorized():
+                        self._send_json(401, {"ok": False, "error": "Unauthorized"})
+                        return
+                    self._send_json(
+                        200,
+                        {"ok": True, "status": "connected", "auth": "ok", "endpoint": parent.endpoint},
+                    )
                     return
                 if self.path == "/api/automation/status":
                     if not self._is_authorized():

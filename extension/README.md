@@ -17,13 +17,14 @@ Steps:
 Collection usage:
 
 1. Start the local desktop app first
-2. Confirm the local API endpoint in the popup and paste the local API token from the desktop app `Settings` page
-3. Open Boss or Liepin in a normal Chrome tab and log in manually
+2. In desktop `Settings`, click `复制扩展连接码`
+3. Paste the code into the popup and click `应用连接码并测试`
+4. Open Boss or Liepin in a normal Chrome tab and log in manually
    - Boss recommended talent page
    - Liepin recommended page: `https://lpt.liepin.com/recommend`
-4. Open the extension popup
-5. Check `Job Title`, `Local API Base`, and `Local API Token`
-6. Click `Collect Current Page` or `Auto Scroll + Collect`
+5. Open the extension popup
+6. Check `Job Title` and confirm the connection status is successful
+7. Click `Collect Current Page` or `Auto Scroll + Collect`
 
 One-click automation usage:
 

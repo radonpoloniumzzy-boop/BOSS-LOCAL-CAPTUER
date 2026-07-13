@@ -59,9 +59,12 @@ const statusEl = document.getElementById("status");
 const batchStatusEl = document.getElementById("batchStatus");
 const batchLogEl = document.getElementById("batchLog");
 const automationAutoButton = document.getElementById("automationAuto");
+const pairingCodeInput = document.getElementById("pairingCode");
+const applyPairingCodeButton = document.getElementById("applyPairingCode");
 let batchStatusTimer = null;
 
 automationAutoButton.addEventListener("click", () => runAutomation());
+applyPairingCodeButton.addEventListener("click", () => applyPairingCodeAndTest());
 document.getElementById("scrollWaitDown").addEventListener("click", () => adjustScrollWait(-30));
 document.getElementById("scrollWaitUp").addEventListener("click", () => adjustScrollWait(30));
 document.getElementById("collectCurrent").addEventListener("click", () => runCollection(false));
@@ -169,6 +172,58 @@ async function startDesktopAutomation(settings, sourceUrl) {
     throw new Error("桌面端自动化方案未配置完整，请先选择筛选方案并保存。 ");
   }
   return result.result;
+}
+
+async function applyPairingCodeAndTest() {
+  applyPairingCodeButton.disabled = true;
+  setStatus("正在验证桌面端连接...");
+  try {
+    const pairing = BossLocalPairing.parsePairingCode(pairingCodeInput.value);
+    const verifiedSettings = {
+      ...collectSettings(),
+      apiBase: normalizeLocalApiBase(pairing.apiBase),
+      apiToken: pairing.apiToken,
+    };
+    await testLocalApiConnection(verifiedSettings);
+    fields.apiBase.value = verifiedSettings.apiBase;
+    fields.apiToken.value = verifiedSettings.apiToken;
+    await chrome.storage.local.set({
+      apiBase: fields.apiBase.value,
+      apiToken: fields.apiToken.value,
+    });
+    pairingCodeInput.value = "";
+    setStatus(`桌面端已连接。\n接口地址：${fields.apiBase.value}\nToken 验证：通过`);
+  } catch (error) {
+    setStatus(`连接失败。\n${error.message || String(error)}`);
+  } finally {
+    applyPairingCodeButton.disabled = false;
+  }
+}
+
+async function testLocalApiConnection(settings) {
+  const apiBase = normalizeLocalApiBase(settings.apiBase);
+  let response;
+  try {
+    response = await fetch(`${apiBase}/api/connection/check`, {
+      method: "GET",
+      headers: localApiHeaders(settings),
+    });
+  } catch (error) {
+    throw new Error(formatLocalApiFetchError(apiBase, error));
+  }
+  let result = {};
+  try {
+    result = await response.json();
+  } catch (_error) {
+    result = {};
+  }
+  if (response.status === 401) {
+    throw new Error("Token 不正确，请从桌面端设置页重新复制连接码。");
+  }
+  if (!response.ok || !result.ok) {
+    throw new Error(result.error || `桌面端返回状态码 ${response.status}`);
+  }
+  return result;
 }
 
 async function adjustScrollWait(deltaMs) {

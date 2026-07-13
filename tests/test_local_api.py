@@ -38,6 +38,38 @@ class LocalApiServerTest(unittest.TestCase):
         self.assertEqual(response.status, 200)
         self.assertEqual(payload["status"], "ok")
 
+    def test_root_endpoint_explains_how_to_check_connection(self) -> None:
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.port, timeout=5)
+        connection.request("GET", "/")
+        response = connection.getresponse()
+        payload = json.loads(response.read().decode("utf-8"))
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["connection_check"], "/api/connection/check")
+
+    def test_connection_check_verifies_token(self) -> None:
+        authorized = http.client.HTTPConnection("127.0.0.1", self.server.port, timeout=5)
+        authorized.request(
+            "GET",
+            "/api/connection/check",
+            headers={"X-Boss-Local-Token": self.token},
+        )
+        authorized_response = authorized.getresponse()
+        authorized_payload = json.loads(authorized_response.read().decode("utf-8"))
+
+        self.assertEqual(authorized_response.status, 200)
+        self.assertTrue(authorized_payload["ok"])
+        self.assertEqual(authorized_payload["auth"], "ok")
+
+        unauthorized = http.client.HTTPConnection("127.0.0.1", self.server.port, timeout=5)
+        unauthorized.request("GET", "/api/connection/check")
+        unauthorized_response = unauthorized.getresponse()
+        unauthorized_payload = json.loads(unauthorized_response.read().decode("utf-8"))
+
+        self.assertEqual(unauthorized_response.status, 401)
+        self.assertFalse(unauthorized_payload["ok"])
+
     def test_import_endpoint(self) -> None:
         body = json.dumps(
             {

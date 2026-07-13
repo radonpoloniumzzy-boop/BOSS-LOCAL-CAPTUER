@@ -358,7 +358,7 @@ function testAutomationAutoButtonStartsDesktopWorkflow() {
   assert(html.includes('id="apiToken"'));
   assert(popup.includes("automation_requested"));
   assert(popup.includes("AUTO 采集完成，已提交 AI 初筛"));
-  assert.strictEqual(manifest.version, "0.3.30");
+  assert.strictEqual(manifest.version, "0.3.31");
 }
 
 function testChatAutomationIsOptIn() {
@@ -425,6 +425,35 @@ function testRuntimeFingerprintAndVersionAwareRunnerInjection() {
   assert(popup.includes("formatRuntimeFingerprint"));
 }
 
+function testPairingCodeParsesAndRejectsInvalidInput() {
+  const source = fs.readFileSync(path.join(EXTENSION_DIR, "pairing.js"), "utf8");
+  const context = { URL };
+  context.globalThis = context;
+  vm.runInNewContext(source, context, { filename: "pairing.js" });
+
+  assert.deepStrictEqual(
+    { ...context.BossLocalPairing.parsePairingCode(
+      "boss-local://pair?apiBase=http%3A%2F%2F127.0.0.1%3A19001&apiToken=pair-token_123",
+    ) },
+    { apiBase: "http://127.0.0.1:19001", apiToken: "pair-token_123" },
+  );
+  assert.throws(
+    () => context.BossLocalPairing.parsePairingCode("http://127.0.0.1:17863"),
+    /连接码格式无效/,
+  );
+}
+
+function testPopupSupportsPairingAndAuthenticatedConnectionCheck() {
+  const popup = fs.readFileSync(path.join(EXTENSION_DIR, "popup.js"), "utf8");
+  const html = fs.readFileSync(path.join(EXTENSION_DIR, "popup.html"), "utf8");
+  assert(html.includes('id="pairingCode"'));
+  assert(html.includes('id="applyPairingCode"'));
+  assert(html.includes('<script src="pairing.js"></script>'));
+  assert(popup.includes("applyPairingCodeAndTest"));
+  assert(popup.includes("/api/connection/check"));
+  assert(popup.includes("Token 不正确"));
+}
+
 async function main() {
   await testDownloadEndpointValidation();
   await testStopGuardIgnoresStaleProgress();
@@ -446,6 +475,8 @@ async function main() {
   testScrollWaitDefaultsToThirtyMillisecondsAndHasAdjusters();
   testHoldEndScrollStrategyIsDefault();
   testRuntimeFingerprintAndVersionAwareRunnerInjection();
+  testPairingCodeParsesAndRejectsInvalidInput();
+  testPopupSupportsPairingAndAuthenticatedConnectionCheck();
   console.log("extension regression tests passed");
 }
 

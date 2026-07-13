@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import urlencode
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
+    QApplication,
     QFileDialog,
     QComboBox,
     QDoubleSpinBox,
@@ -45,6 +47,12 @@ class SettingsPage(QWidget):
         self.local_api_port_input.setRange(1024, 65535)
         self.local_api_token_input = QLineEdit()
         self.local_api_token_input.setReadOnly(True)
+        self.copy_pairing_code_button = QPushButton("复制扩展连接码")
+        token_row = QHBoxLayout()
+        token_row.addWidget(self.local_api_token_input, 1)
+        token_row.addWidget(self.copy_pairing_code_button)
+        token_wrapper = QWidget()
+        token_wrapper.setLayout(token_row)
         self.scroll_mode_combo = QComboBox()
         self.scroll_mode_combo.addItem("整页滚动", "page")
         self.scroll_mode_combo.addItem("固定步长", "fixed")
@@ -64,7 +72,7 @@ class SettingsPage(QWidget):
         base_form.addRow("目标链接", self.target_url_input)
         base_form.addRow("默认岗位名称", self.job_title_input)
         base_form.addRow("本地接口端口", self.local_api_port_input)
-        base_form.addRow("本地接口 Token", self.local_api_token_input)
+        base_form.addRow("扩展连接", token_wrapper)
         base_form.addRow("滚动模式", self.scroll_mode_combo)
         base_form.addRow("滚动步长", self.scroll_step_input)
         base_form.addRow("滚动等待秒数", self.scroll_wait_input)
@@ -92,6 +100,7 @@ class SettingsPage(QWidget):
         root_layout.addStretch(1)
 
         self.save_button.clicked.connect(self._emit_save)
+        self.copy_pairing_code_button.clicked.connect(self._copy_pairing_code)
 
     def load_config(self, config: AppConfig) -> None:
         default_job_title = config.default_job_title
@@ -106,6 +115,7 @@ class SettingsPage(QWidget):
         self.job_title_input.setText(default_job_title)
         self.local_api_port_input.setValue(config.local_api_port)
         self.local_api_token_input.setText(config.local_api_token)
+        self.copy_pairing_code_button.setText("复制扩展连接码")
         self._set_combo_data(self.scroll_mode_combo, config.scroll_mode)
         self.scroll_step_input.setValue(config.scroll_step)
         self.scroll_wait_input.setValue(config.scroll_wait_seconds)
@@ -150,6 +160,16 @@ class SettingsPage(QWidget):
             QMessageBox.warning(self, "路径无效", "用户数据目录的上级目录不存在。")
             return
         self.save_requested.emit(config)
+
+    def _copy_pairing_code(self) -> None:
+        query = urlencode(
+            {
+                "apiBase": f"http://127.0.0.1:{self.local_api_port_input.value()}",
+                "apiToken": self.local_api_token_input.text().strip(),
+            }
+        )
+        QApplication.clipboard().setText(f"boss-local://pair?{query}")
+        self.copy_pairing_code_button.setText("已复制连接码")
 
     def _create_path_row(self, form: QFormLayout, label: str, mode: str) -> QLineEdit:
         line_edit = QLineEdit()

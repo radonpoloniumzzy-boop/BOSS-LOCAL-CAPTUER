@@ -84,8 +84,8 @@ D:\codex\BOSS-LOCAL-CAPTURE-review\extension
 The extension popup lets you set:
 
 - job title
-- local API base, default `http://127.0.0.1:17863`
-- local API token copied from the desktop app `Settings` page
+- desktop pairing code copied from the desktop app `Settings` page
+- local API base and token, filled automatically after pairing
 - scroll mode
 - scroll step
 - wait milliseconds
@@ -133,6 +133,7 @@ AI ratings are assistive ranking signals and require human review. The app rejec
 The desktop app starts a local HTTP server for the extension:
 
 - `GET /health`
+- `GET /api/connection/check`
 - `POST /api/import/cards`
 - `GET /api/automation/status`
 - `POST /api/automation/start`
@@ -143,8 +144,7 @@ Default endpoint:
 http://127.0.0.1:17863
 ```
 
-If you change the port in `Settings`, update the extension popup too.
-All `/api/*` endpoints require the `X-Boss-Local-Token` header. Copy the token from the desktop app `Settings` page into the extension popup.
+Use `Copy Extension Pairing Code` in `Settings`, paste it into the extension, and click `Apply Pairing Code And Test`. This fills the endpoint and token together and verifies authentication. All `/api/*` endpoints require the `X-Boss-Local-Token` header.
 
 ## Project Structure
 
