@@ -4,7 +4,7 @@ import threading
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
-from PySide6.QtCore import QObject, Qt, QThread, Signal
+from PySide6.QtCore import QObject, QSettings, Qt, QThread, Signal
 from PySide6.QtGui import QAction, QCloseEvent
 from PySide6.QtWidgets import (
     QDockWidget,
@@ -14,8 +14,12 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
+    QScrollArea,
+    QSizePolicy,
     QStackedWidget,
+    QStyle,
     QToolBar,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -68,12 +72,17 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("招聘候选人采集与 AI 初筛工具")
-        self.resize(1360, 900)
+        self.resize(920, 720)
+        self.setMinimumSize(720, 560)
 
         self.config_service = ConfigService()
         self.logging_service = LoggingService(self.config_service.logs_dir, level="INFO")
         self.config_service.logger = self.logging_service.get_logger("core")
         self.config = self.config_service.load()
+        self.ui_settings = QSettings(
+            str(self.config_service.data_dir / "ui_state.ini"),
+            QSettings.IniFormat,
+        )
         self.credential_store = CredentialStore()
         self.logging_service.configure(self.config.log_level)
         self.logger = self.logging_service.get_logger("ui.main_window")
@@ -118,6 +127,7 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._setup_logging_panel()
+        self._restore_ui_state()
         self._setup_automation_worker()
         self._setup_candidate_query_worker()
         self._setup_ai_connection_test_worker()
@@ -154,12 +164,15 @@ class MainWindow(QMainWindow):
         central_layout.setSpacing(0)
 
         self.navigation = QListWidget()
-        self.navigation.setFixedWidth(180)
+        self.navigation.setFixedWidth(112)
+        self.navigation.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         for label in ["仪表盘", "自动化流程", "候选人", "AI 初筛", "人工复核", "设置"]:
             QListWidgetItem(label, self.navigation)
         self.navigation.setCurrentRow(0)
 
         self.stack = QStackedWidget()
+        self.stack.setMinimumSize(0, 0)
+        self.stack.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
         self.dashboard_page = DashboardPage()
         self.automation_flow_page = AutomationFlowPage()
         self.candidates_page = CandidatesPage()
@@ -167,6 +180,7 @@ class MainWindow(QMainWindow):
         self.review_page = ReviewPage()
         self.settings_page = SettingsPage()
 
+        self._page_scroll_areas: list[QScrollArea] = []
         for page in [
             self.dashboard_page,
             self.automation_flow_page,
@@ -175,14 +189,39 @@ class MainWindow(QMainWindow):
             self.review_page,
             self.settings_page,
         ]:
-            self.stack.addWidget(page)
+            scroll_area = QScrollArea()
+            scroll_area.setWidgetResizable(True)
+            scroll_area.setFrameShape(QScrollArea.NoFrame)
+            scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            scroll_area.setWidget(page)
+            scroll_area.setMinimumSize(0, 0)
+            scroll_area.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+            self._page_scroll_areas.append(scroll_area)
+            self.stack.addWidget(scroll_area)
 
         content_wrapper = QWidget()
         content_layout = QVBoxLayout(content_wrapper)
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.addWidget(self.stack)
 
-        central_layout.addWidget(self.navigation)
+        self._navigation_full_labels = [
+            self.navigation.item(index).text() for index in range(self.navigation.count())
+        ]
+        self._navigation_compact_labels = ["概", "流", "人", "AI", "核", "设"]
+        self.navigation_container = QWidget()
+        navigation_layout = QVBoxLayout(self.navigation_container)
+        navigation_layout.setContentsMargins(0, 0, 0, 0)
+        navigation_layout.setSpacing(0)
+        self.navigation_toggle = QToolButton()
+        self.navigation_toggle.setToolTip("展开导航")
+        self.navigation_toggle.clicked.connect(self._toggle_navigation)
+        navigation_layout.addWidget(self.navigation_toggle)
+        navigation_layout.addWidget(self.navigation, 1)
+        self._navigation_collapsed = False
+        self._set_navigation_collapsed(True)
+
+        central_layout.addWidget(self.navigation_container)
         central_layout.addWidget(content_wrapper, 1)
         self.setCentralWidget(central)
         self._build_toolbar()
@@ -209,6 +248,8 @@ class MainWindow(QMainWindow):
         toolbar.addAction(self.export_markdown_action)
         toolbar.addSeparator()
         toolbar.addAction(self.refresh_action)
+        self.main_toolbar = toolbar
+        toolbar.hide()
 
     def _setup_logging_panel(self) -> None:
         self.log_bridge = _LogBridge()
@@ -221,7 +262,42 @@ class MainWindow(QMainWindow):
         dock.setWidget(self.log_view)
         dock.setAllowedAreas(Qt.BottomDockWidgetArea)
         self.addDockWidget(Qt.BottomDockWidgetArea, dock)
+        self.log_dock = dock
+        self.log_dock.hide()
+        self.log_toggle_button = QToolButton()
+        self.log_toggle_button.setText("日志")
+        self.log_toggle_button.setToolTip("显示或隐藏运行日志")
+        self.log_toggle_button.setCheckable(True)
+        self.log_toggle_button.toggled.connect(self.log_dock.setVisible)
+        self.log_dock.visibilityChanged.connect(self.log_toggle_button.setChecked)
+        self.statusBar().addPermanentWidget(self.log_toggle_button)
         self.statusBar().showMessage("就绪")
+
+    def _restore_ui_state(self) -> None:
+        geometry = self.ui_settings.value("window_geometry")
+        state = self.ui_settings.value("window_state")
+        if geometry:
+            self.restoreGeometry(geometry)
+        if state:
+            self.restoreState(state)
+        self.log_dock.hide()
+        self.log_toggle_button.setChecked(False)
+
+    def _set_navigation_collapsed(self, collapsed: bool) -> None:
+        self._navigation_collapsed = collapsed
+        width = 52 if collapsed else 132
+        self.navigation_container.setFixedWidth(width)
+        self.navigation.setFixedWidth(width)
+        labels = self._navigation_compact_labels if collapsed else self._navigation_full_labels
+        for index, label in enumerate(labels):
+            self.navigation.item(index).setText(label)
+            self.navigation.item(index).setToolTip(self._navigation_full_labels[index])
+        icon = QStyle.SP_ArrowRight if collapsed else QStyle.SP_ArrowLeft
+        self.navigation_toggle.setIcon(self.style().standardIcon(icon))
+        self.navigation_toggle.setToolTip("展开导航" if collapsed else "收起导航")
+
+    def _toggle_navigation(self) -> None:
+        self._set_navigation_collapsed(not self._navigation_collapsed)
 
     def _setup_automation_worker(self) -> None:
         self.automation_thread = QThread(self)
@@ -1372,7 +1448,7 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "导出失败", message)
 
     def _on_page_changed(self, index: int) -> None:
-        page = self.stack.widget(index)
+        page = self._page_scroll_areas[index].widget()
         if page is self.automation_flow_page:
             self.refresh_automation_flow()
         elif page is self.candidates_page:
@@ -1387,6 +1463,9 @@ class MainWindow(QMainWindow):
         self.log_view.verticalScrollBar().setValue(self.log_view.verticalScrollBar().maximum())
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        self.ui_settings.setValue("window_geometry", self.saveGeometry())
+        self.ui_settings.setValue("window_state", self.saveState())
+        self.ui_settings.sync()
         if self.local_api_server is not None:
             self.local_api_server.stop()
         if self._ai_screening_thread is not None:

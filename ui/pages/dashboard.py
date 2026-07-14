@@ -84,6 +84,7 @@ class DashboardPage(QWidget):
         action_row = QHBoxLayout()
         self.open_browser_button = QPushButton("打开 Boss 页面")
         self.start_capture_button = QPushButton("开始采集")
+        self.start_capture_button.setProperty("primary", True)
         self.stop_button = QPushButton("停止任务")
         action_row.addWidget(self.open_browser_button)
         action_row.addWidget(self.start_capture_button)

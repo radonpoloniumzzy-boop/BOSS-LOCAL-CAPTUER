@@ -194,6 +194,7 @@ class AIScreenPage(QWidget):
         action_row = QHBoxLayout()
         self.test_button = QPushButton("测试连接")
         self.start_button = QPushButton("开始 AI 初筛")
+        self.start_button.setProperty("primary", True)
         self.stop_button = QPushButton("停止")
         self.cancel_test_button = QPushButton("取消测试")
         self.delete_credential_button = QPushButton("删除已保存密钥")

@@ -22,11 +22,13 @@ except ImportError as exc:
     raise SystemExit(1)
 
 from ui.main_window import MainWindow
+from ui.theme import apply_application_theme
 
 
 def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("Boss 本地候选人采集工具")
+    apply_application_theme(app)
     window = MainWindow()
     window.show()
     return app.exec()

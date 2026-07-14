@@ -5,16 +5,20 @@ import json
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox,
+    QGridLayout,
     QGroupBox,
     QHeaderView,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMenu,
     QPlainTextEdit,
     QPushButton,
+    QSizePolicy,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -91,7 +95,7 @@ class CandidatesPage(QWidget):
         root_layout.setSpacing(12)
 
         filter_group = QGroupBox("筛选条件")
-        filter_layout = QHBoxLayout(filter_group)
+        self.filter_group = filter_group
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("搜索姓名、薪资、经历、标签或原始文本")
         self.job_title_combo = QComboBox()
@@ -140,37 +144,8 @@ class CandidatesPage(QWidget):
         self.export_csv_button = QPushButton("导出 CSV")
         self.export_jsonl_button = QPushButton("导出 JSONL")
         self.export_markdown_button = QPushButton("导出 Markdown")
-        filter_layout.addWidget(QLabel("关键词"))
-        filter_layout.addWidget(self.search_input, 2)
-        filter_layout.addWidget(QLabel("岗位"))
-        filter_layout.addWidget(self.job_title_combo, 1)
-        filter_layout.addWidget(QLabel("批次"))
-        filter_layout.addWidget(self.batch_combo, 1)
-        filter_layout.addWidget(QLabel("城市"))
-        filter_layout.addWidget(self.city_input)
-        filter_layout.addWidget(QLabel("年限"))
-        filter_layout.addWidget(self.years_min_input)
-        filter_layout.addWidget(self.years_max_input)
-        filter_layout.addWidget(QLabel("标签"))
-        filter_layout.addWidget(self.profile_tag_input)
-        filter_layout.addWidget(QLabel("活跃"))
-        filter_layout.addWidget(self.last_active_combo)
-        filter_layout.addWidget(QLabel("匹配岗位"))
-        filter_layout.addWidget(self.match_role_combo, 1)
-        filter_layout.addWidget(QLabel("评级"))
-        filter_layout.addWidget(self.rating_combo)
-        filter_layout.addWidget(QLabel("状态"))
-        filter_layout.addWidget(self.match_status_combo)
-        filter_layout.addWidget(QLabel("阶段"))
-        filter_layout.addWidget(self.recruitment_status_filter_combo)
-        filter_layout.addWidget(QLabel("原因"))
-        filter_layout.addWidget(self.latest_reason_filter_combo)
-        filter_layout.addWidget(self.refresh_button)
-        filter_layout.addWidget(self.export_csv_button)
-        filter_layout.addWidget(self.export_jsonl_button)
-        filter_layout.addWidget(self.export_markdown_button)
-
         splitter = QSplitter(Qt.Horizontal)
+        self.content_splitter = splitter
         self.table = QTableWidget(0, 15)
         self.table.setHorizontalHeaderLabels(
             [
@@ -201,12 +176,14 @@ class CandidatesPage(QWidget):
 
         detail_group = QGroupBox("候选人详情")
         detail_layout = QVBoxLayout(detail_group)
+        self.detail_group = detail_group
         self.detail_text = QPlainTextEdit()
         self.detail_text.setReadOnly(True)
         detail_layout.addWidget(self.detail_text)
         status_group = QGroupBox("招聘进展")
         status_layout = QVBoxLayout(status_group)
-        status_row = QHBoxLayout()
+        self.status_group = status_group
+        self.status_layout = status_layout
         self.status_role_combo = QComboBox()
         self.recruitment_status_update_combo = QComboBox()
         for status, label in RECRUITMENT_STATUS_LABELS.items():
@@ -217,17 +194,9 @@ class CandidatesPage(QWidget):
         for code, label in REASON_CODE_LABELS.items():
             self.reason_code_combo.addItem(label, code)
         self.record_status_button = QPushButton("记录")
-        status_row.addWidget(QLabel("岗位"))
-        status_row.addWidget(self.status_role_combo, 2)
-        status_row.addWidget(QLabel("阶段"))
-        status_row.addWidget(self.recruitment_status_update_combo)
-        status_row.addWidget(QLabel("原因"))
-        status_row.addWidget(self.reason_code_combo)
-        status_row.addWidget(self.record_status_button)
+        self.record_status_button.setProperty("primary", True)
         self.status_note_input = QLineEdit()
         self.status_note_input.setPlaceholderText("备注")
-        status_layout.addLayout(status_row)
-        status_layout.addWidget(self.status_note_input)
         detail_layout.addWidget(status_group)
         splitter.addWidget(self.table)
         splitter.addWidget(detail_group)
@@ -245,6 +214,8 @@ class CandidatesPage(QWidget):
         pagination_layout.addWidget(self.page_label)
         pagination_layout.addWidget(self.next_page_button)
         root_layout.addLayout(pagination_layout)
+
+        self._apply_compact_layout()
 
         self.refresh_button.clicked.connect(self._request_first_page)
         self.export_csv_button.clicked.connect(lambda: self._emit_export("csv"))
@@ -267,6 +238,187 @@ class CandidatesPage(QWidget):
         self.next_page_button.clicked.connect(lambda: self._request_page(self._page + 1))
         self.table.itemSelectionChanged.connect(self._emit_selection)
         self.record_status_button.clicked.connect(self._emit_status_change)
+
+    def _apply_compact_layout(self) -> None:
+        compact_combos = (
+            self.job_title_combo,
+            self.match_role_combo,
+            self.batch_combo,
+            self.last_active_combo,
+            self.rating_combo,
+            self.match_status_combo,
+            self.recruitment_status_filter_combo,
+            self.latest_reason_filter_combo,
+        )
+        for combo in compact_combos:
+            combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+            combo.setMinimumContentsLength(8)
+            combo.setMinimumWidth(0)
+            combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            combo.setToolTip(combo.currentText())
+            combo.currentTextChanged.connect(combo.setToolTip)
+
+        filter_layout = QVBoxLayout(self.filter_group)
+        filter_layout.setContentsMargins(8, 8, 8, 8)
+        filter_layout.setSpacing(8)
+
+        primary_row = QHBoxLayout()
+        primary_row.setSpacing(6)
+        primary_row.addWidget(QLabel("搜索"))
+        primary_row.addWidget(self.search_input, 3)
+
+        scope_row = QHBoxLayout()
+        scope_row.setSpacing(6)
+        scope_row.addWidget(QLabel("岗位"))
+        scope_row.addWidget(self.job_title_combo, 1)
+        scope_row.addWidget(QLabel("方案"))
+        scope_row.addWidget(self.match_role_combo, 1)
+
+        command_row = QHBoxLayout()
+        command_row.setSpacing(6)
+        command_row.addStretch(1)
+
+        self.advanced_filters_button = QToolButton()
+        self.advanced_filters_button.setText("高级筛选")
+        self.advanced_filters_button.setCheckable(True)
+        self.advanced_filters_button.setToolTip("展开城市、年限、评级和状态筛选")
+        self.advanced_filters_button.toggled.connect(self._toggle_advanced_filters)
+        command_row.addWidget(self.advanced_filters_button)
+
+        self.detail_toggle_button = QToolButton()
+        self.detail_toggle_button.setText("查看详情")
+        self.detail_toggle_button.setCheckable(True)
+        self.detail_toggle_button.toggled.connect(self._toggle_detail)
+        command_row.addWidget(self.detail_toggle_button)
+
+        self.export_button = QToolButton()
+        self.export_button.setText("导出")
+        self.export_button.setPopupMode(QToolButton.InstantPopup)
+        export_menu = QMenu(self.export_button)
+        export_menu.addAction("CSV", self.export_csv_button.click)
+        export_menu.addAction("JSONL", self.export_jsonl_button.click)
+        export_menu.addAction("Markdown", self.export_markdown_button.click)
+        self.export_button.setMenu(export_menu)
+        command_row.addWidget(self.export_button)
+        command_row.addWidget(self.refresh_button)
+        filter_layout.addLayout(primary_row)
+        filter_layout.addLayout(scope_row)
+        filter_layout.addLayout(command_row)
+
+        self.advanced_filters_container = QWidget()
+        advanced_grid = QGridLayout(self.advanced_filters_container)
+        advanced_grid.setContentsMargins(0, 2, 0, 0)
+        advanced_grid.setHorizontalSpacing(8)
+        advanced_grid.setVerticalSpacing(6)
+
+        years_range = QWidget()
+        years_layout = QHBoxLayout(years_range)
+        years_layout.setContentsMargins(0, 0, 0, 0)
+        years_layout.setSpacing(4)
+        years_layout.addWidget(self.years_min_input)
+        years_layout.addWidget(QLabel("至"))
+        years_layout.addWidget(self.years_max_input)
+
+        fields = [
+            ("批次", self.batch_combo),
+            ("城市", self.city_input),
+            ("经验年限", years_range),
+            ("画像标签", self.profile_tag_input),
+            ("活跃时间", self.last_active_combo),
+            ("最低评级", self.rating_combo),
+            ("匹配状态", self.match_status_combo),
+            ("招聘阶段", self.recruitment_status_filter_combo),
+            ("最近原因", self.latest_reason_filter_combo),
+        ]
+        for index, (label, widget) in enumerate(fields):
+            row = index // 2
+            column = (index % 2) * 2
+            advanced_grid.addWidget(QLabel(label), row, column)
+            advanced_grid.addWidget(widget, row, column + 1)
+            widget.setMinimumWidth(0)
+        advanced_grid.setColumnStretch(1, 1)
+        advanced_grid.setColumnStretch(3, 1)
+        self.advanced_filters_container.hide()
+        filter_layout.addWidget(self.advanced_filters_container)
+
+        for button in (
+            self.export_csv_button,
+            self.export_jsonl_button,
+            self.export_markdown_button,
+        ):
+            button.hide()
+
+        visible_columns = {0, 1, 2, 3, 7, 8, 10}
+        compact_widths = {
+            0: 105,
+            1: 64,
+            2: 54,
+            3: 120,
+            7: 110,
+            8: 54,
+            10: 88,
+            13: 120,
+        }
+        for index in range(self.table.columnCount()):
+            self.table.setColumnHidden(index, index not in visible_columns)
+            if index in compact_widths:
+                self.table.setColumnWidth(index, compact_widths[index])
+        self.table.setMinimumSize(0, 0)
+
+        status_controls = QWidget()
+        status_grid = QGridLayout(status_controls)
+        status_grid.setContentsMargins(0, 0, 0, 0)
+        status_grid.setSpacing(6)
+        status_grid.addWidget(QLabel("岗位"), 0, 0)
+        status_grid.addWidget(self.status_role_combo, 0, 1)
+        status_grid.addWidget(QLabel("阶段"), 0, 2)
+        status_grid.addWidget(self.recruitment_status_update_combo, 0, 3)
+        status_grid.addWidget(QLabel("原因"), 1, 0)
+        status_grid.addWidget(self.reason_code_combo, 1, 1)
+        status_grid.addWidget(self.status_note_input, 1, 2)
+        status_grid.addWidget(self.record_status_button, 1, 3)
+        status_grid.setColumnStretch(1, 1)
+        status_grid.setColumnStretch(2, 2)
+        self.status_layout.insertWidget(0, status_controls)
+
+        self._detail_expanded = False
+        self._narrow_layout = True
+        self.content_splitter.setOrientation(Qt.Vertical)
+        self.detail_group.hide()
+        self.detail_toggle_button.show()
+        self.setMinimumSize(0, 0)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+
+    def _toggle_advanced_filters(self, expanded: bool) -> None:
+        self.advanced_filters_container.setVisible(expanded)
+        self.advanced_filters_button.setText("收起筛选" if expanded else "高级筛选")
+
+    def _toggle_detail(self, expanded: bool) -> None:
+        self._detail_expanded = expanded
+        if self._narrow_layout:
+            self.detail_group.setVisible(expanded)
+            if expanded:
+                self.content_splitter.setSizes([420, 260])
+        self.detail_toggle_button.setText("收起详情" if expanded else "查看详情")
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        narrow = event.size().width() < 1050
+        if narrow == self._narrow_layout:
+            return
+        self._narrow_layout = narrow
+        if narrow:
+            self.table.setColumnHidden(13, True)
+            self.content_splitter.setOrientation(Qt.Vertical)
+            self.detail_toggle_button.show()
+            self.detail_group.setVisible(self._detail_expanded)
+            self.content_splitter.setSizes([420, 260])
+        else:
+            self.table.setColumnHidden(13, False)
+            self.content_splitter.setOrientation(Qt.Horizontal)
+            self.detail_toggle_button.hide()
+            self.detail_group.show()
+            self.content_splitter.setSizes([720, 380])
 
     def current_filters(self) -> dict[str, object]:
         return {
