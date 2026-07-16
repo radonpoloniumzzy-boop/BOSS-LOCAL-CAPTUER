@@ -74,7 +74,11 @@
         return { status: "failed", attempted: false, reason: "candidate_detail_not_ready" };
       }
       if (isFavorited(ready.detailRoot)) {
-        return { status: "already_favorited", attempted: false, reason: "favorite_state_already_active" };
+        return {
+          status: "unknown",
+          attempted: false,
+          reason: "favorite_state_active_pending_management_verification",
+        };
       }
 
       try {

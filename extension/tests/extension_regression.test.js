@@ -395,7 +395,7 @@ async function testNativeFavoriteTreatsThrowDuringFavoriteClickAsUnknown() {
   });
 }
 
-async function testNativeFavoriteSkipsWriteWhenCausalDetailIsAlreadyFavorited() {
+async function testNativeFavoriteSkipsWriteAndAwaitsManagementVerificationForActiveDetail() {
   let favoriteClickCount = 0;
   const originalDetail = { querySelector: () => null };
   const updatedDetail = {
@@ -423,9 +423,9 @@ async function testNativeFavoriteSkipsWriteWhenCausalDetailIsAlreadyFavorited() 
   });
 
   assert.deepStrictEqual(JSON.parse(JSON.stringify(result)), {
-    status: "already_favorited",
+    status: "unknown",
     attempted: false,
-    reason: "favorite_state_already_active",
+    reason: "favorite_state_active_pending_management_verification",
   });
   assert.strictEqual(favoriteClickCount, 0);
 }
@@ -893,7 +893,7 @@ async function main() {
   await testNativeFavoriteDoesNotUseOldControlAfterUnrelatedDetailMutation();
   await testNativeFavoriteStopsForDeepTrustedInterveningSelection();
   await testNativeFavoriteTreatsThrowDuringFavoriteClickAsUnknown();
-  await testNativeFavoriteSkipsWriteWhenCausalDetailIsAlreadyFavorited();
+  await testNativeFavoriteSkipsWriteAndAwaitsManagementVerificationForActiveDetail();
   await testNativeFavoriteRejectsNonBossPlatformBeforeReadingThePage();
   await testNativeFavoriteRefusesIncompleteIdentityWithoutClicking();
   await testNativeFavoriteRefusesAmbiguousTrustedIdentityWithoutClicking();
