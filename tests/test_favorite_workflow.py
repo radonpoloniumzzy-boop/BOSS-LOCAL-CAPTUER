@@ -23,6 +23,169 @@ class NativeFavoriteWorkflowTest(unittest.TestCase):
         self.db.close_thread_connection()
         self.temp_dir.cleanup()
 
+    def _create_favorite_batch(
+        self,
+        suffix: str,
+        platform_identities: list[str],
+    ) -> tuple[int, list[int]]:
+        job_title = f"Favorite test {suffix}"
+        imported = self.import_service.import_cards(
+            {
+                "job_title": job_title,
+                "source_url": "https://www.zhipin.com/web/geek/recommend",
+                "cards": [
+                    {
+                        "platform": "boss",
+                        "raw_card_text": f"Candidate {suffix}-{index}",
+                        "name": f"Candidate {suffix}-{index}",
+                        "platform_uid": f"visible-{suffix}-{index}",
+                        "action_platform_uid": identity,
+                        "raw_identity": {"data-geekid": identity},
+                    }
+                    for index, identity in enumerate(platform_identities)
+                ],
+            }
+        )
+        capture_batch_id = int(imported["batch_id"])
+        rows = self.repository.list_candidates(job_title=job_title)
+        candidate_by_visible_uid = {
+            str(row["platform_uid"]): int(row["id"])
+            for row in rows
+        }
+        candidate_ids = [
+            candidate_by_visible_uid[f"visible-{suffix}-{index}"]
+            for index in range(len(platform_identities))
+        ]
+        profile = self.repository.save_screening_profile(
+            ScreeningProfile(job_title=job_title, jd_text="test", prompt_text="screen")
+        )
+        run_id = self.repository.create_screening_run(
+            profile_id=int(profile.id),
+            source_job_title=job_title,
+            batch_id=capture_batch_id,
+            provider="fake",
+            model="fake-model",
+            total_candidates=len(candidate_ids),
+            origin="automation",
+        )
+        favorite_batch_id = self.repository.create_native_favorite_batch(
+            capture_batch_id=capture_batch_id,
+            screening_run_id=run_id,
+            role_id=int(profile.id),
+            source_page_url="https://www.zhipin.com/web/geek/recommend",
+            source_page_context={"capture_batch_id": capture_batch_id, "tab_id": 91},
+            config_snapshot={"eligible_ratings": ["SSR"], "max_candidates": 20},
+            tasks=[
+                {
+                    "candidate_id": candidate_id,
+                    "platform_identity": {
+                        "attribute": "data-geekid",
+                        "value": identity,
+                    },
+                }
+                for candidate_id, identity in zip(candidate_ids, platform_identities, strict=True)
+            ],
+        )
+        return favorite_batch_id, candidate_ids
+
+    def test_batch_allows_only_one_running_task_and_expired_lease_becomes_unknown(self) -> None:
+        favorite_batch_id, _candidate_ids = self._create_favorite_batch(
+            "serial",
+            ["trusted-serial-1", "trusted-serial-2"],
+        )
+        first = self.repository.claim_next_native_favorite_task(favorite_batch_id)
+
+        self.assertIsNotNone(first)
+        self.assertIsNone(self.repository.claim_next_native_favorite_task(favorite_batch_id))
+
+        self.db.get_connection().execute(
+            "UPDATE native_favorite_tasks SET locked_at = '2000-01-01T00:00:00' WHERE id = ?",
+            (int(first["task_id"]),),
+        )
+        self.db.get_connection().commit()
+        second = self.repository.claim_next_native_favorite_task(
+            favorite_batch_id,
+            lock_timeout_seconds=0,
+        )
+
+        self.assertIsNotNone(second)
+        self.assertNotEqual(second["task_id"], first["task_id"])
+        tasks = self.repository.list_native_favorite_tasks(favorite_batch_id)
+        recovered = next(row for row in tasks if int(row["id"]) == int(first["task_id"]))
+        self.assertEqual(recovered["status"], "unknown")
+        self.assertEqual(
+            recovered["error_reason"],
+            "claim_lease_expired_requires_manual_resolution",
+        )
+        attempts = self.repository.list_native_favorite_attempts(int(first["task_id"]))
+        self.assertEqual(len(attempts), 1)
+        self.assertIsNone(attempts[0]["attempted"])
+
+    def test_failed_task_has_one_explicit_retry_and_identity_conflict_maps_to_failed(self) -> None:
+        favorite_batch_id, _candidate_ids = self._create_favorite_batch(
+            "retry",
+            ["trusted-retry-1"],
+        )
+        first = self.repository.claim_next_native_favorite_task(favorite_batch_id)
+
+        with self.assertRaisesRegex(ValueError, "terminal status"):
+            self.repository.complete_native_favorite_task(
+                int(first["task_id"]),
+                claim_token=str(first["claim_token"]),
+                status="stopped",
+                attempted=True,
+            )
+        failed = self.repository.complete_native_favorite_task(
+            int(first["task_id"]),
+            claim_token=str(first["claim_token"]),
+            status="failed",
+            attempted=True,
+            reason="favorite_control_missing",
+        )
+        self.assertEqual(failed["status"], "failed")
+
+        retried = self.repository.retry_native_favorite_task(int(first["task_id"]))
+        self.assertEqual(retried["status"], "pending")
+        second = self.repository.claim_next_native_favorite_task(favorite_batch_id)
+        conflict = self.repository.complete_native_favorite_task(
+            int(second["task_id"]),
+            claim_token=str(second["claim_token"]),
+            status="identity_conflict",
+            attempted=False,
+        )
+
+        self.assertEqual(conflict["status"], "failed")
+        self.assertEqual(
+            conflict["reason"],
+            "multiple_favorite_management_identity_matches",
+        )
+        with self.assertRaisesRegex(ValueError, "retry limit"):
+            self.repository.retry_native_favorite_task(int(first["task_id"]))
+
+    def test_historical_success_requires_current_management_verification_without_write(self) -> None:
+        first_batch_id, _candidate_ids = self._create_favorite_batch(
+            "verified-first",
+            ["trusted-verified-1"],
+        )
+        first = self.repository.claim_next_native_favorite_task(first_batch_id)
+        self.repository.complete_native_favorite_task(
+            int(first["task_id"]),
+            claim_token=str(first["claim_token"]),
+            status="success",
+            attempted=True,
+            reason="favorite_management_identity_confirmed",
+        )
+
+        next_batch_id, _next_candidate_ids = self._create_favorite_batch(
+            "verified-next",
+            ["trusted-verified-1"],
+        )
+        verification = self.repository.claim_next_native_favorite_task(next_batch_id)
+
+        self.assertIsNotNone(verification)
+        self.assertEqual(verification["write_policy"], "verify_only")
+        self.assertEqual(verification["status"], "running")
+
     def test_claim_and_unknown_result_are_persistent_and_not_reclaimed(self) -> None:
         imported = self.import_service.import_cards(
             {

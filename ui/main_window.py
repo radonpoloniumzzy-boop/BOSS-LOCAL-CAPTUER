@@ -430,6 +430,7 @@ class MainWindow(QMainWindow):
             get_extension_config=self._extension_config_payload,
             claim_favorite_task=self._claim_native_favorite_task_from_extension,
             report_favorite_result=self._report_native_favorite_result_from_extension,
+            retry_favorite_task=self._retry_native_favorite_task_from_extension,
             auth_token=self.config.local_api_token,
         )
         try:
@@ -478,6 +479,15 @@ class MainWindow(QMainWindow):
             method=str(payload.get("method") or ""),
             result=dict(result) if isinstance(result, dict) else {},
         )
+
+    def _retry_native_favorite_task_from_extension(
+        self,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        task_id = int(payload.get("task_id") or 0)
+        if task_id <= 0:
+            raise ValueError("Native Favorite task_id is required")
+        return self.repository.retry_native_favorite_task(task_id)
 
     def handle_open_browser(self) -> None:
         url = self.dashboard_page.source_url_input.text().strip() or self.config.target_url

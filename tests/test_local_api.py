@@ -218,6 +218,11 @@ class LocalApiServerTest(unittest.TestCase):
                 "attempt_count": 1,
             }
         )
+        self.server.retry_favorite_task = lambda payload: {
+            "task_id": int(payload["task_id"]),
+            "status": "pending",
+            "attempt_count": 1,
+        }
 
         claim_body = json.dumps({"batch_id": 19, "worker_id": "extension-tab-91"}).encode(
             "utf-8"
@@ -269,6 +274,23 @@ class LocalApiServerTest(unittest.TestCase):
         self.assertEqual(result_payload["result"]["status"], "unknown")
         self.assertEqual(len(reported), 1)
         self.assertIs(reported[0]["attempted"], True)
+
+        retry_body = json.dumps({"task_id": 71}).encode("utf-8")
+        retry_connection = http.client.HTTPConnection("127.0.0.1", self.server.port, timeout=5)
+        retry_connection.request(
+            "POST",
+            "/api/favorites/retry",
+            body=retry_body,
+            headers={
+                "Content-Type": "application/json",
+                "X-Boss-Local-Token": self.token,
+            },
+        )
+        retry_response = retry_connection.getresponse()
+        retry_payload = json.loads(retry_response.read().decode("utf-8"))
+
+        self.assertEqual(retry_response.status, 200)
+        self.assertEqual(retry_payload["result"]["status"], "pending")
 
 
 if __name__ == "__main__":

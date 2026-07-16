@@ -338,6 +338,7 @@ class MigrationTest(unittest.TestCase):
             self.assertIn("claim_token", task_columns)
             self.assertIn("identity_attribute", task_columns)
             self.assertIn("identity_value", task_columns)
+            self.assertIn("write_policy", task_columns)
             self.assertEqual(
                 connection.execute("SELECT version FROM schema_version").fetchone()[0],
                 15,
