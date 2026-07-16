@@ -170,7 +170,7 @@ function testBossIdentityEvidenceKeepsIdentifiersAndDropsSecrets() {
   assert.strictEqual(JSON.stringify(identity).includes("must-not-be-collected"), false);
 }
 
-function loadBossNativeFavoriteAdapter(identityNodes = [], documentOverrides = {}) {
+function loadBossNativeFavoriteAdapter(identityNodes = [], documentOverrides = {}, contextOverrides = {}) {
   let queryCount = 0;
   const document = {
     querySelectorAll() {
@@ -185,7 +185,7 @@ function loadBossNativeFavoriteAdapter(identityNodes = [], documentOverrides = {
     documentElement: {},
     ...documentOverrides,
   };
-  const context = { clearTimeout, document, globalThis: {}, setTimeout };
+  const context = { clearTimeout, document, globalThis: {}, setTimeout, ...contextOverrides };
   context.globalThis = context;
   const code = `${fs.readFileSync(path.join(EXTENSION_DIR, "identity_contract.js"), "utf8")}
 ${fs.readFileSync(path.join(EXTENSION_DIR, "favorite_adapter.js"), "utf8")}`;
@@ -196,7 +196,130 @@ ${fs.readFileSync(path.join(EXTENSION_DIR, "favorite_adapter.js"), "utf8")}`;
   };
 }
 
-async function testNativeFavoriteUsesUniqueCausalIdentityJoinAndConfirmsSuccess() {
+async function testNativeFavoriteDoesNotUseOldControlAfterUnrelatedDetailMutation() {
+  let observerCallback = null;
+  let favoriteClickCount = 0;
+  let now = 0;
+  class FakeMutationObserver {
+    constructor(callback) {
+      observerCallback = callback;
+    }
+    observe() {}
+    disconnect() {}
+  }
+  class FakeDate extends Date {
+    static now() {
+      now += 1000;
+      return now;
+    }
+  }
+  const staleControl = { click() { favoriteClickCount += 1; } };
+  const reusedDetail = {
+    contains() { return true; },
+    querySelector(selector) {
+      if (selector === ".like-icon.like-icon-active") return null;
+      if (selector.includes(".like-icon-and-text")) return staleControl;
+      return null;
+    },
+  };
+  const candidate = bossIdentityNode("data-geekid", "trusted-geek-1", () => {
+    observerCallback?.([{ target: reusedDetail }]);
+  });
+  const { adapter } = loadBossNativeFavoriteAdapter(
+    [candidate],
+    {
+      querySelector(selector) {
+        return selector === ".resume-item-detail" ? reusedDetail : null;
+      },
+    },
+    {
+      Date: FakeDate,
+      MutationObserver: FakeMutationObserver,
+      setTimeout(resolve) { resolve(); },
+    },
+  );
+
+  const result = await adapter.favoriteOne({
+    platform: "boss",
+    platform_identity: { attribute: "data-geekid", value: "trusted-geek-1" },
+  });
+
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(result)), {
+    status: "failed",
+    attempted: false,
+    reason: "candidate_detail_not_ready",
+  });
+  assert.strictEqual(favoriteClickCount, 0);
+}
+
+async function testNativeFavoriteStopsForDeepTrustedInterveningSelection() {
+  let trustedClickListener = null;
+  let favoriteClickCount = 0;
+  let active = false;
+  class FakeElement {
+    constructor(parentElement = null, geekId = "") {
+      this.parentElement = parentElement;
+      this.geekId = geekId;
+    }
+    getAttribute(name) {
+      return name === "data-geekid" ? this.geekId : null;
+    }
+    closest() {
+      let current = this;
+      while (current) {
+        if (current.geekId) return current;
+        current = current.parentElement;
+      }
+      return null;
+    }
+  }
+  const otherCandidate = new FakeElement(null, "other-geek");
+  let deepTarget = otherCandidate;
+  for (let depth = 0; depth < 11; depth += 1) {
+    deepTarget = new FakeElement(deepTarget);
+  }
+  const originalDetail = { querySelector: () => null };
+  const updatedDetail = {
+    querySelector(selector) {
+      if (selector === ".like-icon.like-icon-active") return active ? {} : null;
+      if (selector.includes(".like-icon-and-text")) {
+        return { click() { favoriteClickCount += 1; active = true; } };
+      }
+      return null;
+    },
+  };
+  let currentDetail = originalDetail;
+  const candidate = bossIdentityNode("data-geekid", "trusted-geek-1", () => {
+    currentDetail = updatedDetail;
+    trustedClickListener?.({ isTrusted: true, target: deepTarget });
+  });
+  const { adapter } = loadBossNativeFavoriteAdapter(
+    [candidate],
+    {
+      addEventListener(type, listener) {
+        if (type === "click") trustedClickListener = listener;
+      },
+      querySelector(selector) {
+        return selector === ".resume-item-detail" ? currentDetail : null;
+      },
+    },
+    { Element: FakeElement },
+  );
+
+  const result = await adapter.favoriteOne({
+    platform: "boss",
+    platform_identity: { attribute: "data-geekid", value: "trusted-geek-1" },
+  });
+
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(result)), {
+    status: "failed",
+    attempted: false,
+    reason: "candidate_selection_changed",
+  });
+  assert.strictEqual(favoriteClickCount, 0);
+}
+
+async function testNativeFavoriteUsesUniqueCausalIdentityJoinAndAwaitsManagementVerification() {
   let candidateClickCount = 0;
   let favoriteClickCount = 0;
   let active = false;
@@ -231,9 +354,9 @@ async function testNativeFavoriteUsesUniqueCausalIdentityJoinAndConfirmsSuccess(
   });
 
   assert.deepStrictEqual(JSON.parse(JSON.stringify(result)), {
-    status: "success",
+    status: "unknown",
     attempted: true,
-    reason: "favorite_state_confirmed",
+    reason: "favorite_state_active_pending_management_verification",
   });
   assert.strictEqual(candidateClickCount, 1);
   assert.strictEqual(favoriteClickCount, 1);
@@ -766,7 +889,9 @@ function testFilenameTemplatesMatchDesktopFixtures() {
 
 async function main() {
   testBossIdentityEvidenceKeepsIdentifiersAndDropsSecrets();
-  await testNativeFavoriteUsesUniqueCausalIdentityJoinAndConfirmsSuccess();
+  await testNativeFavoriteUsesUniqueCausalIdentityJoinAndAwaitsManagementVerification();
+  await testNativeFavoriteDoesNotUseOldControlAfterUnrelatedDetailMutation();
+  await testNativeFavoriteStopsForDeepTrustedInterveningSelection();
   await testNativeFavoriteTreatsThrowDuringFavoriteClickAsUnknown();
   await testNativeFavoriteSkipsWriteWhenCausalDetailIsAlreadyFavorited();
   await testNativeFavoriteRejectsNonBossPlatformBeforeReadingThePage();

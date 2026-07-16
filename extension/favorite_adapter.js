@@ -5,6 +5,7 @@
 
   const TRUSTED_IDENTITY_ATTRIBUTES =
     globalScope.__bossLocalIdentityContract?.trustedPlatformUidAttributes || [];
+  const TRUSTED_IDENTITY_SELECTOR = TRUSTED_IDENTITY_ATTRIBUTES.map((name) => `[${name}]`).join(",");
   const DETAIL_SELECTOR = ".resume-item-detail";
   const DETAIL_TIMEOUT_MS = 5000;
   const FAVORITE_TIMEOUT_MS = 3000;
@@ -59,10 +60,10 @@
       }
 
       const ready = await waitForValue(() => {
-        if (selectionGuard.changed()) return null;
+        if (selectionGuard.changed()) return { selectionChanged: true };
         const detailRoot = document.querySelector(DETAIL_SELECTOR);
         const favoriteControl = findFavoriteControl(detailRoot);
-        return detailRoot && detailTracker.changed(detailRoot) && favoriteControl
+        return detailRoot && favoriteControl && detailTracker.changed(detailRoot, favoriteControl)
           ? { detailRoot, favoriteControl }
           : null;
       }, DETAIL_TIMEOUT_MS);
@@ -91,7 +92,11 @@
       if (!confirmed) {
         return { status: "unknown", attempted: true, reason: "favorite_state_not_confirmed" };
       }
-      return { status: "success", attempted: true, reason: "favorite_state_confirmed" };
+      return {
+        status: "unknown",
+        attempted: true,
+        reason: "favorite_state_active_pending_management_verification",
+      };
     } finally {
       detailTracker.dispose();
       selectionGuard.dispose();
@@ -113,6 +118,7 @@
 
   function createDetailChangeTracker(baselineDetail) {
     let mutationObserved = false;
+    const baselineFavoriteControl = findFavoriteControl(baselineDetail);
     const Observer = globalScope.MutationObserver;
     const observer = typeof Observer === "function"
       ? new Observer((records) => {
@@ -127,8 +133,10 @@
       : null;
     observer?.observe?.(document.documentElement, { subtree: true, childList: true, attributes: true });
     return {
-      changed(currentDetail) {
-        return Boolean(currentDetail && (currentDetail !== baselineDetail || mutationObserved));
+      changed(currentDetail, currentFavoriteControl) {
+        if (!currentDetail || !currentFavoriteControl) return false;
+        if (currentDetail !== baselineDetail) return true;
+        return mutationObserved && currentFavoriteControl !== baselineFavoriteControl;
       },
       dispose() {
         observer?.disconnect?.();
@@ -140,15 +148,14 @@
     let changed = false;
     const onTrustedClick = (event) => {
       if (!event.isTrusted || !(event.target instanceof Element)) return;
-      let current = event.target;
-      for (let depth = 0; current && depth < 10; depth += 1, current = current.parentElement) {
-        const identity = TRUSTED_IDENTITY_ATTRIBUTES
-          .map((attribute) => ({ attribute, value: String(current.getAttribute?.(attribute) || "").trim() }))
-          .find((candidate) => candidate.value);
-        if (!identity) continue;
-        if (identity.attribute !== expectedAttribute || identity.value !== expectedValue) changed = true;
-        return;
-      }
+      const candidateRoot = TRUSTED_IDENTITY_SELECTOR
+        ? event.target.closest?.(TRUSTED_IDENTITY_SELECTOR)
+        : null;
+      if (!candidateRoot) return;
+      const identity = TRUSTED_IDENTITY_ATTRIBUTES
+        .map((attribute) => ({ attribute, value: String(candidateRoot.getAttribute?.(attribute) || "").trim() }))
+        .find((candidate) => candidate.value);
+      if (identity && (identity.attribute !== expectedAttribute || identity.value !== expectedValue)) changed = true;
     };
     document.addEventListener?.("click", onTrustedClick, true);
     return {

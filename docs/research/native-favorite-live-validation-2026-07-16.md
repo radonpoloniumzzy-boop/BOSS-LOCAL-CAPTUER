@@ -31,7 +31,7 @@ A follow-up read-only prototype validated the production navigation seam without
 - About 900 ms later, `.resume-item-detail` existed with `.like-icon-and-text` available.
 - The detail subtree still exposed no direct trusted Platform Identity.
 
-The validated join is causal: production must uniquely match an explicit typed `data-geekid` identity, click that exact card, and require a changed detail root with the favorite control before attempting a Native Favorite. Zero or multiple matches, no detail change, or an intervening trusted selection fail closed. Name, candidate text, and list position remain prohibited identity evidence.
+The validated join is causal: production must uniquely match an explicit typed `data-geekid` identity, click that exact card, and require a new detail root or a newly generated favorite control after a detail mutation before attempting a Native Favorite. An unrelated mutation around the previous control is insufficient. Zero or multiple matches, no detail generation change, or an intervening trusted selection fail closed. Name, candidate text, and list position remain prohibited identity evidence. A local `.like-icon-active` signal remains `unknown` until the same Platform Identity is verified in the favorite-management experience.
 
 ## Primary source
 
