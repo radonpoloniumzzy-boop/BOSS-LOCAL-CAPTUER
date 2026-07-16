@@ -1,4 +1,6 @@
 if (typeof globalThis.__bossLocalExtract !== "function") {
+  const BOSS_TRUSTED_PLATFORM_UID_ATTRIBUTES =
+    globalThis.__bossLocalIdentityContract?.trustedPlatformUidAttributes || [];
   const EDUCATION_REGEX = /(博士|硕士|研究生|本科|大专|中专|高中|MBA|EMBA|统招本科|学历不限)/;
   const SALARY_REGEX = /(?:\b|￥)?\d{1,3}\s*[Kk]\s*[-~–—至]\s*\d{1,3}\s*[Kk](?:\b|·|\/|年|月)?|\b\d{1,3}\s*[-~–—至]\s*\d{1,3}\s*[Kk](?:\b|·|\/|年|月)?|薪资面议|面议/;
   const ACTIVE_REGEX = /(刚刚活跃|今日活跃|本周活跃|刚刚在线|\d+[天日周月]内活跃|活跃|在线)/;
@@ -731,10 +733,9 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
 
   function extractBossIdentityEvidence(card, detailUrl) {
     const aliases = {
-      datacandidateid: "platform_uid",
-      dataencryptgeekid: "platform_uid",
-      dataencryptuid: "platform_uid",
-      datageekid: "platform_uid",
+      ...Object.fromEntries(
+        BOSS_TRUSTED_PLATFORM_UID_ATTRIBUTES.map((name) => [name.replace(/[^a-z0-9]/g, ""), "platform_uid"]),
+      ),
       datafriendid: "friend_id",
       datafriendsource: "friend_source",
       datasecurityid: "security_id",

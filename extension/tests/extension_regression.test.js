@@ -107,7 +107,8 @@ globalThis.__serviceTest = {
 }
 
 function loadCollectorIdentityApi() {
-  const code = `${fs.readFileSync(path.join(EXTENSION_DIR, "collector.js"), "utf8")}
+  const code = `${fs.readFileSync(path.join(EXTENSION_DIR, "identity_contract.js"), "utf8")}
+${fs.readFileSync(path.join(EXTENSION_DIR, "collector.js"), "utf8")}
 globalThis.__collectorIdentityTestApi = globalThis.__bossLocalCollectorTest;`;
   const context = {
     URL,
@@ -167,6 +168,111 @@ function testBossIdentityEvidenceKeepsIdentifiersAndDropsSecrets() {
     },
   });
   assert.strictEqual(JSON.stringify(identity).includes("must-not-be-collected"), false);
+}
+
+function loadBossNativeFavoriteAdapter(identityNodes = []) {
+  let queryCount = 0;
+  const document = {
+    querySelectorAll() {
+      queryCount += 1;
+      return identityNodes;
+    },
+  };
+  const context = { document, globalThis: {} };
+  context.globalThis = context;
+  const code = `${fs.readFileSync(path.join(EXTENSION_DIR, "identity_contract.js"), "utf8")}
+${fs.readFileSync(path.join(EXTENSION_DIR, "favorite_adapter.js"), "utf8")}`;
+  vm.runInNewContext(code, context, { filename: "favorite_adapter.js" });
+  return {
+    adapter: context.__bossNativeFavoriteAdapter,
+    getQueryCount: () => queryCount,
+  };
+}
+
+async function testNativeFavoriteRejectsNonBossPlatformBeforeReadingThePage() {
+  const { adapter, getQueryCount } = loadBossNativeFavoriteAdapter([
+    bossIdentityNode("data-geek-id", "trusted-geek-1"),
+  ]);
+
+  const result = await adapter.favoriteOne({
+    platform: "liepin",
+    platform_identity: { attribute: "data-geek-id", value: "trusted-geek-1" },
+  });
+
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(result)), {
+    status: "failed",
+    attempted: false,
+    reason: "unsupported_platform",
+  });
+  assert.strictEqual(getQueryCount(), 0);
+}
+
+function bossIdentityNode(attributeName, value, onClick = () => {}) {
+  return {
+    click: onClick,
+    getAttribute(name) {
+      return name === attributeName ? value : null;
+    },
+  };
+}
+
+async function testNativeFavoriteRefusesIncompleteIdentityWithoutClicking() {
+  let pageClickCount = 0;
+  const { adapter, getQueryCount } = loadBossNativeFavoriteAdapter([
+    bossIdentityNode("data-geek-id", "trusted-geek-1", () => { pageClickCount += 1; }),
+  ]);
+
+  const result = await adapter.favoriteOne({ platform: "boss", platform_identity: null });
+
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(result)), {
+    status: "identity_incomplete",
+    attempted: false,
+    reason: "trusted_platform_identity_missing",
+  });
+  assert.strictEqual(getQueryCount(), 0);
+  assert.strictEqual(pageClickCount, 0);
+}
+
+async function testNativeFavoriteRefusesAmbiguousTrustedIdentityWithoutClicking() {
+  let pageClickCount = 0;
+  const nodes = [
+    bossIdentityNode("data-geek-id", "trusted-geek-1", () => { pageClickCount += 1; }),
+    bossIdentityNode("data-geek-id", "trusted-geek-1", () => { pageClickCount += 1; }),
+  ];
+  const { adapter } = loadBossNativeFavoriteAdapter(nodes);
+
+  const result = await adapter.favoriteOne({
+    platform: "boss",
+    platform_identity: { attribute: "data-geek-id", value: "trusted-geek-1" },
+  });
+
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(result)), {
+    status: "identity_conflict",
+    attempted: false,
+    reason: "multiple_trusted_identity_matches",
+    match_count: 2,
+  });
+  assert.strictEqual(pageClickCount, 0);
+}
+
+async function testNativeFavoriteRefusesWhenTrustedIdentityIsNotOnThePage() {
+  let pageClickCount = 0;
+  const { adapter } = loadBossNativeFavoriteAdapter([
+    bossIdentityNode("data-encrypt-geek-id", "trusted-geek-1", () => { pageClickCount += 1; }),
+  ]);
+
+  const result = await adapter.favoriteOne({
+    platform: "boss",
+    platform_identity: { attribute: "data-geek-id", value: "trusted-geek-1" },
+  });
+
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(result)), {
+    status: "identity_incomplete",
+    attempted: false,
+    reason: "trusted_identity_not_found",
+    match_count: 0,
+  });
+  assert.strictEqual(pageClickCount, 0);
 }
 
 async function testDownloadEndpointValidation() {
@@ -382,6 +488,7 @@ function testCollectionSupportsBossAndLiepinAdapters() {
   assert(collector.includes("getScrollRoot(platform)"));
   assert(collector.includes("lpt.liepin.com"));
   assert(popup.includes("COLLECT_PLATFORMS"));
+  assert(popup.includes('files: ["identity_contract.js", "favorite_adapter.js", "collector.js"]'));
   assert(popup.includes("getActiveSupportedTab"));
   assert(popup.includes("getActiveBossTab"));
   assert(popup.includes("applyPlatformDefaults"));
@@ -541,6 +648,10 @@ function testFilenameTemplatesMatchDesktopFixtures() {
 
 async function main() {
   testBossIdentityEvidenceKeepsIdentifiersAndDropsSecrets();
+  await testNativeFavoriteRejectsNonBossPlatformBeforeReadingThePage();
+  await testNativeFavoriteRefusesIncompleteIdentityWithoutClicking();
+  await testNativeFavoriteRefusesAmbiguousTrustedIdentityWithoutClicking();
+  await testNativeFavoriteRefusesWhenTrustedIdentityIsNotOnThePage();
   await testDownloadEndpointValidation();
   await testStopGuardIgnoresStaleProgress();
   await testBackgroundDownloadIsCalledAndLogged();
