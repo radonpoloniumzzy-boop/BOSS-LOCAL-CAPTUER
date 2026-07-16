@@ -16,7 +16,7 @@ The validation recorded no candidate name, resume text, identity value, Cookie, 
 
 1. Do not use Codex/Playwright/CDP tab takeover for BOSS. It caused page refresh, redirect, or exit during validation.
 2. Run the platform adapter inside the existing Manifest V3 extension and include the candidate-detail frame.
-3. Treat `.like-icon-active` as a DOM success signal only when the action target has first been joined to one trusted Platform Identity.
+3. Treat `.like-icon-active` only as a DOM post-action/active signal after the action target has been joined to one trusted Platform Identity. It is not final Native Favorite success; the same identity must still be verified in the favorite-management experience.
 4. The clicked detail subtree exposed no trusted identity attribute names. Production code must join the action target to separately captured identity evidence and must never infer the candidate from name, text, or card position.
 5. Keep zero-match and multi-match cases non-writing: `identity_incomplete` and `identity_conflict` respectively.
 
