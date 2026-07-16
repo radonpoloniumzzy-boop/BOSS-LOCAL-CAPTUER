@@ -37,7 +37,7 @@
     };
   }
 
-  async function classify(request, frameObservations) {
+  async function classify(request, executionEnvelope) {
     const invalid = validateRequest(request);
     if (invalid) return invalid;
     const attempted = request.favorite_action_attempted;
@@ -45,7 +45,26 @@
     if (!expectedBinding) {
       return { status: "failed", attempted, reason: "identity_binding_unavailable" };
     }
-    const suppliedObservations = Array.isArray(frameObservations) ? frameObservations : [];
+    if (
+      executionEnvelope?.inspection_id !== request.inspection_id ||
+      executionEnvelope?.tab_id !== request.tab_id ||
+      !Array.isArray(executionEnvelope?.executions) ||
+      !executionEnvelope.executions.length
+    ) {
+      return { status: "failed", attempted, reason: "favorite_management_observation_mismatch" };
+    }
+    const executionRecords = executionEnvelope.executions;
+    const frameIds = executionRecords.map((record) => record?.frame_id);
+    const documentIds = executionRecords.map((record) => record?.document_id);
+    if (
+      frameIds.some((frameId) => !Number.isSafeInteger(frameId) || frameId < 0) ||
+      documentIds.some((documentId) => !/^[a-zA-Z0-9_-]{8,256}$/.test(String(documentId || ""))) ||
+      new Set(frameIds).size !== frameIds.length ||
+      new Set(documentIds).size !== documentIds.length
+    ) {
+      return { status: "failed", attempted, reason: "favorite_management_execution_envelope_invalid" };
+    }
+    const suppliedObservations = executionRecords.map((record) => record?.observation);
     if (
       !suppliedObservations.length ||
       suppliedObservations.some((observation) => observation?.version !== INSPECTION_VERSION)

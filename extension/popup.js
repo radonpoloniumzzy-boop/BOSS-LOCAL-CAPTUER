@@ -514,6 +514,46 @@ async function collectFromAllFrames(tabId, autoScroll, settings) {
   });
 }
 
+async function verifyFavoriteManagementAcrossFrames(tabId, platformIdentity, favoriteActionAttempted) {
+  const request = {
+    platform: "boss",
+    platform_identity: platformIdentity,
+    favorite_action_attempted: favoriteActionAttempted,
+    inspection_id: crypto.randomUUID(),
+    tab_id: tabId,
+  };
+  await chrome.scripting.executeScript({
+    target: { tabId, allFrames: true },
+    files: ["identity_contract.js", "favorite_management_verifier.js"],
+  });
+  const inspections = await chrome.scripting.executeScript({
+    target: { tabId, allFrames: true },
+    args: [request],
+    func: async (verificationRequest) =>
+      globalThis.__bossFavoriteManagementVerifier?.inspectFrame?.(verificationRequest) || null,
+  });
+  const executionEnvelope = {
+    inspection_id: request.inspection_id,
+    tab_id: tabId,
+    executions: inspections.map((inspection) => ({
+      frame_id: inspection.frameId,
+      document_id: inspection.documentId,
+      observation: inspection.result,
+    })),
+  };
+  const [classification] = await chrome.scripting.executeScript({
+    target: { tabId },
+    args: [request, executionEnvelope],
+    func: async (verificationRequest, envelope) =>
+      globalThis.__bossFavoriteManagementVerifier?.classify?.(verificationRequest, envelope) || null,
+  });
+  return classification?.result || {
+    status: "failed",
+    attempted: favoriteActionAttempted === true,
+    reason: "favorite_management_classifier_unavailable",
+  };
+}
+
 function mergeFrameResults(frameResults) {
   const cardsByKey = new Map();
   const debugLines = [];

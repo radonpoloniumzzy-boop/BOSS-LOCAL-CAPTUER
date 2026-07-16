@@ -520,6 +520,18 @@ function favoriteManagementFrameObservations(matchCount = 1, selected = true, to
   ];
 }
 
+function favoriteManagementExecutionEnvelope(matchCount = 1, selected = true, topPath = "/web/chat/interaction") {
+  return {
+    inspection_id: "inspection-0001",
+    tab_id: 17,
+    executions: favoriteManagementFrameObservations(matchCount, selected, topPath).map((observation, index) => ({
+      frame_id: index === 0 ? 540 : 423,
+      document_id: index === 0 ? "document-context-0001" : "document-candidate-0001",
+      observation,
+    })),
+  };
+}
+
 function favoriteManagementRequest(attempted = true, overrides = {}) {
   return {
     platform: "boss",
@@ -537,7 +549,7 @@ async function testFavoriteManagementVerifierRequiresSelectedFavoriteSubviewObse
   ]);
 
   const request = favoriteManagementRequest();
-  const result = await verifier.classify(request, favoriteManagementFrameObservations(1, false));
+  const result = await verifier.classify(request, favoriteManagementExecutionEnvelope(1, false));
 
   assert.deepStrictEqual(JSON.parse(JSON.stringify(result)), {
     status: "failed",
@@ -582,7 +594,7 @@ async function testFavoriteManagementVerifierConfirmsSuccessAfterAttempt() {
   ]);
 
   const request = favoriteManagementRequest();
-  const result = await verifier.classify(request, favoriteManagementFrameObservations());
+  const result = await verifier.classify(request, favoriteManagementExecutionEnvelope());
 
   assert.deepStrictEqual(JSON.parse(JSON.stringify(result)), {
     status: "success",
@@ -598,7 +610,7 @@ async function testFavoriteManagementVerifierConfirmsAlreadyFavoritedWithoutAtte
   ]);
 
   const request = favoriteManagementRequest(false);
-  const result = await verifier.classify(request, favoriteManagementFrameObservations());
+  const result = await verifier.classify(request, favoriteManagementExecutionEnvelope());
 
   assert.deepStrictEqual(JSON.parse(JSON.stringify(result)), {
     status: "already_favorited",
@@ -612,7 +624,7 @@ async function testFavoriteManagementVerifierKeepsZeroVisibleMatchesUnknown() {
   const verifier = loadBossFavoriteManagementVerifier([]);
 
   const request = favoriteManagementRequest();
-  const result = await verifier.classify(request, favoriteManagementFrameObservations(0));
+  const result = await verifier.classify(request, favoriteManagementExecutionEnvelope(0));
 
   assert.deepStrictEqual(JSON.parse(JSON.stringify(result)), {
     status: "unknown",
@@ -629,7 +641,7 @@ async function testFavoriteManagementVerifierRefusesMultipleTypedMatches() {
   ]);
 
   const request = favoriteManagementRequest();
-  const result = await verifier.classify(request, favoriteManagementFrameObservations(2));
+  const result = await verifier.classify(request, favoriteManagementExecutionEnvelope(2));
 
   assert.deepStrictEqual(JSON.parse(JSON.stringify(result)), {
     status: "identity_conflict",
@@ -648,7 +660,7 @@ async function testFavoriteManagementVerifierRejectsNonManagementContext() {
   const request = favoriteManagementRequest();
   const result = await verifier.classify(
     request,
-    favoriteManagementFrameObservations(1, true, "/web/chat/recommend"),
+    favoriteManagementExecutionEnvelope(1, true, "/web/chat/recommend"),
   );
 
   assert.deepStrictEqual(JSON.parse(JSON.stringify(result)), {
@@ -677,7 +689,7 @@ async function testFavoriteManagementVerifierRejectsNonBooleanAttemptFlag() {
     bossIdentityNode("data-geekid", "trusted-geek-1"),
   ]);
 
-  const result = await verifier.classify(favoriteManagementRequest("false"), favoriteManagementFrameObservations());
+  const result = await verifier.classify(favoriteManagementRequest("false"), favoriteManagementExecutionEnvelope());
 
   assert.deepStrictEqual(JSON.parse(JSON.stringify(result)), {
     status: "failed",
@@ -695,11 +707,17 @@ async function testFavoriteManagementVerifierRejectsObservationsFromAnotherInspe
     inspection_id: "inspection-current",
     tab_id: 27,
   };
-  const observations = favoriteManagementFrameObservations().map((observation) => ({
-    ...observation,
-    inspection_id: "inspection-stale",
-    tab_id: 26,
-    identity_binding: "sha256:stale",
+  const observations = favoriteManagementExecutionEnvelope();
+  observations.inspection_id = "inspection-stale";
+  observations.tab_id = 26;
+  observations.executions = observations.executions.map((execution) => ({
+    ...execution,
+    observation: {
+      ...execution.observation,
+      inspection_id: "inspection-stale",
+      tab_id: 26,
+      identity_binding: "sha256:stale",
+    },
   }));
 
   const result = await verifier.classify(request, observations);
@@ -708,6 +726,20 @@ async function testFavoriteManagementVerifierRejectsObservationsFromAnotherInspe
     status: "failed",
     attempted: true,
     reason: "favorite_management_observation_mismatch",
+  });
+}
+
+async function testFavoriteManagementVerifierRejectsMixedDocumentEnvelope() {
+  const verifier = loadBossFavoriteManagementVerifier([]);
+  const envelope = favoriteManagementExecutionEnvelope();
+  envelope.executions[1].document_id = envelope.executions[0].document_id;
+
+  const result = await verifier.classify(favoriteManagementRequest(), envelope);
+
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(result)), {
+    status: "failed",
+    attempted: true,
+    reason: "favorite_management_execution_envelope_invalid",
   });
 }
 
@@ -984,6 +1016,9 @@ function testCollectionSupportsBossAndLiepinAdapters() {
   assert(collector.includes("lpt.liepin.com"));
   assert(popup.includes("COLLECT_PLATFORMS"));
   assert(popup.includes('files: ["identity_contract.js", "favorite_adapter.js", "favorite_management_verifier.js", "collector.js"]'));
+  assert(popup.includes("async function verifyFavoriteManagementAcrossFrames"));
+  assert(popup.includes("target: { tabId, allFrames: true }"));
+  assert(popup.includes("document_id: inspection.documentId"));
   assert(popup.includes("getActiveSupportedTab"));
   assert(popup.includes("getActiveBossTab"));
   assert(popup.includes("applyPlatformDefaults"));
@@ -1153,6 +1188,7 @@ async function main() {
   await testFavoriteManagementVerifierRejectsIncompleteIdentity();
   await testFavoriteManagementVerifierRejectsNonBooleanAttemptFlag();
   await testFavoriteManagementVerifierRejectsObservationsFromAnotherInspection();
+  await testFavoriteManagementVerifierRejectsMixedDocumentEnvelope();
   await testNativeFavoriteUsesUniqueCausalIdentityJoinAndAwaitsManagementVerification();
   await testNativeFavoriteDoesNotUseOldControlAfterUnrelatedDetailMutation();
   await testNativeFavoriteStopsForDeepTrustedInterveningSelection();
