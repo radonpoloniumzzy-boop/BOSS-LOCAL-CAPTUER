@@ -197,6 +197,79 @@ class LocalApiServerTest(unittest.TestCase):
         self.assertTrue(start_payload["result"]["enabled"])
         self.assertEqual(start_payload["result"]["job_title"], "Java工程师")
 
+    def test_native_favorite_claim_and_result_endpoints_use_authenticated_callbacks(self) -> None:
+        reported: list[dict[str, object]] = []
+        self.server.claim_favorite_task = lambda payload: {
+            "task_id": 71,
+            "batch_id": int(payload["batch_id"]),
+            "status": "running",
+            "platform": "boss",
+            "platform_identity": {
+                "attribute": "data-geekid",
+                "value": "trusted-geek-71",
+            },
+            "claim_token": "claim-token-71",
+        }
+        self.server.report_favorite_result = lambda payload: (
+            reported.append(dict(payload))
+            or {
+                "task_id": int(payload["task_id"]),
+                "status": str(payload["status"]),
+                "attempt_count": 1,
+            }
+        )
+
+        claim_body = json.dumps({"batch_id": 19, "worker_id": "extension-tab-91"}).encode(
+            "utf-8"
+        )
+        claim_connection = http.client.HTTPConnection("127.0.0.1", self.server.port, timeout=5)
+        claim_connection.request(
+            "POST",
+            "/api/favorites/claim",
+            body=claim_body,
+            headers={
+                "Content-Type": "application/json",
+                "X-Boss-Local-Token": self.token,
+            },
+        )
+        claim_response = claim_connection.getresponse()
+        claim_payload = json.loads(claim_response.read().decode("utf-8"))
+
+        self.assertEqual(claim_response.status, 200)
+        self.assertEqual(claim_payload["result"]["task_id"], 71)
+        self.assertEqual(
+            claim_payload["result"]["platform_identity"],
+            {"attribute": "data-geekid", "value": "trusted-geek-71"},
+        )
+
+        result_body = json.dumps(
+            {
+                "task_id": 71,
+                "claim_token": "claim-token-71",
+                "status": "unknown",
+                "attempted": True,
+                "reason": "favorite_management_identity_not_visible",
+                "method": "native_detail_control",
+            }
+        ).encode("utf-8")
+        result_connection = http.client.HTTPConnection("127.0.0.1", self.server.port, timeout=5)
+        result_connection.request(
+            "POST",
+            "/api/favorites/result",
+            body=result_body,
+            headers={
+                "Content-Type": "application/json",
+                "X-Boss-Local-Token": self.token,
+            },
+        )
+        result_response = result_connection.getresponse()
+        result_payload = json.loads(result_response.read().decode("utf-8"))
+
+        self.assertEqual(result_response.status, 200)
+        self.assertEqual(result_payload["result"]["status"], "unknown")
+        self.assertEqual(len(reported), 1)
+        self.assertIs(reported[0]["attempted"], True)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import secrets
 import sqlite3
 from collections.abc import Iterable
 from datetime import datetime, timedelta
@@ -49,6 +50,15 @@ SYSTEM_REASON_CODES = {
 }
 
 REASON_CODES = USER_REASON_CODES | SYSTEM_REASON_CODES
+
+NATIVE_FAVORITE_TERMINAL_STATUSES = {
+    "success",
+    "already_favorited",
+    "failed",
+    "unknown",
+    "identity_incomplete",
+    "stopped",
+}
 
 
 class CandidateRepository:
@@ -1178,6 +1188,370 @@ class CandidateRepository:
         payload["locked_at"] = timestamp
         payload["locked_by"] = lock_owner
         return payload
+
+    def create_native_favorite_batch(
+        self,
+        *,
+        capture_batch_id: int,
+        screening_run_id: int,
+        role_id: int,
+        source_page_url: str,
+        source_page_context: dict[str, object],
+        config_snapshot: dict[str, object],
+        tasks: Iterable[dict[str, object]],
+    ) -> int:
+        connection = self.db.get_connection()
+        timestamp = now_iso()
+        task_snapshots = list(tasks)
+        with connection:
+            existing = connection.execute(
+                "SELECT id FROM native_favorite_batches WHERE screening_run_id = ?",
+                (screening_run_id,),
+            ).fetchone()
+            if existing is not None:
+                return int(existing["id"])
+            cursor = connection.execute(
+                """
+                INSERT INTO native_favorite_batches(
+                    capture_batch_id, screening_run_id, role_id, platform, status,
+                    source_page_url, source_page_context_json, config_snapshot_json,
+                    total_tasks, completed_tasks, created_at, updated_at
+                ) VALUES (?, ?, ?, 'boss', 'pending', ?, ?, ?, 0, 0, ?, ?)
+                """,
+                (
+                    capture_batch_id,
+                    screening_run_id,
+                    role_id,
+                    str(source_page_url or "").strip(),
+                    json.dumps(source_page_context, ensure_ascii=False, sort_keys=True),
+                    json.dumps(config_snapshot, ensure_ascii=False, sort_keys=True),
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            favorite_batch_id = int(cursor.lastrowid)
+            inserted = 0
+            completed = 0
+            for index, task in enumerate(task_snapshots):
+                candidate_id = int(task["candidate_id"])
+                identity = task.get("platform_identity")
+                if not isinstance(identity, dict):
+                    identity = {}
+                attribute = str(identity.get("attribute") or "").strip().lower()
+                value = str(identity.get("value") or "").strip()
+                status = "pending" if attribute and value else "identity_incomplete"
+                error_reason = (
+                    "trusted_platform_identity_missing"
+                    if status == "identity_incomplete"
+                    else ""
+                )
+                if status == "pending":
+                    previous = connection.execute(
+                        """
+                        SELECT status
+                        FROM native_favorite_tasks
+                        WHERE platform = 'boss'
+                          AND identity_attribute = ?
+                          AND identity_value = ?
+                        ORDER BY updated_at DESC, id DESC
+                        LIMIT 1
+                        """,
+                        (attribute, value),
+                    ).fetchone()
+                    if previous is not None:
+                        previous_status = str(previous["status"])
+                        if previous_status in {"success", "already_favorited"}:
+                            status = "already_favorited"
+                            error_reason = "prior_verified_native_favorite"
+                        elif previous_status == "unknown":
+                            status = "unknown"
+                            error_reason = "prior_unknown_requires_manual_resolution"
+                        elif previous_status == "failed":
+                            status = "failed"
+                            error_reason = "prior_failed_requires_explicit_retry"
+                        else:
+                            status = "stopped"
+                            error_reason = "prior_identity_already_queued"
+                is_terminal = status in NATIVE_FAVORITE_TERMINAL_STATUSES
+                task_cursor = connection.execute(
+                    """
+                    INSERT OR IGNORE INTO native_favorite_tasks(
+                        batch_id, candidate_id, role_id, platform, status,
+                        identity_attribute, identity_value, identity_snapshot_json,
+                        priority, attempt_count, max_attempts, error_reason,
+                        finished_at, created_at, updated_at
+                    ) VALUES (?, ?, ?, 'boss', ?, ?, ?, ?, ?, 0, 2, ?, ?, ?, ?)
+                    """,
+                    (
+                        favorite_batch_id,
+                        candidate_id,
+                        role_id,
+                        status,
+                        attribute,
+                        value,
+                        json.dumps(
+                            {"platform": "boss", "attribute": attribute, "value": value},
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        ),
+                        int(task.get("priority") or (0 - index)),
+                        error_reason,
+                        timestamp if is_terminal else None,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+                if task_cursor.rowcount > 0:
+                    inserted += 1
+                    completed += int(is_terminal)
+            batch_status = "completed" if inserted == completed else "pending"
+            connection.execute(
+                """
+                UPDATE native_favorite_batches
+                SET status = ?, total_tasks = ?, completed_tasks = ?,
+                    completed_at = CASE WHEN ? = 'completed' THEN ? ELSE NULL END,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    batch_status,
+                    inserted,
+                    completed,
+                    batch_status,
+                    timestamp,
+                    timestamp,
+                    favorite_batch_id,
+                ),
+            )
+        return favorite_batch_id
+
+    def claim_next_native_favorite_task(
+        self,
+        favorite_batch_id: int,
+        *,
+        worker_id: str = "",
+    ) -> dict[str, object] | None:
+        connection = self.db.get_connection()
+        timestamp = now_iso()
+        claim_token = secrets.token_urlsafe(24)
+        with connection:
+            row = connection.execute(
+                """
+                SELECT
+                    t.id AS task_id,
+                    t.batch_id,
+                    t.candidate_id,
+                    t.role_id,
+                    t.platform,
+                    t.identity_attribute,
+                    t.identity_value,
+                    t.attempt_count,
+                    t.max_attempts,
+                    b.capture_batch_id,
+                    b.screening_run_id,
+                    b.source_page_url,
+                    b.source_page_context_json,
+                    b.config_snapshot_json
+                FROM native_favorite_tasks t
+                JOIN native_favorite_batches b ON b.id = t.batch_id
+                WHERE t.batch_id = ?
+                  AND b.platform = 'boss'
+                  AND b.status IN ('pending', 'running')
+                  AND t.status = 'pending'
+                ORDER BY t.priority DESC, t.id
+                LIMIT 1
+                """,
+                (favorite_batch_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            cursor = connection.execute(
+                """
+                UPDATE native_favorite_tasks
+                SET status = 'running', claim_token = ?, locked_at = ?, locked_by = ?,
+                    started_at = COALESCE(started_at, ?), updated_at = ?
+                WHERE id = ? AND status = 'pending'
+                """,
+                (
+                    claim_token,
+                    timestamp,
+                    str(worker_id or "favorite-extension"),
+                    timestamp,
+                    timestamp,
+                    int(row["task_id"]),
+                ),
+            )
+            if cursor.rowcount <= 0:
+                return None
+            connection.execute(
+                """
+                UPDATE native_favorite_batches
+                SET status = 'running', started_at = COALESCE(started_at, ?), updated_at = ?
+                WHERE id = ?
+                """,
+                (timestamp, timestamp, favorite_batch_id),
+            )
+        return {
+            "task_id": int(row["task_id"]),
+            "batch_id": int(row["batch_id"]),
+            "capture_batch_id": int(row["capture_batch_id"]),
+            "screening_run_id": int(row["screening_run_id"]),
+            "candidate_id": int(row["candidate_id"]),
+            "role_id": int(row["role_id"]),
+            "platform": str(row["platform"]),
+            "status": "running",
+            "platform_identity": {
+                "attribute": str(row["identity_attribute"]),
+                "value": str(row["identity_value"]),
+            },
+            "source_page_url": str(row["source_page_url"]),
+            "source_page_context": json.loads(str(row["source_page_context_json"] or "{}")),
+            "config_snapshot": json.loads(str(row["config_snapshot_json"] or "{}")),
+            "attempt_count": int(row["attempt_count"]),
+            "max_attempts": int(row["max_attempts"]),
+            "claim_token": claim_token,
+            "locked_at": timestamp,
+        }
+
+    def complete_native_favorite_task(
+        self,
+        task_id: int,
+        *,
+        claim_token: str,
+        status: str,
+        attempted: bool,
+        reason: str = "",
+        method: str = "",
+        result: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        normalized_status = str(status or "").strip().lower()
+        if normalized_status not in NATIVE_FAVORITE_TERMINAL_STATUSES:
+            raise ValueError(f"Invalid Native Favorite terminal status: {status}")
+        if not isinstance(attempted, bool):
+            raise ValueError("Native Favorite attempted must be boolean")
+        if normalized_status == "success" and not attempted:
+            raise ValueError("Native Favorite success requires an attempted write")
+        if normalized_status == "already_favorited" and attempted:
+            raise ValueError("Native Favorite already_favorited requires no attempted write")
+        connection = self.db.get_connection()
+        timestamp = now_iso()
+        with connection:
+            row = connection.execute(
+                """
+                SELECT id, batch_id, status, claim_token, attempt_count, started_at
+                FROM native_favorite_tasks
+                WHERE id = ?
+                """,
+                (task_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"Native Favorite task not found: {task_id}")
+            if str(row["status"]) != "running":
+                raise ValueError("Native Favorite task is not running")
+            if not claim_token or not secrets.compare_digest(
+                str(claim_token), str(row["claim_token"] or "")
+            ):
+                raise ValueError("Native Favorite claim token does not match")
+            attempt_number = int(row["attempt_count"]) + 1
+            connection.execute(
+                """
+                INSERT INTO native_favorite_attempts(
+                    task_id, attempt_number, status, attempted, method, reason,
+                    result_json, started_at, finished_at, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    task_id,
+                    attempt_number,
+                    normalized_status,
+                    int(attempted),
+                    str(method or ""),
+                    str(reason or ""),
+                    json.dumps(result or {}, ensure_ascii=False, sort_keys=True),
+                    row["started_at"],
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE native_favorite_tasks
+                SET status = ?, attempt_count = ?, claim_token = '', locked_at = NULL,
+                    locked_by = '', error_reason = ?, finished_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    normalized_status,
+                    attempt_number,
+                    str(reason or ""),
+                    timestamp,
+                    timestamp,
+                    task_id,
+                ),
+            )
+            batch_id = int(row["batch_id"])
+            remaining = int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*) AS value
+                    FROM native_favorite_tasks
+                    WHERE batch_id = ? AND status IN ('pending', 'running')
+                    """,
+                    (batch_id,),
+                ).fetchone()["value"]
+            )
+            completed = int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*) AS value
+                    FROM native_favorite_tasks
+                    WHERE batch_id = ? AND status NOT IN ('pending', 'running')
+                    """,
+                    (batch_id,),
+                ).fetchone()["value"]
+            )
+            connection.execute(
+                """
+                UPDATE native_favorite_batches
+                SET status = CASE WHEN ? = 0 THEN 'completed' ELSE 'running' END,
+                    completed_tasks = ?,
+                    completed_at = CASE WHEN ? = 0 THEN ? ELSE NULL END,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (remaining, completed, remaining, timestamp, timestamp, batch_id),
+            )
+        return {
+            "task_id": task_id,
+            "batch_id": batch_id,
+            "status": normalized_status,
+            "attempted": attempted,
+            "attempt_count": attempt_number,
+            "reason": str(reason or ""),
+            "finished_at": timestamp,
+        }
+
+    def list_native_favorite_attempts(self, task_id: int) -> list[sqlite3.Row]:
+        return self.db.get_connection().execute(
+            """
+            SELECT *
+            FROM native_favorite_attempts
+            WHERE task_id = ?
+            ORDER BY attempt_number
+            """,
+            (task_id,),
+        ).fetchall()
+
+    def list_native_favorite_tasks(self, favorite_batch_id: int) -> list[sqlite3.Row]:
+        return self.db.get_connection().execute(
+            """
+            SELECT *
+            FROM native_favorite_tasks
+            WHERE batch_id = ?
+            ORDER BY priority DESC, id
+            """,
+            (favorite_batch_id,),
+        ).fetchall()
 
     def mark_screening_task_success(
         self,

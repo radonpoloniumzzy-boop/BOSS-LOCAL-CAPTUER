@@ -19,6 +19,8 @@ class LocalApiServer:
         get_automation_status: Callable[[], dict[str, object]] | None = None,
         start_automation: Callable[[dict[str, object]], dict[str, object]] | None = None,
         get_extension_config: Callable[[], dict[str, object]] | None = None,
+        claim_favorite_task: Callable[[dict[str, object]], dict[str, object] | None] | None = None,
+        report_favorite_result: Callable[[dict[str, object]], dict[str, object]] | None = None,
         auth_token: str = "",
         max_body_bytes: int = 25_000_000,
     ) -> None:
@@ -31,6 +33,8 @@ class LocalApiServer:
         self.get_automation_status = get_automation_status
         self.start_automation = start_automation
         self.get_extension_config = get_extension_config
+        self.claim_favorite_task = claim_favorite_task
+        self.report_favorite_result = report_favorite_result
         self.auth_token = str(auth_token or "")
         self.max_body_bytes = max_body_bytes
         self._server: ThreadingHTTPServer | None = None
@@ -97,7 +101,12 @@ class LocalApiServer:
                 self._send_json(404, {"error": "Not found"})
 
             def do_POST(self) -> None:
-                if self.path not in {"/api/import/cards", "/api/automation/start"}:
+                if self.path not in {
+                    "/api/import/cards",
+                    "/api/automation/start",
+                    "/api/favorites/claim",
+                    "/api/favorites/result",
+                }:
                     self._send_json(404, {"error": "Not found"})
                     return
                 if not self._is_authorized():
@@ -110,6 +119,20 @@ class LocalApiServer:
                         return
                     body = self.rfile.read(content_length).decode("utf-8")
                     payload = json.loads(body or "{}")
+                    if self.path == "/api/favorites/claim":
+                        if parent.claim_favorite_task is None:
+                            self._send_json(503, {"ok": False, "error": "Native Favorite is unavailable"})
+                            return
+                        result = parent.claim_favorite_task(payload)
+                        self._send_json(200, {"ok": True, "result": result})
+                        return
+                    if self.path == "/api/favorites/result":
+                        if parent.report_favorite_result is None:
+                            self._send_json(503, {"ok": False, "error": "Native Favorite is unavailable"})
+                            return
+                        result = parent.report_favorite_result(payload)
+                        self._send_json(200, {"ok": True, "result": result})
+                        return
                     if self.path == "/api/automation/start":
                         if parent.start_automation is None:
                             self._send_json(503, {"ok": False, "error": "Automation is unavailable"})

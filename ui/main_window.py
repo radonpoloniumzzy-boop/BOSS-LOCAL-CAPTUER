@@ -428,6 +428,8 @@ class MainWindow(QMainWindow):
             get_automation_status=self._automation_status_payload,
             start_automation=self._start_automation_from_extension,
             get_extension_config=self._extension_config_payload,
+            claim_favorite_task=self._claim_native_favorite_task_from_extension,
+            report_favorite_result=self._report_native_favorite_result_from_extension,
             auth_token=self.config.local_api_token,
         )
         try:
@@ -446,6 +448,36 @@ class MainWindow(QMainWindow):
             "resume_filename_template": self.config.resume_filename_template,
             "job_title": self.config.default_job_title,
         }
+
+    def _claim_native_favorite_task_from_extension(
+        self,
+        payload: dict[str, object],
+    ) -> dict[str, object] | None:
+        batch_id = int(payload.get("batch_id") or 0)
+        if batch_id <= 0:
+            raise ValueError("Native Favorite batch_id is required")
+        return self.repository.claim_next_native_favorite_task(
+            batch_id,
+            worker_id=str(payload.get("worker_id") or "favorite-extension"),
+        )
+
+    def _report_native_favorite_result_from_extension(
+        self,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        task_id = int(payload.get("task_id") or 0)
+        if task_id <= 0:
+            raise ValueError("Native Favorite task_id is required")
+        result = payload.get("result")
+        return self.repository.complete_native_favorite_task(
+            task_id,
+            claim_token=str(payload.get("claim_token") or ""),
+            status=str(payload.get("status") or ""),
+            attempted=payload.get("attempted"),
+            reason=str(payload.get("reason") or ""),
+            method=str(payload.get("method") or ""),
+            result=dict(result) if isinstance(result, dict) else {},
+        )
 
     def handle_open_browser(self) -> None:
         url = self.dashboard_page.source_url_input.text().strip() or self.config.target_url

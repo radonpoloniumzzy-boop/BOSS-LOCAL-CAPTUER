@@ -710,6 +710,96 @@ def apply_migrations(connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_role_matches_role_recruitment_rating_updated "
         "ON candidate_role_matches(role_id, recruitment_status, latest_rating, updated_at DESC)"
     )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS native_favorite_batches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            capture_batch_id INTEGER NOT NULL,
+            screening_run_id INTEGER NOT NULL,
+            role_id INTEGER NOT NULL,
+            platform TEXT NOT NULL DEFAULT 'boss',
+            status TEXT NOT NULL DEFAULT 'pending',
+            source_page_url TEXT NOT NULL,
+            source_page_context_json TEXT NOT NULL DEFAULT '{}',
+            config_snapshot_json TEXT NOT NULL DEFAULT '{}',
+            total_tasks INTEGER NOT NULL DEFAULT 0,
+            completed_tasks INTEGER NOT NULL DEFAULT 0,
+            started_at TEXT,
+            completed_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(capture_batch_id) REFERENCES capture_batches(id) ON DELETE CASCADE,
+            FOREIGN KEY(screening_run_id) REFERENCES screening_runs(id) ON DELETE CASCADE,
+            FOREIGN KEY(role_id) REFERENCES screening_profiles(id) ON DELETE CASCADE,
+            UNIQUE(screening_run_id)
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_native_favorite_batches_status "
+        "ON native_favorite_batches(status, created_at)"
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS native_favorite_tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            batch_id INTEGER NOT NULL,
+            candidate_id INTEGER NOT NULL,
+            role_id INTEGER NOT NULL,
+            platform TEXT NOT NULL DEFAULT 'boss',
+            status TEXT NOT NULL DEFAULT 'pending',
+            identity_attribute TEXT NOT NULL DEFAULT '',
+            identity_value TEXT NOT NULL DEFAULT '',
+            identity_snapshot_json TEXT NOT NULL DEFAULT '{}',
+            priority INTEGER NOT NULL DEFAULT 0,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            max_attempts INTEGER NOT NULL DEFAULT 2,
+            claim_token TEXT NOT NULL DEFAULT '',
+            locked_at TEXT,
+            locked_by TEXT NOT NULL DEFAULT '',
+            error_reason TEXT NOT NULL DEFAULT '',
+            started_at TEXT,
+            finished_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(batch_id) REFERENCES native_favorite_batches(id) ON DELETE CASCADE,
+            FOREIGN KEY(candidate_id) REFERENCES candidates(id) ON DELETE CASCADE,
+            FOREIGN KEY(role_id) REFERENCES screening_profiles(id) ON DELETE CASCADE,
+            UNIQUE(batch_id, candidate_id)
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_native_favorite_tasks_claim "
+        "ON native_favorite_tasks(batch_id, status, priority, id)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_native_favorite_tasks_identity "
+        "ON native_favorite_tasks(platform, identity_attribute, identity_value, status)"
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS native_favorite_attempts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id INTEGER NOT NULL,
+            attempt_number INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            attempted INTEGER NOT NULL DEFAULT 0,
+            method TEXT NOT NULL DEFAULT '',
+            reason TEXT NOT NULL DEFAULT '',
+            result_json TEXT NOT NULL DEFAULT '{}',
+            started_at TEXT,
+            finished_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(task_id) REFERENCES native_favorite_tasks(id) ON DELETE CASCADE,
+            UNIQUE(task_id, attempt_number)
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_native_favorite_attempts_task "
+        "ON native_favorite_attempts(task_id, attempt_number)"
+    )
     connection.execute("DELETE FROM schema_version")
-    connection.execute("INSERT INTO schema_version(version) VALUES (14)")
+    connection.execute("INSERT INTO schema_version(version) VALUES (15)")
     connection.commit()
