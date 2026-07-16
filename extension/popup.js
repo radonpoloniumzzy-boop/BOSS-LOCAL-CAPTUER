@@ -489,7 +489,7 @@ async function resetScrollPause(tabId) {
 async function collectFromAllFrames(tabId, autoScroll, settings) {
   await chrome.scripting.executeScript({
     target: { tabId, allFrames: true },
-    files: ["identity_contract.js", "favorite_adapter.js", "collector.js"],
+    files: ["identity_contract.js", "favorite_adapter.js", "favorite_management_verifier.js", "collector.js"],
   });
 
   return chrome.scripting.executeScript({
