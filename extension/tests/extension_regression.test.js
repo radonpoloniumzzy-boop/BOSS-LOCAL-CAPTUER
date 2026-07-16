@@ -586,6 +586,24 @@ async function testFavoriteManagementVerifierRejectsIncompleteIdentity() {
   });
 }
 
+async function testFavoriteManagementVerifierRejectsNonBooleanAttemptFlag() {
+  const verifier = loadBossFavoriteManagementVerifier([
+    bossIdentityNode("data-geekid", "trusted-geek-1"),
+  ]);
+
+  const result = await verifier.verifyOne({
+    platform: "boss",
+    platform_identity: { attribute: "data-geekid", value: "trusted-geek-1" },
+    favorite_action_attempted: "false",
+  });
+
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(result)), {
+    status: "failed",
+    attempted: false,
+    reason: "invalid_favorite_action_attempted",
+  });
+}
+
 async function testNativeFavoriteRefusesIncompleteIdentityWithoutClicking() {
   let pageClickCount = 0;
   const { adapter, getQueryCount } = loadBossNativeFavoriteAdapter([
@@ -1024,6 +1042,7 @@ async function main() {
   await testFavoriteManagementVerifierRefusesMultipleTypedMatches();
   await testFavoriteManagementVerifierRejectsNonManagementContext();
   await testFavoriteManagementVerifierRejectsIncompleteIdentity();
+  await testFavoriteManagementVerifierRejectsNonBooleanAttemptFlag();
   await testNativeFavoriteUsesUniqueCausalIdentityJoinAndAwaitsManagementVerification();
   await testNativeFavoriteDoesNotUseOldControlAfterUnrelatedDetailMutation();
   await testNativeFavoriteStopsForDeepTrustedInterveningSelection();

@@ -8,7 +8,11 @@
     const platform = String(request?.platform || "").trim().toLowerCase();
     const identityAttribute = String(request?.platform_identity?.attribute || "").trim().toLowerCase();
     const identityValue = String(request?.platform_identity?.value || "").trim();
-    const attempted = Boolean(request?.favorite_action_attempted);
+    const actionAttempted = request?.favorite_action_attempted;
+    if (typeof actionAttempted !== "boolean") {
+      return { status: "failed", attempted: false, reason: "invalid_favorite_action_attempted" };
+    }
+    const attempted = actionAttempted;
     if (platform !== "boss") {
       return { status: "failed", attempted, reason: "unsupported_platform" };
     }
