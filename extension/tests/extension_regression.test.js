@@ -129,7 +129,7 @@ function testBossIdentityEvidenceKeepsIdentifiersAndDropsSecrets() {
     attributes: entries.map(([name, value]) => ({ name, value })),
   });
   const card = attributeNode([
-    ["data-geek-id", "encrypted-geek-1"],
+    ["data-geekid", "encrypted-geek-1"],
     ["data-friend-id", "friend-1"],
     ["data-id", "unrelated-component-id"],
     ["data-user-id", "unrelated-user-id"],
@@ -157,7 +157,7 @@ function testBossIdentityEvidenceKeepsIdentifiersAndDropsSecrets() {
     lid: "lid-1",
     job_context_id: "job-1",
     raw_identity: {
-      "data-geek-id": "encrypted-geek-1",
+      "data-geekid": "encrypted-geek-1",
     },
     raw_action_context: {
       "data-friend-id": "friend-1",
@@ -170,15 +170,22 @@ function testBossIdentityEvidenceKeepsIdentifiersAndDropsSecrets() {
   assert.strictEqual(JSON.stringify(identity).includes("must-not-be-collected"), false);
 }
 
-function loadBossNativeFavoriteAdapter(identityNodes = []) {
+function loadBossNativeFavoriteAdapter(identityNodes = [], documentOverrides = {}) {
   let queryCount = 0;
   const document = {
     querySelectorAll() {
       queryCount += 1;
       return identityNodes;
     },
+    querySelector() {
+      return null;
+    },
+    addEventListener() {},
+    removeEventListener() {},
+    documentElement: {},
+    ...documentOverrides,
   };
-  const context = { document, globalThis: {} };
+  const context = { clearTimeout, document, globalThis: {}, setTimeout };
   context.globalThis = context;
   const code = `${fs.readFileSync(path.join(EXTENSION_DIR, "identity_contract.js"), "utf8")}
 ${fs.readFileSync(path.join(EXTENSION_DIR, "favorite_adapter.js"), "utf8")}`;
@@ -187,6 +194,117 @@ ${fs.readFileSync(path.join(EXTENSION_DIR, "favorite_adapter.js"), "utf8")}`;
     adapter: context.__bossNativeFavoriteAdapter,
     getQueryCount: () => queryCount,
   };
+}
+
+async function testNativeFavoriteUsesUniqueCausalIdentityJoinAndConfirmsSuccess() {
+  let candidateClickCount = 0;
+  let favoriteClickCount = 0;
+  let active = false;
+  const originalDetail = { querySelector: () => null };
+  const favoriteControl = {
+    click() {
+      favoriteClickCount += 1;
+      active = true;
+    },
+  };
+  const updatedDetail = {
+    querySelector(selector) {
+      if (selector === ".like-icon.like-icon-active") return active ? {} : null;
+      if (selector.includes(".like-icon-and-text")) return favoriteControl;
+      return null;
+    },
+  };
+  let currentDetail = originalDetail;
+  const candidate = bossIdentityNode("data-geekid", "trusted-geek-1", () => {
+    candidateClickCount += 1;
+    currentDetail = updatedDetail;
+  });
+  const { adapter } = loadBossNativeFavoriteAdapter([candidate], {
+    querySelector(selector) {
+      return selector === ".resume-item-detail" ? currentDetail : null;
+    },
+  });
+
+  const result = await adapter.favoriteOne({
+    platform: "boss",
+    platform_identity: { attribute: "data-geekid", value: "trusted-geek-1" },
+  });
+
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(result)), {
+    status: "success",
+    attempted: true,
+    reason: "favorite_state_confirmed",
+  });
+  assert.strictEqual(candidateClickCount, 1);
+  assert.strictEqual(favoriteClickCount, 1);
+}
+
+async function testNativeFavoriteTreatsThrowDuringFavoriteClickAsUnknown() {
+  const originalDetail = { querySelector: () => null };
+  const updatedDetail = {
+    querySelector(selector) {
+      if (selector === ".like-icon.like-icon-active") return null;
+      if (selector.includes(".like-icon-and-text")) {
+        return { click() { throw new Error("page handler failed after dispatch"); } };
+      }
+      return null;
+    },
+  };
+  let currentDetail = originalDetail;
+  const candidate = bossIdentityNode("data-geekid", "trusted-geek-1", () => {
+    currentDetail = updatedDetail;
+  });
+  const { adapter } = loadBossNativeFavoriteAdapter([candidate], {
+    querySelector(selector) {
+      return selector === ".resume-item-detail" ? currentDetail : null;
+    },
+  });
+
+  const result = await adapter.favoriteOne({
+    platform: "boss",
+    platform_identity: { attribute: "data-geekid", value: "trusted-geek-1" },
+  });
+
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(result)), {
+    status: "unknown",
+    attempted: true,
+    reason: "favorite_control_click_uncertain",
+  });
+}
+
+async function testNativeFavoriteSkipsWriteWhenCausalDetailIsAlreadyFavorited() {
+  let favoriteClickCount = 0;
+  const originalDetail = { querySelector: () => null };
+  const updatedDetail = {
+    querySelector(selector) {
+      if (selector === ".like-icon.like-icon-active") return {};
+      if (selector.includes(".like-icon-and-text")) {
+        return { click() { favoriteClickCount += 1; } };
+      }
+      return null;
+    },
+  };
+  let currentDetail = originalDetail;
+  const candidate = bossIdentityNode("data-geekid", "trusted-geek-1", () => {
+    currentDetail = updatedDetail;
+  });
+  const { adapter } = loadBossNativeFavoriteAdapter([candidate], {
+    querySelector(selector) {
+      return selector === ".resume-item-detail" ? currentDetail : null;
+    },
+  });
+
+  const result = await adapter.favoriteOne({
+    platform: "boss",
+    platform_identity: { attribute: "data-geekid", value: "trusted-geek-1" },
+  });
+
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(result)), {
+    status: "already_favorited",
+    attempted: false,
+    reason: "favorite_state_already_active",
+  });
+  assert.strictEqual(favoriteClickCount, 0);
 }
 
 async function testNativeFavoriteRejectsNonBossPlatformBeforeReadingThePage() {
@@ -648,6 +766,9 @@ function testFilenameTemplatesMatchDesktopFixtures() {
 
 async function main() {
   testBossIdentityEvidenceKeepsIdentifiersAndDropsSecrets();
+  await testNativeFavoriteUsesUniqueCausalIdentityJoinAndConfirmsSuccess();
+  await testNativeFavoriteTreatsThrowDuringFavoriteClickAsUnknown();
+  await testNativeFavoriteSkipsWriteWhenCausalDetailIsAlreadyFavorited();
   await testNativeFavoriteRejectsNonBossPlatformBeforeReadingThePage();
   await testNativeFavoriteRefusesIncompleteIdentityWithoutClicking();
   await testNativeFavoriteRefusesAmbiguousTrustedIdentityWithoutClicking();

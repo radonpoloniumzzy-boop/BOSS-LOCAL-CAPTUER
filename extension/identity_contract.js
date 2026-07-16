@@ -9,6 +9,7 @@
       "data-encrypt-geek-id",
       "data-encrypt-uid",
       "data-geek-id",
+      "data-geekid",
     ]),
   });
 })(globalThis);

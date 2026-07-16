@@ -20,9 +20,23 @@ The validation recorded no candidate name, resume text, identity value, Cookie, 
 4. The clicked detail subtree exposed no trusted identity attribute names. Production code must join the action target to separately captured identity evidence and must never infer the candidate from name, text, or card position.
 5. Keep zero-match and multi-match cases non-writing: `identity_incomplete` and `identity_conflict` respectively.
 
+## Identity-to-detail join validation — 2026-07-17
+
+A follow-up read-only prototype validated the production navigation seam without exposing identity values:
+
+- The clicked candidate card carried the exact attribute name `data-geekid`.
+- Exactly one salted identity digest was associated with the trusted manual card click.
+- Candidate list and detail share `/web/frame/recommend/`; frame path alone is therefore not identity evidence.
+- The click was followed by two mutations inside the detail experience.
+- About 900 ms later, `.resume-item-detail` existed with `.like-icon-and-text` available.
+- The detail subtree still exposed no direct trusted Platform Identity.
+
+The validated join is causal: production must uniquely match an explicit typed `data-geekid` identity, click that exact card, and require a changed detail root with the favorite control before attempting a Native Favorite. Zero or multiple matches, no detail change, or an intervening trusted selection fail closed. Name, candidate text, and list position remain prohibited identity evidence.
+
 ## Primary source
 
 The disposable prototype and its verdict are preserved on branch `prototype/passive-favorite-diagnostic`:
 
 - `e342312` — passive cross-frame observation prototype
 - `59c03b8` — favorite-management confirmation
+- `928c763` — causal identity-to-detail join verdict
