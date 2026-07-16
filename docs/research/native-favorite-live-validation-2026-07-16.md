@@ -42,8 +42,9 @@ The same test candidate was verified read-only in BOSS **互动 → 收藏牛人
 - The visible list exposed 26 distinct `data-geekid` identities.
 - The source candidate's salted identity digest matched exactly once under the same `data-geekid` attribute type.
 - The match required no name, candidate text, `data-geek` value, or list position.
+- A follow-up context scan found the selected **收藏牛人** marker in sibling frame `/web/frame/recommend/interaction`: one visible `li.tab-item.curr` whose complete normalized text was exactly `收藏牛人`.
 
-This validates the final classification seam. One exact typed match confirms presence in the Native Favorite pool: a task that attempted the write becomes `success`, while a task that skipped the write because the page was already active becomes `already_favorited`. Multiple matches are `identity_conflict`. Zero visible matches remain `unknown` because the management list may be partially loaded; the verifier must not infer absence, navigate, scroll, or click.
+This validates a cross-frame final classification seam. Production must aggregate exactly one selected-subview observation from `/web/frame/recommend/interaction` with scoped candidate-card identity matches from sibling `/web/frame/recommend/`; no single frame or top pathname may finalize a result. With that context proven, one exact typed match confirms presence in the Native Favorite pool: a task that attempted the write becomes `success`, while a task that skipped the write because the page was already active becomes `already_favorited`. Multiple matches are `identity_conflict`. Zero visible matches remain `unknown` because the management list may be partially loaded; the verifier must not infer absence, navigate, scroll, or click.
 
 ## Primary source
 
@@ -53,3 +54,4 @@ The disposable prototype and its verdict are preserved on branch `prototype/pass
 - `59c03b8` — favorite-management confirmation
 - `928c763` — causal identity-to-detail join verdict
 - `85707f1` — favorite-management exact identity-match verdict
+- `d604971` — selected favorite-subview context verdict

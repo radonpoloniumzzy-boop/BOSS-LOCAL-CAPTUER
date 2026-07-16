@@ -457,17 +457,17 @@ function bossIdentityNode(attributeName, value, onClick = () => {}) {
   };
 }
 
-function loadBossFavoriteManagementVerifier(identityNodes = [], topPath = "/web/chat/interaction") {
+function loadBossFavoriteManagementVerifier(identityNodes = [], topPath = "/web/chat/interaction", options = {}) {
   const document = {
-    querySelectorAll() {
-      return identityNodes;
+    querySelectorAll(selector) {
+      return selector === "li.tab-item.curr" ? (options.markers || []) : identityNodes;
     },
   };
   const context = {
     document,
     globalThis: {},
-    location: { pathname: "/web/frame/recommend/" },
-    top: { location: { pathname: topPath } },
+    location: { hostname: "www.zhipin.com", pathname: options.framePath || "/web/frame/recommend/" },
+    top: { location: { hostname: "www.zhipin.com", pathname: topPath } },
   };
   context.globalThis = context;
   const code = `${fs.readFileSync(path.join(EXTENSION_DIR, "identity_contract.js"), "utf8")}
@@ -476,16 +476,96 @@ ${fs.readFileSync(path.join(EXTENSION_DIR, "favorite_management_verifier.js"), "
   return context.__bossFavoriteManagementVerifier;
 }
 
+function managementIdentityNode(value, visible = true) {
+  return {
+    isConnected: true,
+    classList: { contains(name) { return name === "card-inner"; } },
+    getAttribute(name) { return name === "data-geekid" ? value : null; },
+    getBoundingClientRect() { return { width: visible ? 320 : 0, height: visible ? 120 : 0 }; },
+  };
+}
+
+function favoriteManagementFrameObservations(matchCount = 1, selected = true, topPath = "/web/chat/interaction") {
+  const shared = {
+    version: "favorite-management-frame-v1",
+    top_host: "www.zhipin.com",
+    top_path: topPath,
+    frame_host: "www.zhipin.com",
+  };
+  return [
+    {
+      ...shared,
+      frame_path: "/web/frame/recommend/interaction",
+      favorite_subview_selected: selected,
+      identity_match_count: 0,
+    },
+    {
+      ...shared,
+      frame_path: "/web/frame/recommend/",
+      favorite_subview_selected: false,
+      identity_match_count: matchCount,
+    },
+  ];
+}
+
+async function testFavoriteManagementVerifierRequiresSelectedFavoriteSubviewObservation() {
+  const verifier = loadBossFavoriteManagementVerifier([
+    bossIdentityNode("data-geekid", "trusted-geek-1"),
+  ]);
+
+  const request = {
+    platform: "boss",
+    platform_identity: { attribute: "data-geekid", value: "trusted-geek-1" },
+    favorite_action_attempted: true,
+  };
+  const result = await verifier.classify(request, favoriteManagementFrameObservations(1, false));
+
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(result)), {
+    status: "failed",
+    attempted: true,
+    reason: "favorite_management_subview_not_confirmed",
+  });
+}
+
+async function testFavoriteManagementVerifierInspectsSelectedSubviewAndScopedVisibleIdentity() {
+  const request = {
+    platform: "boss",
+    platform_identity: { attribute: "data-geekid", value: "trusted-geek-1" },
+    favorite_action_attempted: true,
+  };
+  const marker = {
+    innerText: "收藏牛人",
+    getBoundingClientRect() { return { width: 80, height: 24 }; },
+  };
+  const contextVerifier = loadBossFavoriteManagementVerifier([], "/web/chat/interaction", {
+    framePath: "/web/frame/recommend/interaction",
+    markers: [marker],
+  });
+  const candidateVerifier = loadBossFavoriteManagementVerifier([
+    managementIdentityNode("trusted-geek-1", true),
+    managementIdentityNode("trusted-geek-1", false),
+  ]);
+
+  const contextObservation = await contextVerifier.inspectFrame(request);
+  const candidateObservation = await candidateVerifier.inspectFrame(request);
+
+  assert.strictEqual(contextObservation.favorite_subview_selected, true);
+  assert.strictEqual(contextObservation.identity_match_count, 0);
+  assert.strictEqual(candidateObservation.favorite_subview_selected, false);
+  assert.strictEqual(candidateObservation.identity_match_count, 1);
+}
+
 async function testFavoriteManagementVerifierConfirmsSuccessAfterAttempt() {
   const verifier = loadBossFavoriteManagementVerifier([
     bossIdentityNode("data-geekid", "trusted-geek-1"),
   ]);
 
-  const result = await verifier.verifyOne({
+  const request = {
     platform: "boss",
     platform_identity: { attribute: "data-geekid", value: "trusted-geek-1" },
     favorite_action_attempted: true,
-  });
+  };
+  const result = await verifier.classify(request, favoriteManagementFrameObservations());
 
   assert.deepStrictEqual(JSON.parse(JSON.stringify(result)), {
     status: "success",
@@ -500,11 +580,12 @@ async function testFavoriteManagementVerifierConfirmsAlreadyFavoritedWithoutAtte
     bossIdentityNode("data-geekid", "trusted-geek-1"),
   ]);
 
-  const result = await verifier.verifyOne({
+  const request = {
     platform: "boss",
     platform_identity: { attribute: "data-geekid", value: "trusted-geek-1" },
     favorite_action_attempted: false,
-  });
+  };
+  const result = await verifier.classify(request, favoriteManagementFrameObservations());
 
   assert.deepStrictEqual(JSON.parse(JSON.stringify(result)), {
     status: "already_favorited",
@@ -517,11 +598,12 @@ async function testFavoriteManagementVerifierConfirmsAlreadyFavoritedWithoutAtte
 async function testFavoriteManagementVerifierKeepsZeroVisibleMatchesUnknown() {
   const verifier = loadBossFavoriteManagementVerifier([]);
 
-  const result = await verifier.verifyOne({
+  const request = {
     platform: "boss",
     platform_identity: { attribute: "data-geekid", value: "trusted-geek-1" },
     favorite_action_attempted: true,
-  });
+  };
+  const result = await verifier.classify(request, favoriteManagementFrameObservations(0));
 
   assert.deepStrictEqual(JSON.parse(JSON.stringify(result)), {
     status: "unknown",
@@ -537,11 +619,12 @@ async function testFavoriteManagementVerifierRefusesMultipleTypedMatches() {
     bossIdentityNode("data-geekid", "trusted-geek-1"),
   ]);
 
-  const result = await verifier.verifyOne({
+  const request = {
     platform: "boss",
     platform_identity: { attribute: "data-geekid", value: "trusted-geek-1" },
     favorite_action_attempted: true,
-  });
+  };
+  const result = await verifier.classify(request, favoriteManagementFrameObservations(2));
 
   assert.deepStrictEqual(JSON.parse(JSON.stringify(result)), {
     status: "identity_conflict",
@@ -557,11 +640,15 @@ async function testFavoriteManagementVerifierRejectsNonManagementContext() {
     "/web/chat/recommend",
   );
 
-  const result = await verifier.verifyOne({
+  const request = {
     platform: "boss",
     platform_identity: { attribute: "data-geekid", value: "trusted-geek-1" },
     favorite_action_attempted: true,
-  });
+  };
+  const result = await verifier.classify(
+    request,
+    favoriteManagementFrameObservations(1, true, "/web/chat/recommend"),
+  );
 
   assert.deepStrictEqual(JSON.parse(JSON.stringify(result)), {
     status: "failed",
@@ -573,11 +660,11 @@ async function testFavoriteManagementVerifierRejectsNonManagementContext() {
 async function testFavoriteManagementVerifierRejectsIncompleteIdentity() {
   const verifier = loadBossFavoriteManagementVerifier([]);
 
-  const result = await verifier.verifyOne({
+  const result = await verifier.classify({
     platform: "boss",
     platform_identity: null,
     favorite_action_attempted: false,
-  });
+  }, []);
 
   assert.deepStrictEqual(JSON.parse(JSON.stringify(result)), {
     status: "identity_incomplete",
@@ -591,11 +678,11 @@ async function testFavoriteManagementVerifierRejectsNonBooleanAttemptFlag() {
     bossIdentityNode("data-geekid", "trusted-geek-1"),
   ]);
 
-  const result = await verifier.verifyOne({
+  const result = await verifier.classify({
     platform: "boss",
     platform_identity: { attribute: "data-geekid", value: "trusted-geek-1" },
     favorite_action_attempted: "false",
-  });
+  }, favoriteManagementFrameObservations());
 
   assert.deepStrictEqual(JSON.parse(JSON.stringify(result)), {
     status: "failed",
@@ -1036,6 +1123,8 @@ function testFilenameTemplatesMatchDesktopFixtures() {
 
 async function main() {
   testBossIdentityEvidenceKeepsIdentifiersAndDropsSecrets();
+  await testFavoriteManagementVerifierRequiresSelectedFavoriteSubviewObservation();
+  await testFavoriteManagementVerifierInspectsSelectedSubviewAndScopedVisibleIdentity();
   await testFavoriteManagementVerifierConfirmsSuccessAfterAttempt();
   await testFavoriteManagementVerifierConfirmsAlreadyFavoritedWithoutAttempt();
   await testFavoriteManagementVerifierKeepsZeroVisibleMatchesUnknown();
