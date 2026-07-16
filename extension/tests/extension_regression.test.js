@@ -1,4 +1,5 @@
 const assert = require("assert");
+const { webcrypto } = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
@@ -464,10 +465,17 @@ function loadBossFavoriteManagementVerifier(identityNodes = [], topPath = "/web/
     },
   };
   const context = {
+    crypto: webcrypto,
     document,
+    getComputedStyle(element) {
+      return element.hiddenStyle
+        ? { display: "block", visibility: "hidden", opacity: "1" }
+        : { display: "block", visibility: "visible", opacity: "1" };
+    },
     globalThis: {},
     location: { hostname: "www.zhipin.com", pathname: options.framePath || "/web/frame/recommend/" },
     top: { location: { hostname: "www.zhipin.com", pathname: topPath } },
+    TextEncoder,
   };
   context.globalThis = context;
   const code = `${fs.readFileSync(path.join(EXTENSION_DIR, "identity_contract.js"), "utf8")}
@@ -478,16 +486,20 @@ ${fs.readFileSync(path.join(EXTENSION_DIR, "favorite_management_verifier.js"), "
 
 function managementIdentityNode(value, visible = true) {
   return {
+    hiddenStyle: !visible,
     isConnected: true,
     classList: { contains(name) { return name === "card-inner"; } },
     getAttribute(name) { return name === "data-geekid" ? value : null; },
-    getBoundingClientRect() { return { width: visible ? 320 : 0, height: visible ? 120 : 0 }; },
+    getBoundingClientRect() { return { width: 320, height: 120 }; },
   };
 }
 
 function favoriteManagementFrameObservations(matchCount = 1, selected = true, topPath = "/web/chat/interaction") {
   const shared = {
     version: "favorite-management-frame-v1",
+    inspection_id: "inspection-0001",
+    tab_id: 17,
+    identity_binding: "sha256:2b4b5e8a4e87c94c8dd4717c78743cc5",
     top_host: "www.zhipin.com",
     top_path: topPath,
     frame_host: "www.zhipin.com",
@@ -508,16 +520,23 @@ function favoriteManagementFrameObservations(matchCount = 1, selected = true, to
   ];
 }
 
+function favoriteManagementRequest(attempted = true, overrides = {}) {
+  return {
+    platform: "boss",
+    platform_identity: { attribute: "data-geekid", value: "trusted-geek-1" },
+    favorite_action_attempted: attempted,
+    inspection_id: "inspection-0001",
+    tab_id: 17,
+    ...overrides,
+  };
+}
+
 async function testFavoriteManagementVerifierRequiresSelectedFavoriteSubviewObservation() {
   const verifier = loadBossFavoriteManagementVerifier([
     bossIdentityNode("data-geekid", "trusted-geek-1"),
   ]);
 
-  const request = {
-    platform: "boss",
-    platform_identity: { attribute: "data-geekid", value: "trusted-geek-1" },
-    favorite_action_attempted: true,
-  };
+  const request = favoriteManagementRequest();
   const result = await verifier.classify(request, favoriteManagementFrameObservations(1, false));
 
   assert.deepStrictEqual(JSON.parse(JSON.stringify(result)), {
@@ -528,11 +547,7 @@ async function testFavoriteManagementVerifierRequiresSelectedFavoriteSubviewObse
 }
 
 async function testFavoriteManagementVerifierInspectsSelectedSubviewAndScopedVisibleIdentity() {
-  const request = {
-    platform: "boss",
-    platform_identity: { attribute: "data-geekid", value: "trusted-geek-1" },
-    favorite_action_attempted: true,
-  };
+  const request = favoriteManagementRequest();
   const marker = {
     innerText: "收藏牛人",
     getBoundingClientRect() { return { width: 80, height: 24 }; },
@@ -545,14 +560,20 @@ async function testFavoriteManagementVerifierInspectsSelectedSubviewAndScopedVis
     managementIdentityNode("trusted-geek-1", true),
     managementIdentityNode("trusted-geek-1", false),
   ]);
+  const hiddenMarkerVerifier = loadBossFavoriteManagementVerifier([], "/web/chat/interaction", {
+    framePath: "/web/frame/recommend/interaction",
+    markers: [{ ...marker, hiddenStyle: true }],
+  });
 
   const contextObservation = await contextVerifier.inspectFrame(request);
   const candidateObservation = await candidateVerifier.inspectFrame(request);
+  const hiddenContextObservation = await hiddenMarkerVerifier.inspectFrame(request);
 
   assert.strictEqual(contextObservation.favorite_subview_selected, true);
   assert.strictEqual(contextObservation.identity_match_count, 0);
   assert.strictEqual(candidateObservation.favorite_subview_selected, false);
   assert.strictEqual(candidateObservation.identity_match_count, 1);
+  assert.strictEqual(hiddenContextObservation.favorite_subview_selected, false);
 }
 
 async function testFavoriteManagementVerifierConfirmsSuccessAfterAttempt() {
@@ -560,11 +581,7 @@ async function testFavoriteManagementVerifierConfirmsSuccessAfterAttempt() {
     bossIdentityNode("data-geekid", "trusted-geek-1"),
   ]);
 
-  const request = {
-    platform: "boss",
-    platform_identity: { attribute: "data-geekid", value: "trusted-geek-1" },
-    favorite_action_attempted: true,
-  };
+  const request = favoriteManagementRequest();
   const result = await verifier.classify(request, favoriteManagementFrameObservations());
 
   assert.deepStrictEqual(JSON.parse(JSON.stringify(result)), {
@@ -580,11 +597,7 @@ async function testFavoriteManagementVerifierConfirmsAlreadyFavoritedWithoutAtte
     bossIdentityNode("data-geekid", "trusted-geek-1"),
   ]);
 
-  const request = {
-    platform: "boss",
-    platform_identity: { attribute: "data-geekid", value: "trusted-geek-1" },
-    favorite_action_attempted: false,
-  };
+  const request = favoriteManagementRequest(false);
   const result = await verifier.classify(request, favoriteManagementFrameObservations());
 
   assert.deepStrictEqual(JSON.parse(JSON.stringify(result)), {
@@ -598,11 +611,7 @@ async function testFavoriteManagementVerifierConfirmsAlreadyFavoritedWithoutAtte
 async function testFavoriteManagementVerifierKeepsZeroVisibleMatchesUnknown() {
   const verifier = loadBossFavoriteManagementVerifier([]);
 
-  const request = {
-    platform: "boss",
-    platform_identity: { attribute: "data-geekid", value: "trusted-geek-1" },
-    favorite_action_attempted: true,
-  };
+  const request = favoriteManagementRequest();
   const result = await verifier.classify(request, favoriteManagementFrameObservations(0));
 
   assert.deepStrictEqual(JSON.parse(JSON.stringify(result)), {
@@ -619,11 +628,7 @@ async function testFavoriteManagementVerifierRefusesMultipleTypedMatches() {
     bossIdentityNode("data-geekid", "trusted-geek-1"),
   ]);
 
-  const request = {
-    platform: "boss",
-    platform_identity: { attribute: "data-geekid", value: "trusted-geek-1" },
-    favorite_action_attempted: true,
-  };
+  const request = favoriteManagementRequest();
   const result = await verifier.classify(request, favoriteManagementFrameObservations(2));
 
   assert.deepStrictEqual(JSON.parse(JSON.stringify(result)), {
@@ -640,11 +645,7 @@ async function testFavoriteManagementVerifierRejectsNonManagementContext() {
     "/web/chat/recommend",
   );
 
-  const request = {
-    platform: "boss",
-    platform_identity: { attribute: "data-geekid", value: "trusted-geek-1" },
-    favorite_action_attempted: true,
-  };
+  const request = favoriteManagementRequest();
   const result = await verifier.classify(
     request,
     favoriteManagementFrameObservations(1, true, "/web/chat/recommend"),
@@ -660,11 +661,9 @@ async function testFavoriteManagementVerifierRejectsNonManagementContext() {
 async function testFavoriteManagementVerifierRejectsIncompleteIdentity() {
   const verifier = loadBossFavoriteManagementVerifier([]);
 
-  const result = await verifier.classify({
-    platform: "boss",
+  const result = await verifier.classify(favoriteManagementRequest(false, {
     platform_identity: null,
-    favorite_action_attempted: false,
-  }, []);
+  }), []);
 
   assert.deepStrictEqual(JSON.parse(JSON.stringify(result)), {
     status: "identity_incomplete",
@@ -678,16 +677,37 @@ async function testFavoriteManagementVerifierRejectsNonBooleanAttemptFlag() {
     bossIdentityNode("data-geekid", "trusted-geek-1"),
   ]);
 
-  const result = await verifier.classify({
-    platform: "boss",
-    platform_identity: { attribute: "data-geekid", value: "trusted-geek-1" },
-    favorite_action_attempted: "false",
-  }, favoriteManagementFrameObservations());
+  const result = await verifier.classify(favoriteManagementRequest("false"), favoriteManagementFrameObservations());
 
   assert.deepStrictEqual(JSON.parse(JSON.stringify(result)), {
     status: "failed",
     attempted: false,
     reason: "invalid_favorite_action_attempted",
+  });
+}
+
+async function testFavoriteManagementVerifierRejectsObservationsFromAnotherInspection() {
+  const verifier = loadBossFavoriteManagementVerifier([]);
+  const request = {
+    platform: "boss",
+    platform_identity: { attribute: "data-geekid", value: "trusted-geek-2" },
+    favorite_action_attempted: true,
+    inspection_id: "inspection-current",
+    tab_id: 27,
+  };
+  const observations = favoriteManagementFrameObservations().map((observation) => ({
+    ...observation,
+    inspection_id: "inspection-stale",
+    tab_id: 26,
+    identity_binding: "sha256:stale",
+  }));
+
+  const result = await verifier.classify(request, observations);
+
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(result)), {
+    status: "failed",
+    attempted: true,
+    reason: "favorite_management_observation_mismatch",
   });
 }
 
@@ -1132,6 +1152,7 @@ async function main() {
   await testFavoriteManagementVerifierRejectsNonManagementContext();
   await testFavoriteManagementVerifierRejectsIncompleteIdentity();
   await testFavoriteManagementVerifierRejectsNonBooleanAttemptFlag();
+  await testFavoriteManagementVerifierRejectsObservationsFromAnotherInspection();
   await testNativeFavoriteUsesUniqueCausalIdentityJoinAndAwaitsManagementVerification();
   await testNativeFavoriteDoesNotUseOldControlAfterUnrelatedDetailMutation();
   await testNativeFavoriteStopsForDeepTrustedInterveningSelection();

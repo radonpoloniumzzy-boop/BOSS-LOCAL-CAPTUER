@@ -12,10 +12,21 @@
     const invalid = validateRequest(request);
     const context = readFrameContext();
     if (invalid) return { version: INSPECTION_VERSION, ...context, error: invalid };
+    const identityBinding = await createIdentityBinding(request);
+    if (!identityBinding) {
+      return {
+        version: INSPECTION_VERSION,
+        ...context,
+        error: { status: "failed", attempted: request.favorite_action_attempted, reason: "identity_binding_unavailable" },
+      };
+    }
     const identityAttribute = request.platform_identity.attribute.trim().toLowerCase();
     const identityValue = request.platform_identity.value.trim();
     return {
       version: INSPECTION_VERSION,
+      inspection_id: request.inspection_id,
+      tab_id: request.tab_id,
+      identity_binding: identityBinding,
       ...context,
       favorite_subview_selected:
         context.frame_path === CONTEXT_FRAME_PATH && hasSelectedFavoriteSubviewMarker(),
@@ -30,9 +41,26 @@
     const invalid = validateRequest(request);
     if (invalid) return invalid;
     const attempted = request.favorite_action_attempted;
-    const observations = Array.isArray(frameObservations)
-      ? frameObservations.filter((observation) => observation?.version === INSPECTION_VERSION)
-      : [];
+    const expectedBinding = await createIdentityBinding(request);
+    if (!expectedBinding) {
+      return { status: "failed", attempted, reason: "identity_binding_unavailable" };
+    }
+    const suppliedObservations = Array.isArray(frameObservations) ? frameObservations : [];
+    if (
+      !suppliedObservations.length ||
+      suppliedObservations.some((observation) => observation?.version !== INSPECTION_VERSION)
+    ) {
+      return { status: "failed", attempted, reason: "favorite_management_observation_mismatch" };
+    }
+    const observations = suppliedObservations.filter(
+      (observation) =>
+        observation.inspection_id === request.inspection_id &&
+        observation.tab_id === request.tab_id &&
+        observation.identity_binding === expectedBinding,
+    );
+    if (!observations.length || observations.length !== suppliedObservations.length) {
+      return { status: "failed", attempted, reason: "favorite_management_observation_mismatch" };
+    }
     const managementFrames = observations.filter(
       (observation) =>
         isBossHost(observation.top_host) &&
@@ -101,6 +129,13 @@
       return { status: "failed", attempted: false, reason: "invalid_favorite_action_attempted" };
     }
     const attempted = request.favorite_action_attempted;
+    if (
+      !/^[a-zA-Z0-9_-]{8,128}$/.test(String(request?.inspection_id || "")) ||
+      !Number.isSafeInteger(request?.tab_id) ||
+      request.tab_id <= 0
+    ) {
+      return { status: "failed", attempted, reason: "invalid_favorite_management_inspection" };
+    }
     if (String(request?.platform || "").trim().toLowerCase() !== "boss") {
       return { status: "failed", attempted, reason: "unsupported_platform" };
     }
@@ -142,7 +177,26 @@
 
   function hasLayout(element) {
     const rect = element.getBoundingClientRect?.();
-    return Boolean(rect && rect.width > 0 && rect.height > 0);
+    if (!rect || rect.width <= 0 || rect.height <= 0 || typeof globalScope.getComputedStyle !== "function") {
+      return false;
+    }
+    try {
+      for (let current = element; current; current = current.parentElement) {
+        const style = globalScope.getComputedStyle(current);
+        const opacity = Number.parseFloat(style?.opacity);
+        if (
+          style?.display === "none" ||
+          style?.visibility === "hidden" ||
+          style?.visibility === "collapse" ||
+          (Number.isFinite(opacity) && opacity <= 0)
+        ) {
+          return false;
+        }
+      }
+      return true;
+    } catch (_error) {
+      return false;
+    }
   }
 
   function normalizeText(value) {
@@ -155,6 +209,20 @@
 
   function isSafeMatchCount(value) {
     return Number.isSafeInteger(value) && value >= 0;
+  }
+
+  async function createIdentityBinding(request) {
+    if (!globalScope.crypto?.subtle || typeof globalScope.TextEncoder !== "function") return "";
+    const attribute = String(request.platform_identity.attribute || "").trim().toLowerCase();
+    const value = String(request.platform_identity.value || "").trim();
+    const bytes = new globalScope.TextEncoder().encode(
+      `${request.inspection_id}\u0000${request.tab_id}\u0000${attribute}\u0000${value}`,
+    );
+    const digest = await globalScope.crypto.subtle.digest("SHA-256", bytes);
+    return `sha256:${Array.from(new Uint8Array(digest))
+      .map((byte) => byte.toString(16).padStart(2, "0"))
+      .join("")
+      .slice(0, 32)}`;
   }
 
   globalScope.__bossFavoriteManagementVerifier = { inspectFrame, classify };
