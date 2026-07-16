@@ -29,6 +29,18 @@ class CandidateParser:
         summary_text = normalize_text(str(raw_card.get("summary_text") or ""))
         detail_url = normalize_text(str(raw_card.get("detail_url") or ""))
         platform_uid = normalize_text(str(raw_card.get("platform_uid") or ""))
+        platform = normalize_text(str(raw_card.get("platform") or "")).lower()
+        if not platform:
+            if "zhipin.com" in source_url or "bosszhipin.com" in source_url:
+                platform = "boss"
+            elif "liepin.com" in source_url:
+                platform = "liepin"
+        raw_identity = raw_card.get("raw_identity")
+        if not isinstance(raw_identity, dict):
+            raw_identity = {}
+        raw_action_context = raw_card.get("raw_action_context")
+        if not isinstance(raw_action_context, dict):
+            raw_action_context = {}
         tags = raw_card.get("tags_text") or []
         if isinstance(tags, list):
             tags_text = " | ".join(filter(None, [normalize_text(str(item)) for item in tags]))
@@ -61,6 +73,15 @@ class CandidateParser:
             summary_text=summary_text,
             detail_url=detail_url,
             platform_uid=platform_uid,
+            action_platform_uid=normalize_text(str(raw_card.get("action_platform_uid") or "")),
+            platform=platform,
+            friend_id=normalize_text(str(raw_card.get("friend_id") or "")),
+            friend_source=normalize_text(str(raw_card.get("friend_source") or "")),
+            security_id=normalize_text(str(raw_card.get("security_id") or "")),
+            lid=normalize_text(str(raw_card.get("lid") or "")),
+            job_context_id=normalize_text(str(raw_card.get("job_context_id") or "")),
+            raw_identity={str(key): str(value) for key, value in raw_identity.items()},
+            raw_action_context={str(key): str(value) for key, value in raw_action_context.items()},
         )
 
     @staticmethod

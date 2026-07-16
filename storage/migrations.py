@@ -242,6 +242,52 @@ ON candidate_role_status_events(role_id, to_status, changed_at);
 
 def apply_migrations(connection) -> None:
     connection.executescript(V1_SCHEMA_SQL)
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS candidate_platform_identities (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            candidate_id INTEGER NOT NULL,
+            platform TEXT NOT NULL,
+            platform_uid TEXT NOT NULL DEFAULT '',
+            detail_url TEXT NOT NULL DEFAULT '',
+            raw_identity_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(candidate_id) REFERENCES candidates(id) ON DELETE CASCADE,
+            UNIQUE(platform, platform_uid)
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_candidate_platform_identity_uid "
+        "ON candidate_platform_identities(platform, platform_uid)"
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS candidate_platform_action_contexts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            candidate_id INTEGER NOT NULL,
+            capture_batch_id INTEGER NOT NULL,
+            platform TEXT NOT NULL,
+            platform_uid TEXT NOT NULL DEFAULT '',
+            friend_id TEXT NOT NULL DEFAULT '',
+            friend_source TEXT NOT NULL DEFAULT '',
+            security_id TEXT NOT NULL DEFAULT '',
+            lid TEXT NOT NULL DEFAULT '',
+            job_context_id TEXT NOT NULL DEFAULT '',
+            detail_url TEXT NOT NULL DEFAULT '',
+            raw_context_json TEXT NOT NULL DEFAULT '{}',
+            observed_at TEXT NOT NULL,
+            FOREIGN KEY(candidate_id) REFERENCES candidates(id) ON DELETE CASCADE,
+            FOREIGN KEY(capture_batch_id) REFERENCES capture_batches(id) ON DELETE CASCADE,
+            UNIQUE(candidate_id, platform, capture_batch_id)
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_candidate_platform_action_context "
+        "ON candidate_platform_action_contexts(candidate_id, platform, capture_batch_id, observed_at DESC)"
+    )
     screening_run_columns = {
         str(row[1]) for row in connection.execute("PRAGMA table_info(screening_runs)").fetchall()
     }
@@ -665,5 +711,5 @@ def apply_migrations(connection) -> None:
         "ON candidate_role_matches(role_id, recruitment_status, latest_rating, updated_at DESC)"
     )
     connection.execute("DELETE FROM schema_version")
-    connection.execute("INSERT INTO schema_version(version) VALUES (13)")
+    connection.execute("INSERT INTO schema_version(version) VALUES (14)")
     connection.commit()

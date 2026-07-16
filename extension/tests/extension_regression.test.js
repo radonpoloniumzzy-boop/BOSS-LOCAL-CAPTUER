@@ -106,6 +106,69 @@ globalThis.__serviceTest = {
   return { chrome, api: context.__serviceTest };
 }
 
+function loadCollectorIdentityApi() {
+  const code = `${fs.readFileSync(path.join(EXTENSION_DIR, "collector.js"), "utf8")}
+globalThis.__collectorIdentityTestApi = globalThis.__bossLocalCollectorTest;`;
+  const context = {
+    URL,
+    document: { title: "", body: null },
+    globalThis: {},
+    HTMLElement: class HTMLElement {},
+    location: new URL("https://www.zhipin.com/web/geek/recommend"),
+    setTimeout,
+  };
+  context.globalThis = context;
+  vm.runInNewContext(code, context, { filename: "collector.js" });
+  return context.__collectorIdentityTestApi;
+}
+
+function testBossIdentityEvidenceKeepsIdentifiersAndDropsSecrets() {
+  const api = loadCollectorIdentityApi();
+  const attributeNode = (entries) => ({
+    attributes: entries.map(([name, value]) => ({ name, value })),
+  });
+  const card = attributeNode([
+    ["data-geek-id", "encrypted-geek-1"],
+    ["data-friend-id", "friend-1"],
+    ["data-id", "unrelated-component-id"],
+    ["data-user-id", "unrelated-user-id"],
+    ["data-token", "must-not-be-collected"],
+  ]);
+  card.querySelectorAll = () => [
+    attributeNode([
+      ["data-friend-source", "recommend"],
+      ["data-security-id", "security-1"],
+      ["data-lid", "lid-1"],
+      ["data-job-id", "job-1"],
+    ]),
+  ];
+
+  const identity = api.extractBossIdentityEvidence(
+    card,
+    "https://www.zhipin.com/web/geek/detail/example?securityId=url-security&lid=url-lid",
+  );
+
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(identity)), {
+    platform_uid: "encrypted-geek-1",
+    friend_id: "friend-1",
+    friend_source: "recommend",
+    security_id: "security-1",
+    lid: "lid-1",
+    job_context_id: "job-1",
+    raw_identity: {
+      "data-geek-id": "encrypted-geek-1",
+    },
+    raw_action_context: {
+      "data-friend-id": "friend-1",
+      "data-friend-source": "recommend",
+      "data-job-id": "job-1",
+      "data-lid": "lid-1",
+      "data-security-id": "security-1",
+    },
+  });
+  assert.strictEqual(JSON.stringify(identity).includes("must-not-be-collected"), false);
+}
+
 async function testDownloadEndpointValidation() {
   const { api } = loadServiceWorker();
   const downloadUrl = "https://www.zhipin.com/wflow/zpgeek/download/preview4boss/abc123?d=1&id=xyz";
@@ -477,6 +540,7 @@ function testFilenameTemplatesMatchDesktopFixtures() {
 }
 
 async function main() {
+  testBossIdentityEvidenceKeepsIdentifiersAndDropsSecrets();
   await testDownloadEndpointValidation();
   await testStopGuardIgnoresStaleProgress();
   await testBackgroundDownloadIsCalledAndLogged();

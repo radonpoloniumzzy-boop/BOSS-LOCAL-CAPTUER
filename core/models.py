@@ -126,6 +126,15 @@ class CandidateRecord:
     summary_text: str = ""
     detail_url: str = ""
     platform_uid: str = ""
+    action_platform_uid: str = ""
+    platform: str = ""
+    friend_id: str = ""
+    friend_source: str = ""
+    security_id: str = ""
+    lid: str = ""
+    job_context_id: str = ""
+    raw_identity: dict[str, Any] = field(default_factory=dict)
+    raw_action_context: dict[str, Any] = field(default_factory=dict)
     id: int | None = None
     created_at: str = ""
     updated_at: str = ""

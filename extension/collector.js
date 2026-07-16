@@ -126,6 +126,7 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
     id: platform.id,
     label: platform.label,
   }));
+  globalThis.__bossLocalCollectorTest = { extractBossIdentityEvidence };
 
   globalThis.__bossLocalRequestScrollPause = function bossLocalRequestScrollPause(reason) {
     const control = getScrollControl();
@@ -693,6 +694,18 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
     const tags = allTexts(card, platform.selectors.tags);
     const detailUrl = firstHref(card, platform.selectors.detailLink) || inferred.detail_url;
     const platformUid = normalizePlatformUid(platform, firstAttr(card, platform.selectors.platformUidAttrs) || inferred.platform_uid);
+    const identity = platform.id === "boss"
+      ? extractBossIdentityEvidence(card, detailUrl)
+      : {
+          platform_uid: "",
+          friend_id: "",
+          friend_source: "",
+          security_id: "",
+          lid: "",
+          job_context_id: "",
+          raw_identity: {},
+          raw_action_context: {},
+        };
     return {
       platform: platform.id,
       raw_card_text: rawText,
@@ -705,7 +718,91 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
       summary_text: firstText(card, platform.selectors.summary) || inferred.summary_text,
       detail_url: detailUrl,
       platform_uid: platformUid,
+      action_platform_uid: identity.platform_uid,
+      friend_id: identity.friend_id,
+      friend_source: identity.friend_source,
+      security_id: identity.security_id,
+      lid: identity.lid,
+      job_context_id: identity.job_context_id,
+      raw_identity: identity.raw_identity,
+      raw_action_context: identity.raw_action_context,
     };
+  }
+
+  function extractBossIdentityEvidence(card, detailUrl) {
+    const aliases = {
+      datacandidateid: "platform_uid",
+      dataencryptgeekid: "platform_uid",
+      dataencryptuid: "platform_uid",
+      datageekid: "platform_uid",
+      datafriendid: "friend_id",
+      datafriendsource: "friend_source",
+      datasecurityid: "security_id",
+      datalid: "lid",
+      dataexpectid: "job_context_id",
+      datajobcontextid: "job_context_id",
+      datajobid: "job_context_id",
+      datapositionid: "job_context_id",
+      datarecruitjobid: "job_context_id",
+    };
+    const identity = {
+      platform_uid: "",
+      friend_id: "",
+      friend_source: "",
+      security_id: "",
+      lid: "",
+      job_context_id: "",
+      raw_identity: {},
+      raw_action_context: {},
+    };
+    const nodes = [card, ...querySelectorAllSafe(card, "*")];
+    for (const node of nodes) {
+      for (const attribute of Array.from(node?.attributes || [])) {
+        const name = String(attribute?.name || "").toLowerCase();
+        const canonical = aliases[name.replace(/[^a-z0-9]/g, "")];
+        const value = normalizeText(attribute?.value || "");
+        if (!canonical || !value) {
+          continue;
+        }
+        if (canonical === "platform_uid") {
+          identity.raw_identity[name] = value;
+        } else {
+          identity.raw_action_context[name] = value;
+        }
+        if (!identity[canonical]) {
+          identity[canonical] = value;
+        }
+      }
+    }
+
+    try {
+      const url = new URL(detailUrl || location.href, location.href);
+      const queryAliases = {
+        encryptuid: "platform_uid",
+        friendid: "friend_id",
+        friendsource: "friend_source",
+        securityid: "security_id",
+        lid: "lid",
+        expectid: "job_context_id",
+        jobid: "job_context_id",
+      };
+      for (const [key, value] of url.searchParams.entries()) {
+        const canonical = queryAliases[String(key).toLowerCase()];
+        const normalizedValue = normalizeText(value);
+        if (canonical && !identity[canonical] && normalizedValue) {
+          identity[canonical] = normalizedValue;
+          const evidenceKey = `query:${String(key).toLowerCase()}`;
+          if (canonical === "platform_uid") {
+            identity.raw_identity[evidenceKey] = normalizedValue;
+          } else {
+            identity.raw_action_context[evidenceKey] = normalizedValue;
+          }
+        }
+      }
+    } catch (_error) {
+      // A malformed detail URL is not identity evidence.
+    }
+    return identity;
   }
 
   function findCandidateCardsByAction(platform) {

@@ -99,6 +99,102 @@ class CardImportServiceTest(unittest.TestCase):
         self.assertEqual(candidates[0]["source_url"], "https://lpt.liepin.com/recommend")
         self.assertEqual(candidates[0]["candidate_key"], "platform:liepin:resume-1")
 
+    def test_imported_boss_identity_is_available_from_candidate_detail(self) -> None:
+        self.service.import_cards(
+            {
+                "job_title": "量化研究员",
+                "source_url": "https://www.zhipin.com/web/geek/recommend",
+                "cards": [
+                    {
+                        "platform": "boss",
+                        "raw_card_text": "候选人甲\n量化研究\n硕士",
+                        "name": "候选人甲",
+                        "detail_url": "https://www.zhipin.com/web/geek/detail/example",
+                        "platform_uid": "encrypted-geek-1",
+                        "action_platform_uid": "encrypted-geek-1",
+                        "friend_id": "friend-1",
+                        "friend_source": "recommend",
+                        "security_id": "security-1",
+                        "lid": "lid-1",
+                        "job_context_id": "job-1",
+                        "raw_identity": {
+                            "data-geek-id": "encrypted-geek-1",
+                        },
+                        "raw_action_context": {"data-friend-id": "friend-1"},
+                    }
+                ],
+            }
+        )
+
+        candidate_id = int(self.repository.list_candidates()[0]["id"])
+        detail = self.repository.get_candidate_detail(candidate_id)
+
+        self.assertIsNotNone(detail)
+        self.assertEqual(
+            detail["platform_identities"],
+            [
+                {
+                    "platform": "boss",
+                    "platform_uid": "encrypted-geek-1",
+                    "detail_url": "https://www.zhipin.com/web/geek/detail/example",
+                    "raw_identity": {
+                        "data-geek-id": "encrypted-geek-1",
+                    },
+                }
+            ],
+        )
+        self.assertEqual(len(detail["platform_action_contexts"]), 1)
+        action_context = detail["platform_action_contexts"][0]
+        self.assertEqual(action_context["capture_batch_id"], 1)
+        self.assertEqual(action_context["platform"], "boss")
+        self.assertEqual(action_context["platform_uid"], "encrypted-geek-1")
+        self.assertEqual(action_context["friend_id"], "friend-1")
+        self.assertEqual(action_context["job_context_id"], "job-1")
+        self.assertEqual(
+            action_context["raw_action_context"], {"data-friend-id": "friend-1"}
+        )
+        self.assertTrue(action_context["observed_at"])
+
+    def test_import_keeps_distinct_boss_action_contexts_for_the_same_candidate(self) -> None:
+        base_card = {
+            "platform": "boss",
+            "raw_card_text": "候选人甲\n量化研究\n硕士",
+            "name": "候选人甲",
+            "detail_url": "https://www.zhipin.com/web/geek/detail/example",
+            "platform_uid": "encrypted-geek-1",
+            "action_platform_uid": "encrypted-geek-1",
+            "friend_id": "friend-1",
+            "friend_source": "recommend",
+            "security_id": "security-1",
+            "lid": "lid-1",
+        }
+        for job_context_id in ("job-1", "job-2"):
+            self.service.import_cards(
+                {
+                    "job_title": "量化研究员",
+                    "source_url": "https://www.zhipin.com/web/geek/recommend",
+                    "cards": [
+                        {
+                            **base_card,
+                            "action_platform_uid": f"trusted-{job_context_id}",
+                            "job_context_id": job_context_id,
+                        }
+                    ],
+                }
+            )
+
+        candidate_id = int(self.repository.list_candidates()[0]["id"])
+        detail = self.repository.get_candidate_detail(candidate_id)
+
+        self.assertEqual(
+            [context["job_context_id"] for context in detail["platform_action_contexts"]],
+            ["job-1", "job-2"],
+        )
+        self.assertEqual(
+            [identity["platform_uid"] for identity in detail["platform_identities"]],
+            ["trusted-job-1", "trusted-job-2"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -133,6 +133,10 @@ class CandidateRepository:
                     profile_candidate = merged
                 profile_candidate.id = candidate_id
                 self._upsert_candidate_profile(connection, profile_candidate)
+                self._upsert_candidate_platform_identity(connection, candidate_id, candidate)
+                self._insert_candidate_platform_action_context(
+                    connection, candidate_id, batch_id, candidate
+                )
 
                 snapshot = CaptureBatchItem(
                     batch_id=batch_id,
@@ -641,13 +645,139 @@ class CandidateRepository:
             (candidate_id,),
         ).fetchone()
         status_events = self.list_candidate_role_status_events(candidate_id=candidate_id)
+        identity_rows = connection.execute(
+            """
+            SELECT platform, platform_uid, detail_url, raw_identity_json
+            FROM candidate_platform_identities
+            WHERE candidate_id = ?
+            ORDER BY platform, id
+            """,
+            (candidate_id,),
+        ).fetchall()
+        platform_identities = []
+        for row in identity_rows:
+            identity = dict(row)
+            raw_identity_json = str(identity.pop("raw_identity_json") or "{}")
+            try:
+                identity["raw_identity"] = json.loads(raw_identity_json)
+            except json.JSONDecodeError:
+                identity["raw_identity"] = {}
+            platform_identities.append(identity)
+        context_rows = connection.execute(
+            """
+            SELECT id, capture_batch_id, platform, platform_uid, friend_id, friend_source,
+                   security_id, lid, job_context_id, detail_url, raw_context_json, observed_at
+            FROM candidate_platform_action_contexts
+            WHERE candidate_id = ?
+            ORDER BY observed_at, id
+            """,
+            (candidate_id,),
+        ).fetchall()
+        platform_action_contexts = []
+        for row in context_rows:
+            context = dict(row)
+            raw_context_json = str(context.pop("raw_context_json") or "{}")
+            try:
+                context["raw_action_context"] = json.loads(raw_context_json)
+            except json.JSONDecodeError:
+                context["raw_action_context"] = {}
+            platform_action_contexts.append(context)
         return {
             "candidate": candidate,
             "appearances": appearances,
             "standard_profile": standard_profile,
             "role_matches": role_matches,
             "status_events": status_events,
+            "platform_identities": platform_identities,
+            "platform_action_contexts": platform_action_contexts,
         }
+
+    def _upsert_candidate_platform_identity(
+        self,
+        connection: sqlite3.Connection,
+        candidate_id: int,
+        candidate: CandidateRecord,
+    ) -> None:
+        platform = str(candidate.platform or "").strip().lower()
+        if not platform or not str(candidate.action_platform_uid or "").strip():
+            return
+        timestamp = now_iso()
+        connection.execute(
+            """
+            INSERT INTO candidate_platform_identities(
+                candidate_id, platform, platform_uid, detail_url, raw_identity_json,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(platform, platform_uid) DO UPDATE SET
+                detail_url = CASE WHEN excluded.detail_url <> '' THEN excluded.detail_url ELSE detail_url END,
+                raw_identity_json = CASE
+                    WHEN excluded.raw_identity_json <> '{}' THEN excluded.raw_identity_json
+                    ELSE raw_identity_json
+                END,
+                updated_at = excluded.updated_at
+            """,
+            (
+                candidate_id,
+                platform,
+                candidate.action_platform_uid,
+                candidate.detail_url,
+                json.dumps(candidate.raw_identity, ensure_ascii=False, sort_keys=True),
+                timestamp,
+                timestamp,
+            ),
+        )
+
+    def _insert_candidate_platform_action_context(
+        self,
+        connection: sqlite3.Connection,
+        candidate_id: int,
+        capture_batch_id: int,
+        candidate: CandidateRecord,
+    ) -> None:
+        platform = str(candidate.platform or "").strip().lower()
+        context_values = (
+            candidate.action_platform_uid,
+            candidate.friend_id,
+            candidate.friend_source,
+            candidate.security_id,
+            candidate.lid,
+            candidate.job_context_id,
+            candidate.detail_url,
+        )
+        if not platform or not any(str(value or "").strip() for value in context_values):
+            return
+        connection.execute(
+            """
+            INSERT INTO candidate_platform_action_contexts(
+                candidate_id, capture_batch_id, platform, platform_uid, friend_id, friend_source, security_id,
+                lid, job_context_id, detail_url, raw_context_json, observed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(candidate_id, platform, capture_batch_id) DO UPDATE SET
+                platform_uid = excluded.platform_uid,
+                friend_id = excluded.friend_id,
+                friend_source = excluded.friend_source,
+                security_id = excluded.security_id,
+                lid = excluded.lid,
+                job_context_id = excluded.job_context_id,
+                detail_url = excluded.detail_url,
+                raw_context_json = excluded.raw_context_json,
+                observed_at = excluded.observed_at
+            """,
+            (
+                candidate_id,
+                capture_batch_id,
+                platform,
+                candidate.action_platform_uid,
+                candidate.friend_id,
+                candidate.friend_source,
+                candidate.security_id,
+                candidate.lid,
+                candidate.job_context_id,
+                candidate.detail_url,
+                json.dumps(candidate.raw_action_context, ensure_ascii=False, sort_keys=True),
+                now_iso(),
+            ),
+        )
 
     def get_latest_batch(self) -> sqlite3.Row | None:
         connection = self.db.get_connection()
