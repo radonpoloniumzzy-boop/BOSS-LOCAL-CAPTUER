@@ -1516,7 +1516,7 @@ class CandidateRepository:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 """
-                SELECT id, batch_id, status, claim_token, attempt_count, started_at
+                SELECT id, batch_id, status, write_policy, claim_token, attempt_count, started_at
                 FROM native_favorite_tasks
                 WHERE id = ?
                 """,
@@ -1530,6 +1530,8 @@ class CandidateRepository:
                 str(claim_token), str(row["claim_token"] or "")
             ):
                 raise ValueError("Native Favorite claim token does not match")
+            if str(row["write_policy"]) == "verify_only" and attempted:
+                raise ValueError("Native Favorite verify_only task cannot report an attempted write")
             attempt_number = int(row["attempt_count"]) + 1
             connection.execute(
                 """

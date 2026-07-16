@@ -185,6 +185,22 @@ class NativeFavoriteWorkflowTest(unittest.TestCase):
         self.assertIsNotNone(verification)
         self.assertEqual(verification["write_policy"], "verify_only")
         self.assertEqual(verification["status"], "running")
+        with self.assertRaisesRegex(ValueError, "verify_only"):
+            self.repository.complete_native_favorite_task(
+                int(verification["task_id"]),
+                claim_token=str(verification["claim_token"]),
+                status="success",
+                attempted=True,
+                reason="favorite_management_identity_confirmed",
+            )
+        verified = self.repository.complete_native_favorite_task(
+            int(verification["task_id"]),
+            claim_token=str(verification["claim_token"]),
+            status="already_favorited",
+            attempted=False,
+            reason="favorite_management_identity_confirmed",
+        )
+        self.assertEqual(verified["status"], "already_favorited")
 
     def test_claim_and_unknown_result_are_persistent_and_not_reclaimed(self) -> None:
         imported = self.import_service.import_cards(
