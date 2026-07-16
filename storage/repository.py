@@ -1458,6 +1458,11 @@ class CandidateRepository:
                 """,
                 (timestamp, timestamp, favorite_batch_id),
             )
+            self._refresh_native_favorite_batch_counts(
+                connection,
+                favorite_batch_id,
+                timestamp=timestamp,
+            )
         return {
             "task_id": int(row["task_id"]),
             "batch_id": int(row["batch_id"]),
