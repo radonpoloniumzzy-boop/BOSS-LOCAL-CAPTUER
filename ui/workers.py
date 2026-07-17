@@ -270,6 +270,10 @@ class AIScreeningWorker(QObject):
             prompt_manager=prompt_manager,
             provider=create_provider(settings, logger=logger),
             logger=logger,
+            max_concurrency=min(
+                8,
+                max(1, int(payload.get("screening_concurrency") or 1)),
+            ),
         )
 
     @Slot()

@@ -130,6 +130,7 @@ API keys entered in the AI page are kept only in process memory. They are not wr
 
 1. Configure the role's Favorite Eligibility Policy in `AI Screen`.
 2. In `Automation Flow`, choose `Screen and Favorite`, then run extension `AUTO` collection on the Boss recommendation page.
+   The `AI concurrency` setting controls simultaneous per-candidate model requests. It defaults to 4 and can be reduced to 1-2 if the provider returns rate-limit errors.
 3. Wait for Initial Screening to finish and note the Native Favorite batch ID shown by the desktop app.
 4. On the recommendation page, enter the batch ID and start the source favorite phase. BOSS does not need—and may not allow—a second business page.
 5. When the source phase reports `awaiting_verification`, navigate the same BOSS page to `Interaction -> Favorite Talent`.

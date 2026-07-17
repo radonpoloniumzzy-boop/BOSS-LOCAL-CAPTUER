@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import json
 import unittest
 from types import SimpleNamespace
 
@@ -39,6 +40,55 @@ class _StatusBar:
 
 
 class AutomationLaunchSnapshotTest(unittest.TestCase):
+    def test_resuming_automation_run_preserves_origin_and_concurrency_snapshot(self) -> None:
+        launched = []
+        run = {
+            "id": 31,
+            "profile_id": 7,
+            "provider": "deepseek",
+            "model": "deepseek-v4-flash",
+            "source_job_title": "Role A",
+            "batch_id": 12,
+            "origin": "automation",
+            "automation_snapshot_json": json.dumps({"screening_concurrency": 6}),
+        }
+        target = SimpleNamespace(
+            _ai_screening_thread=None,
+            repository=SimpleNamespace(
+                get_screening_run=lambda _run_id: run,
+                get_screening_profile=lambda _profile_id: {"id": 7, "job_title": "Role A"},
+                list_screening_run_candidates=lambda _run_id: [{"id": 1}],
+                recover_interrupted_screening_tasks=lambda: 0,
+                get_screening_task_counts=lambda _run_id: {
+                    "pending": 1,
+                    "running": 0,
+                    "retrying": 0,
+                    "failed": 0,
+                },
+            ),
+            ai_page=SimpleNamespace(
+                provider_payload=lambda: {
+                    "provider": "deepseek",
+                    "model": "deepseek-v4-flash",
+                    "api_base": "https://api.deepseek.com",
+                    "api_key": "",
+                    "api_key_env": "DEEPSEEK_API_KEY",
+                },
+                set_status=lambda _message: None,
+            ),
+            _launch_ai_screening=lambda payload, origin: launched.append((payload, origin)),
+        )
+
+        MainWindow._resume_ai_screening_run(target, 31)
+
+        self.assertEqual(launched[0][1], "automation")
+        self.assertEqual(launched[0][0]["origin"], "automation")
+        self.assertEqual(launched[0][0]["screening_concurrency"], 6)
+        self.assertEqual(
+            launched[0][0]["automation_snapshot"]["screening_concurrency"],
+            6,
+        )
+
     def test_launch_snapshot_is_detached_from_later_config_and_profile_edits(self) -> None:
         flow = AutomationFlowConfig(
             enabled=True,
@@ -49,6 +99,7 @@ class AutomationLaunchSnapshotTest(unittest.TestCase):
             provider="openai",
             model="model-a",
             post_screen_action="screen_and_favorite",
+            screening_concurrency=6,
             favorite_interval_seconds=5,
             favorite_max_candidates=20,
         )
@@ -59,6 +110,7 @@ class AutomationLaunchSnapshotTest(unittest.TestCase):
         profile["favorite_eligible_ratings"].append("R")
 
         self.assertEqual(snapshot["flow"]["model"], "model-a")
+        self.assertEqual(snapshot["flow"]["screening_concurrency"], 6)
         self.assertEqual(snapshot["profile"]["favorite_eligible_ratings"], ["SSR"])
 
     def test_unarmed_import_cannot_enter_automation_screening_queue(self) -> None:
@@ -175,6 +227,7 @@ class AutomationLaunchSnapshotTest(unittest.TestCase):
                     "provider": "openai",
                     "model": "locked-model",
                     "post_screen_action": "screen_and_favorite",
+                    "screening_concurrency": 6,
                     "favorite_interval_seconds": 5,
                     "favorite_max_candidates": 20,
                 },
@@ -202,6 +255,7 @@ class AutomationLaunchSnapshotTest(unittest.TestCase):
         self.assertEqual(status["profile_version"], 3)
         self.assertEqual(status["favorite_eligible_ratings"], ["SSR"])
         self.assertEqual(status["post_screen_action"], "screen_and_favorite")
+        self.assertEqual(status["screening_concurrency"], 6)
 
     def test_favorite_mode_screens_the_complete_capture_batch_from_locked_snapshot(self) -> None:
         repository = _Repository()
@@ -229,6 +283,7 @@ class AutomationLaunchSnapshotTest(unittest.TestCase):
                 "api_base": "",
                 "api_key_env": "OPENAI_API_KEY",
                 "post_screen_action": "screen_and_favorite",
+                "screening_concurrency": 6,
                 "favorite_interval_seconds": 5,
                 "favorite_max_candidates": 20,
             },
@@ -248,6 +303,7 @@ class AutomationLaunchSnapshotTest(unittest.TestCase):
         self.assertEqual(repository.limit, 0)
         self.assertEqual(launched[0][0]["limit"], 0)
         self.assertEqual(launched[0][0]["profile"]["version"], 3)
+        self.assertEqual(launched[0][0]["screening_concurrency"], 6)
         self.assertEqual(
             launched[0][0]["automation_snapshot"]["screening_profile_snapshot"]["version"],
             3,

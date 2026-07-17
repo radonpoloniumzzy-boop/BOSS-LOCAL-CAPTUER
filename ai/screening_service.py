@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from collections.abc import Callable
 
 from ai.prompt_manager import PromptManager
@@ -47,6 +48,7 @@ class ScreeningService:
         worker_id: str = "",
         task_lock_timeout_seconds: float = 600.0,
         provider_min_interval_seconds: float = 0.0,
+        max_concurrency: int = 1,
     ) -> None:
         self.repository = repository
         self.prompt_manager = prompt_manager
@@ -58,6 +60,7 @@ class ScreeningService:
         self.worker_id = worker_id or f"screening-{id(self):x}"
         self.task_lock_timeout_seconds = task_lock_timeout_seconds
         self.provider_min_interval_seconds = provider_min_interval_seconds
+        self.max_concurrency = min(8, max(1, int(max_concurrency or 1)))
         self._stop_requested = False
 
     def request_stop(self) -> None:
@@ -135,160 +138,66 @@ class ScreeningService:
         counts = self.repository.get_screening_task_counts(run_id)
 
         try:
-            while True:
-                if self._stop_requested:
-                    status = "stopped"
-                    note = "User stopped AI screening."
-                    break
-
-                task = self.repository.claim_next_screening_task(
-                    run_id,
-                    worker_id=self.worker_id,
-                    lock_timeout_seconds=self.task_lock_timeout_seconds,
-                )
-                if task is None:
-                    break
-
-                task_id = int(task["task_id"])
-                candidate_id = int(task["candidate_id"])
-                name = str(task.get("name") or f"Candidate #{candidate_id}")
-                task_model = str(task.get("model_name") or model)
-                task_prompt_version = str(task.get("prompt_version") or prompt_version)
-                task_request_hash = str(
-                    task.get("request_payload_hash") or request_hashes[candidate_id]
-                )
-                stored_prompt_text = str(task.get("prompt_text") or "")
-                stored_candidate_text = str(task.get("candidate_text") or "")
-                has_request_snapshot = bool(stored_prompt_text and stored_candidate_text)
-                task_prompt_text = stored_prompt_text or prompt_text
-                task_candidate_text = stored_candidate_text or candidate_texts[candidate_id]
-                rating = ""
-                persona = ""
-
-                try:
-                    result_source = "model"
-                    existing_result = self.repository.get_screening_result(run_id, candidate_id)
-                    if existing_result is not None and str(existing_result["status"]) == "completed":
-                        result_id = int(existing_result["id"])
-                        rating = str(existing_result["rating"] or "")
-                        persona = str(existing_result["persona"] or "")
-                        message = f"{name}: {rating} (recovered)"
-                        result_source = "recovered"
-                    else:
-                        cached = self.repository.get_cached_screening_result(
-                            role_id=role_id,
-                            candidate_id=candidate_id,
-                            model_name=task_model,
-                            prompt_version=task_prompt_version,
-                            request_payload_hash=task_request_hash,
+            no_more_tasks = False
+            with ThreadPoolExecutor(
+                max_workers=self.max_concurrency,
+                thread_name_prefix="candidate-screening",
+            ) as executor:
+                active = {}
+                while active or not no_more_tasks:
+                    while not self._stop_requested and len(active) < self.max_concurrency:
+                        task = self.repository.claim_next_screening_task(
+                            run_id,
+                            worker_id=self.worker_id,
+                            lock_timeout_seconds=self.task_lock_timeout_seconds,
                         )
-                        if cached is not None:
-                            result_id = self.repository.save_screening_result(
-                                ScreeningResult(
-                                    run_id=run_id,
-                                    candidate_id=candidate_id,
-                                    rating=str(cached["rating"] or ""),
-                                    persona=str(cached["persona"] or ""),
-                                    status=str(cached["status"] or "completed"),
-                                    raw_response=str(cached["raw_response"] or ""),
-                                    error=str(cached["error"] or ""),
-                                    confidence=str(cached["confidence"] or ""),
-                                    evidence_json=str(cached["evidence_json"] or "[]"),
-                                    gap_json=str(cached["gap_json"] or "[]"),
-                                    risk_json=str(cached["risk_json"] or "[]"),
-                                    recommended_action=str(cached["recommended_action"] or ""),
-                                )
-                            )
-                            rating = str(cached["rating"] or "")
-                            persona = str(cached["persona"] or "")
-                            message = f"{name}: {rating} (cached)"
-                            result_source = "cached"
-                        else:
-                            if not has_request_snapshot:
-                                task_model = model
-                                task_prompt_version = prompt_version
-                                task_request_hash = request_hashes[candidate_id]
-                                task_prompt_text = prompt_text
-                                task_candidate_text = candidate_texts[candidate_id]
-                                self.repository.update_screening_task_request_snapshot(
-                                    task_id,
-                                    model_name=task_model,
-                                    prompt_version=task_prompt_version,
-                                    request_payload_hash=task_request_hash,
-                                    prompt_text=task_prompt_text,
-                                    candidate_text=task_candidate_text,
-                                )
-                            ProviderRateLimiter.wait(
-                                f"{provider_name}:{task_model}",
-                                self.provider_min_interval_seconds,
-                            )
-                            decision = self.provider.screen(task_prompt_text, task_candidate_text)
-                            result_id = self.repository.save_screening_result(
-                                ScreeningResult(
-                                    run_id=run_id,
-                                    candidate_id=candidate_id,
-                                    rating=decision.rating,
-                                    persona=decision.persona,
-                                    raw_response=decision.raw_response,
-                                    confidence=decision.confidence,
-                                    evidence_json=json.dumps(decision.evidence or [], ensure_ascii=False),
-                                    gap_json=json.dumps(decision.gaps or [], ensure_ascii=False),
-                                    risk_json=json.dumps(decision.risks or [], ensure_ascii=False),
-                                    recommended_action=decision.recommended_action,
-                                )
-                            )
-                            rating = decision.rating
-                            persona = decision.persona
-                            message = f"{name}: {decision.rating}"
-                    self.repository.mark_screening_task_success(
-                        task_id,
-                        result_id,
-                        result_source=result_source,
-                    )
-                except Exception as exc:
-                    failure_category = self._failure_category(exc)
-                    retry_after_seconds = self._retry_delay_seconds(task)
-                    next_status = self.repository.mark_screening_task_failure(
-                        task_id,
-                        str(exc),
-                        failure_category=failure_category,
-                        retry_after_seconds=retry_after_seconds,
-                    )
-                    message = f"{name}: failed - {exc}"
-                    if next_status == "failed":
-                        self.repository.save_screening_result(
-                            ScreeningResult(
-                                run_id=run_id,
-                                candidate_id=candidate_id,
-                                rating="",
-                                persona="",
-                                status="failed",
-                                error=f"{failure_category}: {exc}",
-                            )
-                        )
-                    else:
-                        message = f"{name}: retrying after {failure_category} - {exc}"
-                        self._sleep_before_retry(task)
-                    self._log("exception", "Screening candidate %s failed: %s", candidate_id, exc)
-
-                counts = self.repository.get_screening_task_counts(run_id)
-                completed = self._handled_count(counts)
-                failed = counts["failed"]
-                self.repository.update_screening_run_progress(run_id, completed, failed)
-                if progress_callback:
-                    progress_callback(
-                        ScreeningProgress(
+                        if task is None:
+                            no_more_tasks = True
+                            break
+                        future = executor.submit(
+                            self._process_claimed_task_with_connection_cleanup,
+                            task,
                             run_id=run_id,
-                            current=min(completed + failed, counts["total"]),
-                            total=counts["total"],
-                            completed=completed,
-                            failed=failed,
-                            candidate_name=name,
-                            rating=rating,
-                            persona=persona,
-                            message=message,
+                            role_id=role_id,
+                            provider_name=provider_name,
+                            model=model,
+                            prompt_version=prompt_version,
+                            prompt_text=prompt_text,
+                            request_hashes=request_hashes,
+                            candidate_texts=candidate_texts,
                         )
-                    )
+                        active[future] = task
+
+                    if not active:
+                        break
+                    done, _pending = wait(active, return_when=FIRST_COMPLETED)
+                    for future in done:
+                        active.pop(future, None)
+                        outcome = future.result()
+                        counts = self.repository.get_screening_task_counts(run_id)
+                        completed = self._handled_count(counts)
+                        failed = counts["failed"]
+                        self.repository.update_screening_run_progress(run_id, completed, failed)
+                        if progress_callback:
+                            progress_callback(
+                                ScreeningProgress(
+                                    run_id=run_id,
+                                    current=min(completed + failed, counts["total"]),
+                                    total=counts["total"],
+                                    completed=completed,
+                                    failed=failed,
+                                    candidate_name=outcome["name"],
+                                    rating=outcome["rating"],
+                                    persona=outcome["persona"],
+                                    message=outcome["message"],
+                                )
+                            )
+                    no_more_tasks = False
+
+                    if self._stop_requested:
+                        status = "stopped"
+                        note = "User stopped AI screening."
+                        no_more_tasks = True
         except Exception as exc:
             status = "failed"
             note = str(exc)
@@ -312,6 +221,158 @@ class ScreeningService:
             "manual_check": counts.get("manual_check", 0),
             "hold": counts.get("hold", 0),
             "message": note or "AI screening completed.",
+        }
+
+    def _process_claimed_task_with_connection_cleanup(
+        self,
+        task: dict[str, object],
+        **kwargs,
+    ) -> dict[str, str]:
+        try:
+            return self._process_claimed_task(task, **kwargs)
+        finally:
+            self.repository.db.close_thread_connection()
+
+    def _process_claimed_task(
+        self,
+        task: dict[str, object],
+        *,
+        run_id: int,
+        role_id: int,
+        provider_name: str,
+        model: str,
+        prompt_version: str,
+        prompt_text: str,
+        request_hashes: dict[int, str],
+        candidate_texts: dict[int, str],
+    ) -> dict[str, str]:
+        task_id = int(task["task_id"])
+        candidate_id = int(task["candidate_id"])
+        name = str(task.get("name") or f"Candidate #{candidate_id}")
+        task_model = str(task.get("model_name") or model)
+        task_prompt_version = str(task.get("prompt_version") or prompt_version)
+        task_request_hash = str(
+            task.get("request_payload_hash") or request_hashes[candidate_id]
+        )
+        stored_prompt_text = str(task.get("prompt_text") or "")
+        stored_candidate_text = str(task.get("candidate_text") or "")
+        has_request_snapshot = bool(stored_prompt_text and stored_candidate_text)
+        task_prompt_text = stored_prompt_text or prompt_text
+        task_candidate_text = stored_candidate_text or candidate_texts[candidate_id]
+        rating = ""
+        persona = ""
+
+        try:
+            result_source = "model"
+            existing_result = self.repository.get_screening_result(run_id, candidate_id)
+            if existing_result is not None and str(existing_result["status"]) == "completed":
+                result_id = int(existing_result["id"])
+                rating = str(existing_result["rating"] or "")
+                persona = str(existing_result["persona"] or "")
+                message = f"{name}: {rating} (recovered)"
+                result_source = "recovered"
+            else:
+                cached = self.repository.get_cached_screening_result(
+                    role_id=role_id,
+                    candidate_id=candidate_id,
+                    model_name=task_model,
+                    prompt_version=task_prompt_version,
+                    request_payload_hash=task_request_hash,
+                )
+                if cached is not None:
+                    result_id = self.repository.save_screening_result(
+                        ScreeningResult(
+                            run_id=run_id,
+                            candidate_id=candidate_id,
+                            rating=str(cached["rating"] or ""),
+                            persona=str(cached["persona"] or ""),
+                            status=str(cached["status"] or "completed"),
+                            raw_response=str(cached["raw_response"] or ""),
+                            error=str(cached["error"] or ""),
+                            confidence=str(cached["confidence"] or ""),
+                            evidence_json=str(cached["evidence_json"] or "[]"),
+                            gap_json=str(cached["gap_json"] or "[]"),
+                            risk_json=str(cached["risk_json"] or "[]"),
+                            recommended_action=str(cached["recommended_action"] or ""),
+                        )
+                    )
+                    rating = str(cached["rating"] or "")
+                    persona = str(cached["persona"] or "")
+                    message = f"{name}: {rating} (cached)"
+                    result_source = "cached"
+                else:
+                    if not has_request_snapshot:
+                        task_model = model
+                        task_prompt_version = prompt_version
+                        task_request_hash = request_hashes[candidate_id]
+                        task_prompt_text = prompt_text
+                        task_candidate_text = candidate_texts[candidate_id]
+                        self.repository.update_screening_task_request_snapshot(
+                            task_id,
+                            model_name=task_model,
+                            prompt_version=task_prompt_version,
+                            request_payload_hash=task_request_hash,
+                            prompt_text=task_prompt_text,
+                            candidate_text=task_candidate_text,
+                        )
+                    ProviderRateLimiter.wait(
+                        f"{provider_name}:{task_model}",
+                        self.provider_min_interval_seconds,
+                    )
+                    decision = self.provider.screen(task_prompt_text, task_candidate_text)
+                    result_id = self.repository.save_screening_result(
+                        ScreeningResult(
+                            run_id=run_id,
+                            candidate_id=candidate_id,
+                            rating=decision.rating,
+                            persona=decision.persona,
+                            raw_response=decision.raw_response,
+                            confidence=decision.confidence,
+                            evidence_json=json.dumps(decision.evidence or [], ensure_ascii=False),
+                            gap_json=json.dumps(decision.gaps or [], ensure_ascii=False),
+                            risk_json=json.dumps(decision.risks or [], ensure_ascii=False),
+                            recommended_action=decision.recommended_action,
+                        )
+                    )
+                    rating = decision.rating
+                    persona = decision.persona
+                    message = f"{name}: {decision.rating}"
+            self.repository.mark_screening_task_success(
+                task_id,
+                result_id,
+                result_source=result_source,
+            )
+        except Exception as exc:
+            failure_category = self._failure_category(exc)
+            retry_after_seconds = self._retry_delay_seconds(task)
+            next_status = self.repository.mark_screening_task_failure(
+                task_id,
+                str(exc),
+                failure_category=failure_category,
+                retry_after_seconds=retry_after_seconds,
+            )
+            message = f"{name}: failed - {exc}"
+            if next_status == "failed":
+                self.repository.save_screening_result(
+                    ScreeningResult(
+                        run_id=run_id,
+                        candidate_id=candidate_id,
+                        rating="",
+                        persona="",
+                        status="failed",
+                        error=f"{failure_category}: {exc}",
+                    )
+                )
+            else:
+                message = f"{name}: retrying after {failure_category} - {exc}"
+                self._sleep_before_retry(task)
+            self._log("exception", "Screening candidate %s failed: %s", candidate_id, exc)
+
+        return {
+            "name": name,
+            "rating": rating,
+            "persona": persona,
+            "message": message,
         }
 
     @staticmethod

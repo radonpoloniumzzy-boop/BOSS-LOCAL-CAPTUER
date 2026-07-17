@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import threading
 from copy import deepcopy
 from datetime import datetime, timedelta
@@ -893,6 +894,7 @@ class MainWindow(QMainWindow):
                 "api_base": flow.api_base,
                 "api_key_env": flow.api_key_env,
                 "post_screen_action": flow.post_screen_action,
+                "screening_concurrency": flow.screening_concurrency,
                 "favorite_interval_seconds": flow.favorite_interval_seconds,
                 "favorite_max_candidates": flow.favorite_max_candidates,
             },
@@ -918,6 +920,9 @@ class MainWindow(QMainWindow):
                     "max_candidates": int(armed_flow.get("max_candidates") or 0),
                     "post_screen_action": str(
                         armed_flow.get("post_screen_action") or "screen_only"
+                    ),
+                    "screening_concurrency": int(
+                        armed_flow.get("screening_concurrency") or 4
                     ),
                     "favorite_eligible_ratings": list(
                         armed_profile.get("favorite_eligible_ratings") or []
@@ -951,6 +956,7 @@ class MainWindow(QMainWindow):
                 "model": flow.model,
                 "max_candidates": flow.max_candidates,
                 "post_screen_action": flow.post_screen_action,
+                "screening_concurrency": flow.screening_concurrency,
                 "favorite_eligible_ratings": favorite_ratings,
                 "favorite_interval_seconds": flow.favorite_interval_seconds,
                 "favorite_max_candidates": flow.favorite_max_candidates,
@@ -1035,6 +1041,10 @@ class MainWindow(QMainWindow):
             api_base=str(provider.get("api_base") or "").strip(),
             api_key_env=str(provider.get("api_key_env") or "").strip(),
             post_screen_action=post_screen_action,
+            screening_concurrency=min(
+                8,
+                max(1, int(payload.get("screening_concurrency") or 4)),
+            ),
             favorite_interval_seconds=min(
                 8,
                 max(3, int(payload.get("favorite_interval_seconds") or 5)),
@@ -1294,6 +1304,19 @@ class MainWindow(QMainWindow):
             "api_key": str(page_provider.get("api_key") or ""),
             "api_key_env": str(page_provider.get("api_key_env") or "OPENAI_API_KEY"),
         }
+        run_origin = str(run["origin"] or "manual")
+        if run_origin not in {"manual", "automation"}:
+            run_origin = "manual"
+        try:
+            automation_snapshot = json.loads(str(run["automation_snapshot_json"] or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            automation_snapshot = {}
+        if not isinstance(automation_snapshot, dict):
+            automation_snapshot = {}
+        screening_concurrency = min(
+            8,
+            max(1, int(automation_snapshot.get("screening_concurrency") or 1)),
+        )
         worker_payload = {
             "run_id": run_id,
             "profile": dict(profile),
@@ -1301,9 +1324,11 @@ class MainWindow(QMainWindow):
             "source_job_title": str(run["source_job_title"] or ""),
             "batch_id": run["batch_id"],
             "candidates": candidates,
-            "origin": "manual",
+            "origin": run_origin,
+            "screening_concurrency": screening_concurrency,
+            "automation_snapshot": automation_snapshot,
         }
-        self._launch_ai_screening(worker_payload, origin="manual")
+        self._launch_ai_screening(worker_payload, origin=run_origin)
 
     def _retry_ai_screening_task(self, task_id: int) -> None:
         if self._ai_screening_thread is not None:
@@ -1471,11 +1496,19 @@ class MainWindow(QMainWindow):
             "limit": screening_limit,
             "candidates": candidates,
             "origin": "automation",
+            "screening_concurrency": min(
+                8,
+                max(1, int(flow_snapshot.get("screening_concurrency") or 4)),
+            ),
             "automation_snapshot": {
                 "post_screen_action": post_screen_action,
                 "job_title": str(capture_result.get("job_title") or flow_snapshot.get("job_title") or ""),
                 "profile_id": int(profile_row["id"]),
                 "profile_version": int(profile_row.get("version") or 1),
+                "screening_concurrency": min(
+                    8,
+                    max(1, int(flow_snapshot.get("screening_concurrency") or 4)),
+                ),
                 "screening_profile_snapshot": deepcopy(profile_row),
                 "favorite_eligible_ratings": list(
                     profile_row.get("favorite_eligible_ratings") or []

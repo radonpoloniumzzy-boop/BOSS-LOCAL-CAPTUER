@@ -77,6 +77,7 @@ class AutomationFlowConfig:
     api_base: str = "https://api.openai.com/v1"
     api_key_env: str = "OPENAI_API_KEY"
     post_screen_action: str = "screen_only"
+    screening_concurrency: int = 4
     favorite_interval_seconds: int = 5
     favorite_max_candidates: int = 20
     armed_launch_snapshot: dict[str, Any] = field(default_factory=dict)

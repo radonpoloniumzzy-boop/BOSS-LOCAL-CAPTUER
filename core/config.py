@@ -204,6 +204,18 @@ class ConfigService:
         automation_clean["post_screen_action"] = (
             action if action in {"screen_only", "screen_and_favorite"} else "screen_only"
         )
+        automation_clean["screening_concurrency"] = min(
+            8,
+            max(
+                1,
+                int(
+                    automation_clean.get(
+                        "screening_concurrency",
+                        defaults.automation_flow.screening_concurrency,
+                    )
+                ),
+            ),
+        )
         automation_clean["favorite_interval_seconds"] = min(
             8,
             max(

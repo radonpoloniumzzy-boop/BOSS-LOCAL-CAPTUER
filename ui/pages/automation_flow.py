@@ -72,6 +72,12 @@ class AutomationFlowPage(QWidget):
         self.max_candidates_input = QSpinBox()
         self.max_candidates_input.setRange(0, 10000)
         self.max_candidates_input.setSpecialValueText("全部")
+        self.screening_concurrency_input = QSpinBox()
+        self.screening_concurrency_input.setRange(1, 8)
+        self.screening_concurrency_input.setValue(4)
+        self.screening_concurrency_input.setToolTip(
+            "同时请求 AI 筛选的候选人数。建议保持 4；遇到限流时可调低。"
+        )
 
         self.post_screen_action_combo = QComboBox()
         self.post_screen_action_combo.addItem("仅采集并筛选", "screen_only")
@@ -103,6 +109,7 @@ class AutomationFlowPage(QWidget):
         settings_form.addRow("采集岗位", self.job_title_input)
         settings_form.addRow("采集页面", self.source_url_input)
         settings_form.addRow("最多筛选人数", self.max_candidates_input)
+        settings_form.addRow("AI 并发数", self.screening_concurrency_input)
         settings_form.addRow("筛选后动作", self.post_screen_action_combo)
         settings_form.addRow("收藏动作间隔", self.favorite_interval_input)
         settings_form.addRow("单批收藏上限", self.favorite_max_candidates_input)
@@ -188,6 +195,7 @@ class AutomationFlowPage(QWidget):
         self.job_title_input.setText(flow.job_title or config.default_job_title)
         self.source_url_input.setText(flow.source_url or config.target_url)
         self.max_candidates_input.setValue(int(flow.max_candidates))
+        self.screening_concurrency_input.setValue(int(flow.screening_concurrency))
         provider_index = self.provider_combo.findData(flow.provider)
         self.provider_combo.setCurrentIndex(max(0, provider_index))
         self._provider_changed()
@@ -247,6 +255,7 @@ class AutomationFlowPage(QWidget):
             "job_title": self.job_title_input.text().strip(),
             "source_url": self.source_url_input.text().strip(),
             "limit": self.max_candidates_input.value(),
+            "screening_concurrency": self.screening_concurrency_input.value(),
             "post_screen_action": str(self.post_screen_action_combo.currentData() or "screen_only"),
             "favorite_interval_seconds": self.favorite_interval_input.value(),
             "favorite_max_candidates": self.favorite_max_candidates_input.value(),
