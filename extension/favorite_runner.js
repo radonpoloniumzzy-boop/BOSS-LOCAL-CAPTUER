@@ -172,6 +172,41 @@
     return snapshot();
   }
 
+  async function resolveInterruption(settings) {
+    await ready;
+    if (state.running) throw new Error("Cannot reconcile while Native Favorite is running.");
+    const batchId = Number(settings?.batchId || state.batchId || 0);
+    if (!Number.isInteger(batchId) || batchId <= 0) {
+      throw new Error("Native Favorite batch ID is required for reconciliation.");
+    }
+    if (state.batchId && Number(state.batchId) !== batchId) {
+      throw new Error("Reconciliation must use the interrupted Native Favorite batch ID.");
+    }
+    const apiToken = String(settings?.apiToken || "").trim();
+    if (!apiToken) throw new Error("Local API token is required.");
+    const result = await post(
+      normalizeApiBase(settings?.apiBase),
+      apiToken,
+      "/api/favorites/reconcile",
+      { batch_id: batchId },
+    );
+    if (!result?.can_resume_pending) {
+      state.message = "The previous claim lease is still active; try reconciliation after it expires.";
+      await persistStatus();
+      return snapshot();
+    }
+    if (Number(result?.batch_id || 0) !== batchId) {
+      throw new Error("Native Favorite reconciliation returned the wrong batch.");
+    }
+    state.requiresManualResolution = false;
+    state.stopRequested = false;
+    state.currentTaskId = null;
+    state.phase = "paused";
+    state.message = `Interruption reconciled; ${Number(result.unknown || 0)} unknown task(s) remain terminal. Pending tasks may now resume.`;
+    await persistStatus();
+    return snapshot();
+  }
+
   async function post(apiBase, apiToken, path, payload) {
     const response = await chrome.runtime.sendMessage({
       type: "native_favorite_api",
@@ -231,7 +266,7 @@
   async function reconcilePersistedRunnerState() {
     const stored = await chrome.storage.local.get({ [STATUS_KEY]: null });
     const previous = stored?.[STATUS_KEY];
-    if (!previous?.running) {
+    if (!previous?.running && !previous?.requiresManualResolution && previous?.phase !== "interrupted") {
       return snapshot();
     }
     Object.assign(state, {
@@ -265,9 +300,15 @@
       sendResponse({ ok: true, status: stop() });
       return false;
     }
+    if (message.command === "reconcile") {
+      resolveInterruption(message.settings || {})
+        .then((status) => sendResponse({ ok: true, status }))
+        .catch((error) => sendResponse({ ok: false, error: error?.message || String(error) }));
+      return true;
+    }
     sendResponse({ ok: true, status: getStatus() });
     return false;
   });
 
-  globalScope.__bossNativeFavoriteRunner = Object.freeze({ start, stop, getStatus, ready });
+  globalScope.__bossNativeFavoriteRunner = Object.freeze({ start, stop, getStatus, resolveInterruption, ready });
 })(globalThis);

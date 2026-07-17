@@ -67,6 +67,25 @@
     };
   }
 
+  function validateCandidateDocuments(context, inspections) {
+    const expected = Array.isArray(context?.candidate_documents) ? context.candidate_documents : [];
+    if (expected.length === 0) {
+      return { ok: false, reason: "source_candidate_documents_missing" };
+    }
+    const actual = new Map((inspections || []).map((item) => [
+      `${Number(item?.frameId)}:${String(item?.documentId || "")}`,
+      item,
+    ]));
+    for (const document of expected) {
+      const key = `${Number(document?.frame_id)}:${String(document?.document_id || "")}`;
+      const match = actual.get(key);
+      if (!match || normalizeRecommendationUrl(match?.result?.frame_url) !== normalizeRecommendationUrl(document?.frame_url)) {
+        return { ok: false, reason: "source_candidate_document_mismatch" };
+      }
+    }
+    return { ok: true, reason: "" };
+  }
+
   function aggregateManagementClassifications(classifications, attempted) {
     const results = (classifications || []).map((item) => item?.result).filter(Boolean);
     const conflicts = results.filter((result) =>
@@ -129,6 +148,7 @@
 
   globalScope.__bossNativeFavoriteExecutionContract = Object.freeze({
     validateSourceContext,
+    validateCandidateDocuments,
     aggregateAdapterExecutions,
     aggregateManagementClassifications,
     isBossRecommendationUrl,

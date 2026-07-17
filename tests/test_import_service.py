@@ -53,6 +53,13 @@ class CardImportServiceTest(unittest.TestCase):
                     "platform": "boss",
                     "source_tab_id": 91,
                     "source_document_id": "source-doc-91",
+                    "source_candidate_documents": [
+                        {
+                            "frame_id": 7,
+                            "document_id": "candidate-doc-7",
+                            "frame_url": "https://www.zhipin.com/web/frame/recommend/",
+                        }
+                    ],
                 },
             }
         )
@@ -69,6 +76,13 @@ class CardImportServiceTest(unittest.TestCase):
                 "source_url": "https://www.zhipin.com/web/geek/recommend",
                 "tab_id": 91,
                 "document_id": "source-doc-91",
+                "candidate_documents": [
+                    {
+                        "frame_id": 7,
+                        "document_id": "candidate-doc-7",
+                        "frame_url": "https://www.zhipin.com/web/frame/recommend/",
+                    }
+                ],
             },
         )
         self.assertEqual(len(self.repository.list_candidates()), 1)

@@ -121,6 +121,32 @@ class NativeFavoriteWorkflowTest(unittest.TestCase):
         self.assertEqual(len(attempts), 1)
         self.assertIsNone(attempts[0]["attempted"])
 
+    def test_reconciliation_recovers_expired_claim_without_claiming_next_pending_task(self) -> None:
+        favorite_batch_id, _candidate_ids = self._create_favorite_batch(
+            "reconcile", ["trusted-reconcile-1", "trusted-reconcile-2"]
+        )
+        first = self.repository.claim_next_native_favorite_task(favorite_batch_id)
+        active = self.repository.reconcile_native_favorite_batch(favorite_batch_id)
+        self.assertFalse(active["can_resume_pending"])
+        self.assertEqual(active["running"], 1)
+
+        self.db.get_connection().execute(
+            "UPDATE native_favorite_tasks SET locked_at = '2000-01-01T00:00:00' WHERE id = ?",
+            (int(first["task_id"]),),
+        )
+        self.db.get_connection().commit()
+        recovered = self.repository.reconcile_native_favorite_batch(
+            favorite_batch_id, lock_timeout_seconds=0
+        )
+        self.assertTrue(recovered["can_resume_pending"])
+        self.assertEqual(recovered["recovered_unknown"], 1)
+        self.assertEqual(recovered["pending"], 1)
+        self.assertEqual(recovered["unknown"], 1)
+        self.assertFalse(any(
+            str(task["status"]) == "running"
+            for task in self.repository.list_native_favorite_tasks(favorite_batch_id)
+        ))
+
     def test_failed_task_has_one_explicit_retry_and_identity_conflict_maps_to_failed(self) -> None:
         favorite_batch_id, _candidate_ids = self._create_favorite_batch(
             "retry",

@@ -223,6 +223,13 @@ class LocalApiServerTest(unittest.TestCase):
             "status": "pending",
             "attempt_count": 1,
         }
+        self.server.reconcile_favorite_batch = lambda payload: {
+            "batch_id": int(payload["batch_id"]),
+            "running": 0,
+            "pending": 2,
+            "unknown": 1,
+            "can_resume_pending": True,
+        }
 
         claim_body = json.dumps({"batch_id": 19, "worker_id": "extension-tab-91"}).encode(
             "utf-8"
@@ -291,6 +298,23 @@ class LocalApiServerTest(unittest.TestCase):
 
         self.assertEqual(retry_response.status, 200)
         self.assertEqual(retry_payload["result"]["status"], "pending")
+
+        reconcile_connection = http.client.HTTPConnection(
+            "127.0.0.1", self.server.port, timeout=5
+        )
+        reconcile_connection.request(
+            "POST",
+            "/api/favorites/reconcile",
+            body=json.dumps({"batch_id": 19}).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "X-Boss-Local-Token": self.token,
+            },
+        )
+        reconcile_response = reconcile_connection.getresponse()
+        reconcile_payload = json.loads(reconcile_response.read().decode("utf-8"))
+        self.assertEqual(reconcile_response.status, 200)
+        self.assertTrue(reconcile_payload["result"]["can_resume_pending"])
 
 
 if __name__ == "__main__":

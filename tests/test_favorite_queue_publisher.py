@@ -48,6 +48,11 @@ class NativeFavoriteQueuePublisherTest(unittest.TestCase):
             {
                 "job_title": "Queue Role",
                 "source_url": "https://www.zhipin.com/web/geek/recommend",
+                "candidate_documents": [{
+                    "frame_id": 7,
+                    "document_id": "candidate-doc-7",
+                    "frame_url": "https://www.zhipin.com/web/frame/recommend/",
+                }],
                 "cards": [
                     {
                         "platform": "boss",
@@ -112,6 +117,11 @@ class NativeFavoriteQueuePublisherTest(unittest.TestCase):
                 "document_id": "source-doc-91",
                 "platform": "boss",
                 "source_url": "https://www.zhipin.com/web/geek/recommend",
+                "candidate_documents": [{
+                    "frame_id": 7,
+                    "document_id": "candidate-doc-7",
+                    "frame_url": "https://www.zhipin.com/web/frame/recommend/",
+                }],
             },
         }
         service = ScreeningService(
@@ -224,6 +234,11 @@ class NativeFavoriteQueuePublisherTest(unittest.TestCase):
                 "document_id": "source-doc-91",
                 "platform": "liepin",
                 "source_url": "https://www.zhipin.com/web/geek/recommend",
+                "candidate_documents": [{
+                    "frame_id": 7,
+                    "document_id": "candidate-doc-7",
+                    "frame_url": "https://www.zhipin.com/web/frame/recommend/",
+                }],
             },
             {
                 "capture_batch_id": int(imported["batch_id"]),
@@ -231,6 +246,11 @@ class NativeFavoriteQueuePublisherTest(unittest.TestCase):
                 "document_id": "source-doc-91",
                 "platform": "boss",
                 "source_url": "https://www.zhipin.com/web/geek/friend",
+                "candidate_documents": [{
+                    "frame_id": 7,
+                    "document_id": "candidate-doc-7",
+                    "frame_url": "https://www.zhipin.com/web/frame/recommend/",
+                }],
             },
         )
         for source_context in invalid_contexts:

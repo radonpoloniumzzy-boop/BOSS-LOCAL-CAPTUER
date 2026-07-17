@@ -43,7 +43,7 @@ Single-batch Native Favorite usage:
 5. Return to the original recommendation tab, enter the batch ID in the extension, and click `Run Single Favorite Batch`
 6. The source-page runner claims one task at a time, verifies the exact Platform Identity in the dedicated favorite-management tab, and pauses on unknown, failure, context mismatch, or a manual stop request
 
-Only batches collected after extension version 0.5.0 contain the required Chrome document identity. The first version never refreshes the recommendation page and never advances to another Capture Batch. Closing the popup does not stop the page runner; use `Stop Favorite` to stop before the next candidate. A safe explicit failure may retry once; unknown, platform restriction, identity conflict, source-document change, or management-context loss never auto-retries.
+Only fresh batches collected with extension version 0.5.1 or newer contain both required Chrome identities: the top document and the candidate-bearing recommendation frame. The first version never refreshes the recommendation page and never advances to another Capture Batch. Closing the popup does not stop the page runner; use `Stop Favorite` to stop before the next candidate. A safe explicit failure may retry once; unknown, platform restriction, identity conflict, source-document change, or management-context loss never auto-retries. After a source-document interruption, use the recovery control once the claim lease expires; unknown tasks remain terminal while remaining pending tasks can resume.
 
 Single chat usage:
 

@@ -83,6 +83,15 @@ class CardImportService:
                         "source_url": source_url,
                         "tab_id": int(meta.get("source_tab_id") or 0),
                         "document_id": str(meta.get("source_document_id") or "").strip(),
+                        "candidate_documents": [
+                            {
+                                "frame_id": int(item.get("frame_id") or 0),
+                                "document_id": str(item.get("document_id") or "").strip(),
+                                "frame_url": str(item.get("frame_url") or "").strip(),
+                            }
+                            for item in (meta.get("source_candidate_documents") or [])
+                            if isinstance(item, dict)
+                        ],
                     },
                 }
             )

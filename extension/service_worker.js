@@ -110,6 +110,7 @@ async function proxyNativeFavoriteApi(message) {
     "/api/favorites/claim",
     "/api/favorites/result",
     "/api/favorites/retry",
+    "/api/favorites/reconcile",
   ]);
   const path = String(message?.path || "");
   if (!allowedPaths.has(path)) {
@@ -232,8 +233,65 @@ async function executeNativeFavoriteTask(task, sender) {
     target: { tabId: sourceTab.id, allFrames: true },
     files: ["identity_contract.js", "favorite_adapter.js"],
   });
-  const executions = await chrome.scripting.executeScript({
+  const sourceInspections = await chrome.scripting.executeScript({
     target: { tabId: sourceTab.id, allFrames: true },
+    args: [task],
+    func: (favoriteTask) => globalThis.__bossNativeFavoriteAdapter?.inspectFrame?.(favoriteTask) || null,
+  });
+  const candidateDocumentValidation = contract.validateCandidateDocuments(
+    task.source_page_context,
+    sourceInspections,
+  );
+  if (!candidateDocumentValidation.ok) {
+    return { ok: true, result: nativeFavoriteFailure(false, candidateDocumentValidation.reason, "source_context_guard") };
+  }
+  const restriction = sourceInspections.map((item) => item?.result?.restriction).find(Boolean);
+  if (restriction) {
+    return { ok: true, result: nativeFavoriteFailure(false, restriction, "platform_restriction_preflight") };
+  }
+  const matchingFrames = sourceInspections.filter((item) => Number(item?.result?.identity_match_count || 0) > 0);
+  const totalMatches = matchingFrames.reduce(
+    (total, item) => total + Number(item?.result?.identity_match_count || 0),
+    0,
+  );
+  if (matchingFrames.length !== 1 || totalMatches !== 1) {
+    return {
+      ok: true,
+      result: nativeFavoriteFailure(
+        false,
+        totalMatches === 0 ? "source_identity_not_visible" : "multiple_source_frame_identity_matches",
+        "source_identity_preflight",
+      ),
+    };
+  }
+  const targetFrameId = Number(matchingFrames[0].frameId);
+  const targetDocumentId = String(matchingFrames[0].documentId || "");
+  const targetWasCaptured = (task?.source_page_context?.candidate_documents || []).some(
+    (item) => Number(item?.frame_id) === targetFrameId && String(item?.document_id || "") === targetDocumentId,
+  );
+  if (!targetWasCaptured) {
+    return {
+      ok: true,
+      result: nativeFavoriteFailure(false, "source_identity_outside_captured_candidate_document", "source_context_guard"),
+    };
+  }
+  const finalRestrictionInspections = await chrome.scripting.executeScript({
+    target: { tabId: sourceTab.id, allFrames: true },
+    func: () => globalThis.__bossNativeFavoriteAdapter?.inspectFrame?.({}) || null,
+  });
+  const finalCandidateDocumentValidation = contract.validateCandidateDocuments(
+    task.source_page_context,
+    finalRestrictionInspections,
+  );
+  if (!finalCandidateDocumentValidation.ok) {
+    return { ok: true, result: nativeFavoriteFailure(false, finalCandidateDocumentValidation.reason, "source_context_write_barrier") };
+  }
+  const finalRestriction = finalRestrictionInspections.map((item) => item?.result?.restriction).find(Boolean);
+  if (finalRestriction) {
+    return { ok: true, result: nativeFavoriteFailure(false, finalRestriction, "platform_restriction_write_barrier") };
+  }
+  const executions = await chrome.scripting.executeScript({
+    target: { tabId: sourceTab.id, documentIds: [targetDocumentId] },
     args: [task],
     func: async (favoriteTask) =>
       globalThis.__bossNativeFavoriteAdapter?.favoriteOne?.(favoriteTask) || {

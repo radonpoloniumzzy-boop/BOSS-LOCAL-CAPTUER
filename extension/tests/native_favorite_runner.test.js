@@ -39,6 +39,11 @@ function favoriteTask(overrides = {}) {
       document_id: "source-doc-91",
       platform: "boss",
       source_url: "https://www.zhipin.com/web/chat/recommend",
+      candidate_documents: [{
+        frame_id: 7,
+        document_id: "candidate-doc-7",
+        frame_url: "https://www.zhipin.com/web/frame/recommend/",
+      }],
     },
     config_snapshot: { favorite_interval_seconds: 3 },
     attempt_count: 0,
@@ -75,6 +80,9 @@ function loadRunner({ claims, executionResults, initialStatus = null }) {
           }
           if (message.path === "/api/favorites/retry") {
             return { ok: true, result: { task_id: message.payload.task_id, status: "pending" } };
+          }
+          if (message.path === "/api/favorites/reconcile") {
+            return { ok: true, result: { batch_id: 19, running: 0, pending: 2, unknown: 1, can_resume_pending: true } };
           }
           throw new Error(`Unexpected path: ${message.path}`);
         },
@@ -127,8 +135,40 @@ async function testDestroyedSourceDocumentIsReconciledAsInterruptedAndCannotRest
   assert(stored.some((entry) => entry.boss_native_favorite_status?.phase === "interrupted"));
 }
 
+async function testPersistedInterruptionSurvivesAnotherReloadAndCanBeReconciled() {
+  const { runner, requests } = loadRunner({
+    claims: [],
+    executionResults: [],
+    initialStatus: {
+      running: false,
+      batchId: 19,
+      phase: "interrupted",
+      requiresManualResolution: true,
+      currentTaskId: 73,
+    },
+  });
+  await runner.ready;
+  assert.strictEqual(runner.getStatus().requiresManualResolution, true);
+  const status = await runner.resolveInterruption({
+    batchId: 19,
+    apiBase: "http://127.0.0.1:17863",
+    apiToken: "local-token",
+  });
+  assert.strictEqual(status.requiresManualResolution, false);
+  assert.strictEqual(status.phase, "paused");
+  assert.strictEqual(requests[0].url, "/api/favorites/reconcile");
+}
+
 async function testExecutionContractRejectsWrongContextAndAmbiguousFrames() {
   const contract = loadExecutionContract();
+  assert.deepStrictEqual(
+    { ...contract.validateCandidateDocuments(favoriteTask().source_page_context, [{
+      frameId: 7,
+      documentId: "replacement-doc",
+      result: { frame_url: "https://www.zhipin.com/web/frame/recommend/" },
+    }]) },
+    { ok: false, reason: "source_candidate_document_mismatch" },
+  );
   assert.deepStrictEqual(
     { ...contract.validateSourceContext(favoriteTask(), {
       id: 92,
@@ -324,6 +364,7 @@ async function testExecutionBridgeLossIsUnknownAndNeverRetries() {
 async function runNativeFavoriteRunnerTests() {
   await testExecutionContractRejectsWrongContextAndAmbiguousFrames();
   await testDestroyedSourceDocumentIsReconciledAsInterruptedAndCannotRestart();
+  await testPersistedInterruptionSurvivesAnotherReloadAndCanBeReconciled();
   await testRunnerClaimsReportsAndFinishesSerially();
   await testRunnerStopsAfterUnknownWithoutClaimingAnotherTask();
   await testManualStopFinishesCurrentTaskWithoutClaimingAnother();

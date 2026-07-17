@@ -439,6 +439,7 @@ class MainWindow(QMainWindow):
             claim_favorite_task=self._claim_native_favorite_task_from_extension,
             report_favorite_result=self._report_native_favorite_result_from_extension,
             retry_favorite_task=self._retry_native_favorite_task_from_extension,
+            reconcile_favorite_batch=self._reconcile_native_favorite_batch_from_extension,
             auth_token=self.config.local_api_token,
         )
         try:
@@ -496,6 +497,15 @@ class MainWindow(QMainWindow):
         if task_id <= 0:
             raise ValueError("Native Favorite task_id is required")
         return self.repository.retry_native_favorite_task(task_id)
+
+    def _reconcile_native_favorite_batch_from_extension(
+        self,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        batch_id = int(payload.get("batch_id") or 0)
+        if batch_id <= 0:
+            raise ValueError("Native Favorite batch_id is required")
+        return self.repository.reconcile_native_favorite_batch(batch_id)
 
     def handle_open_browser(self) -> None:
         url = self.dashboard_page.source_url_input.text().strip() or self.config.target_url

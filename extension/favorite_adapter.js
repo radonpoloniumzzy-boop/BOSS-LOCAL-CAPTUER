@@ -11,6 +11,22 @@
   const FAVORITE_TIMEOUT_MS = 3000;
   const POLL_INTERVAL_MS = 50;
 
+  function inspectFrame(identitySnapshot) {
+    const restriction = detectPlatformRestriction();
+    const identityAttribute = String(identitySnapshot?.platform_identity?.attribute || "").trim().toLowerCase();
+    const identityValue = String(identitySnapshot?.platform_identity?.value || "").trim();
+    const identity_match_count = TRUSTED_IDENTITY_ATTRIBUTES.includes(identityAttribute) && identityValue
+      ? Array.from(document.querySelectorAll(`[${identityAttribute}]`)).filter(
+          (node) => String(node.getAttribute?.(identityAttribute) || "").trim() === identityValue,
+        ).length
+      : 0;
+    return {
+      frame_url: location.href,
+      restriction,
+      identity_match_count,
+    };
+  }
+
   async function favoriteOne(identitySnapshot) {
     const platform = String(identitySnapshot?.platform || "").trim().toLowerCase();
     if (platform !== "boss") {
@@ -132,6 +148,19 @@
   }
 
   function detectPlatformRestriction() {
+    const localRestriction = detectPlatformRestrictionInDocument(document);
+    if (localRestriction) return localRestriction;
+    if (globalScope.top && globalScope.top !== globalScope) {
+      try {
+        return detectPlatformRestrictionInDocument(globalScope.top.document);
+      } catch (_error) {
+        return "platform_top_context_unavailable";
+      }
+    }
+    return "";
+  }
+
+  function detectPlatformRestrictionInDocument(targetDocument) {
     const directSelectors = [
       "iframe[src*='captcha']",
       "iframe[src*='verify']",
@@ -139,11 +168,11 @@
       "[class*='geetest']",
     ];
     if (directSelectors.some((selector) =>
-      Array.from(document.querySelectorAll?.(selector) || []).some(isVisible),
+      Array.from(targetDocument.querySelectorAll?.(selector) || []).some(isVisible),
     )) {
       return "platform_captcha_or_security_verification";
     }
-    const surfaces = Array.from(document.querySelectorAll?.(
+    const surfaces = Array.from(targetDocument.querySelectorAll?.(
       "[role='dialog'], .dialog-wrap, .boss-dialog, .toast, .message, .warning-dialog",
     ) || []).filter(isVisible);
     const text = surfaces.map((node) => String(node.textContent || "")).join(" ");
@@ -244,5 +273,5 @@
     return null;
   }
 
-  globalScope.__bossNativeFavoriteAdapter = { favoriteOne };
+  globalScope.__bossNativeFavoriteAdapter = { favoriteOne, inspectFrame };
 })(globalThis);

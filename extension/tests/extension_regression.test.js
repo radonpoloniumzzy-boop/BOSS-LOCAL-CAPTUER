@@ -630,6 +630,68 @@ async function testNativeFavoriteVerifyOnlyPreflightNeverExecutesSourceAdapter()
   assert.strictEqual(executionCount, 3);
 }
 
+async function testNativeFavoriteWholeTabRestrictionPreflightPreventsFrameWrite() {
+  const { chrome, api } = loadServiceWorker();
+  chrome.tabs.query = async () => [
+    { id: 91, url: "https://www.zhipin.com/web/chat/recommend" },
+    { id: 93, url: "https://www.zhipin.com/web/chat/interaction" },
+  ];
+  const requests = [];
+  chrome.scripting.executeScript = async (request) => {
+    requests.push(request);
+    if (request.files) return [];
+    if (request.target?.tabId === 93 && request.target?.allFrames) {
+      return [{ frameId: 0, documentId: "management-doc", result: {} }];
+    }
+    if (request.target?.tabId === 93) {
+      return [{ result: {
+        status: "failed",
+        attempted: false,
+        reason: "favorite_management_identity_not_visible",
+      } }];
+    }
+    return [
+      { frameId: 0, documentId: "source-doc-91", result: {
+        frame_url: "https://www.zhipin.com/web/chat/recommend",
+        restriction: "platform_rate_or_risk_restriction",
+        identity_match_count: 0,
+      } },
+      { frameId: 7, documentId: "candidate-doc-7", result: {
+        frame_url: "https://www.zhipin.com/web/frame/recommend/",
+        restriction: "",
+        identity_match_count: 1,
+      } },
+    ];
+  };
+  const result = await api.executeNativeFavoriteTask(favoriteTaskForWorker(), {
+    frameId: 0,
+    documentId: "source-doc-91",
+    tab: { id: 91, url: "https://www.zhipin.com/web/chat/recommend" },
+  });
+  assert.strictEqual(result.result.reason, "platform_rate_or_risk_restriction");
+  assert.strictEqual(result.result.attempted, false);
+  assert.strictEqual(requests.some((request) => Array.isArray(request.target?.documentIds)), false);
+}
+
+function favoriteTaskForWorker() {
+  return {
+    platform: "boss",
+    write_policy: "establish_or_verify",
+    platform_identity: { attribute: "data-geekid", value: "trusted-71" },
+    source_page_context: {
+      tab_id: 91,
+      document_id: "source-doc-91",
+      platform: "boss",
+      source_url: "https://www.zhipin.com/web/chat/recommend",
+      candidate_documents: [{
+        frame_id: 7,
+        document_id: "candidate-doc-7",
+        frame_url: "https://www.zhipin.com/web/frame/recommend/",
+      }],
+    },
+  };
+}
+
 function managementIdentityNode(value, visible = true) {
   return {
     hiddenStyle: !visible,
@@ -1208,7 +1270,7 @@ function testAutomationAutoButtonStartsDesktopWorkflow() {
   assert(html.includes('id="apiToken"'));
   assert(popup.includes("automation_requested"));
   assert(popup.includes("AUTO 采集完成，已提交 AI 初筛"));
-  assert.strictEqual(manifest.version, "0.5.0");
+  assert.strictEqual(manifest.version, "0.5.1");
 }
 
 function testNativeFavoriteBatchHasDedicatedRunnerAndManagementVerification() {
@@ -1234,7 +1296,7 @@ function testNativeFavoriteBatchHasDedicatedRunnerAndManagementVerification() {
   assert(service.includes("MAX_MANAGEMENT_VERIFICATION_ATTEMPTS"));
   assert(service.includes('files: ["identity_contract.js", "favorite_adapter.js"]'));
   assert(service.includes('files: ["identity_contract.js", "favorite_management_verifier.js"]'));
-  assert.strictEqual(manifest.version, "0.5.0");
+  assert.strictEqual(manifest.version, "0.5.1");
 }
 
 function testChatAutomationIsOptIn() {
@@ -1357,6 +1419,7 @@ async function main() {
   await testNativeFavoriteWorkerRejectsWrongSourceTabBeforeAnyWrite();
   await testNativeFavoriteApiProxyRejectsExternalHostsAndArbitraryPaths();
   await testNativeFavoriteVerifyOnlyPreflightNeverExecutesSourceAdapter();
+  await testNativeFavoriteWholeTabRestrictionPreflightPreventsFrameWrite();
   testBossIdentityEvidenceKeepsIdentifiersAndDropsSecrets();
   await testFavoriteManagementVerifierRequiresSelectedFavoriteSubviewObservation();
   await testFavoriteManagementVerifierInspectsSelectedSubviewAndScopedVisibleIdentity();

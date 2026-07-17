@@ -65,8 +65,14 @@ const pairingCodeInput = document.getElementById("pairingCode");
 const applyPairingCodeButton = document.getElementById("applyPairingCode");
 const startFavoriteBatchButton = document.getElementById("startFavoriteBatch");
 const stopFavoriteBatchButton = document.getElementById("stopFavoriteBatch");
+const reconcileFavoriteBatchButton = document.createElement("button");
+reconcileFavoriteBatchButton.id = "reconcileFavoriteBatch";
+reconcileFavoriteBatchButton.type = "button";
+reconcileFavoriteBatchButton.textContent = "恢复中断后剩余待处理项";
+reconcileFavoriteBatchButton.style.cssText = "margin-top:8px;width:100%";
 const favoriteStatusEl = document.getElementById("favoriteStatus");
 const favoriteSection = document.getElementById("favoriteSection");
+favoriteSection?.insertBefore(reconcileFavoriteBatchButton, favoriteStatusEl);
 let batchStatusTimer = null;
 
 if (favoriteSection) {
@@ -88,6 +94,7 @@ document.getElementById("startBatchDownload").addEventListener("click", () => st
 document.getElementById("stopBatch").addEventListener("click", () => stopBatch());
 startFavoriteBatchButton.addEventListener("click", () => startNativeFavoriteBatch());
 stopFavoriteBatchButton.addEventListener("click", () => stopNativeFavoriteBatch());
+reconcileFavoriteBatchButton.addEventListener("click", () => reconcileNativeFavoriteBatch());
 
 window.addEventListener("beforeunload", () => {
   if (batchStatusTimer) {
@@ -191,6 +198,32 @@ async function stopNativeFavoriteBatch() {
     return;
   }
   setStatus("已请求停止；当前候选人的动作会先得到明确结果，再停止领取下一人。");
+  await refreshNativeFavoriteStatus();
+}
+
+async function reconcileNativeFavoriteBatch() {
+  const stored = await chrome.storage.local.get({ favoriteSourceTabId: null });
+  const sourceTabId = Number(stored.favoriteSourceTabId || 0);
+  const settings = collectSettings();
+  const batchId = Number(settings.favoriteBatchId || 0);
+  if (!sourceTabId || !batchId) {
+    setStatus("Enter the Native Favorite batch ID and retain its source recommendation tab.");
+    return;
+  }
+  await chrome.scripting.executeScript({
+    target: { tabId: sourceTabId },
+    files: ["favorite_runner.js"],
+  });
+  const response = await chrome.tabs.sendMessage(sourceTabId, {
+    type: "boss_native_favorite_command",
+    command: "reconcile",
+    settings: { batchId, apiBase: settings.apiBase, apiToken: settings.apiToken },
+  });
+  if (!response?.ok) {
+    setStatus(`Native Favorite reconciliation failed.\n${response?.error || "Unknown error"}`);
+    return;
+  }
+  setStatus("Interruption checked. If the old lease expired, start the same batch again to continue pending tasks. Unknown tasks are never retried automatically.");
   await refreshNativeFavoriteStatus();
 }
 
@@ -654,6 +687,7 @@ function mergeFrameResults(frameResults) {
   let framesSeen = 0;
   let framesWithCards = 0;
   let maxRoundsCompleted = 0;
+  const sourceCandidateDocuments = [];
 
   for (const frameResult of frameResults || []) {
     const result = frameResult?.result;
@@ -664,6 +698,11 @@ function mergeFrameResults(frameResults) {
     const cards = Array.isArray(result.cards) ? result.cards : [];
     if (cards.length > 0) {
       framesWithCards += 1;
+      sourceCandidateDocuments.push({
+        frame_id: Number(frameResult.frameId),
+        document_id: String(frameResult.documentId || ""),
+        frame_url: String(result.frameUrl || ""),
+      });
     }
     if (result.meta?.platform) {
       platforms.add(String(result.meta.platform));
@@ -688,6 +727,7 @@ function mergeFrameResults(frameResults) {
     sourceDocumentId: String(
       (frameResults || []).find((frameResult) => Number(frameResult?.frameId) === 0)?.documentId || "",
     ),
+    sourceCandidateDocuments,
     debugSummary: debugLines.join(" || "),
   };
 }
@@ -715,6 +755,7 @@ async function importCards(settings, sourceUrl, merged, automationRequested = fa
           automation_requested: automationRequested,
           source_tab_id: sourceTabId,
           source_document_id: merged.sourceDocumentId || "",
+          source_candidate_documents: merged.sourceCandidateDocuments || [],
           debug: merged.debugSummary,
         },
       }),

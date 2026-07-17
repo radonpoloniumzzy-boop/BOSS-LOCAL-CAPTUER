@@ -22,6 +22,7 @@ class LocalApiServer:
         claim_favorite_task: Callable[[dict[str, object]], dict[str, object] | None] | None = None,
         report_favorite_result: Callable[[dict[str, object]], dict[str, object]] | None = None,
         retry_favorite_task: Callable[[dict[str, object]], dict[str, object]] | None = None,
+        reconcile_favorite_batch: Callable[[dict[str, object]], dict[str, object]] | None = None,
         auth_token: str = "",
         max_body_bytes: int = 25_000_000,
     ) -> None:
@@ -37,6 +38,7 @@ class LocalApiServer:
         self.claim_favorite_task = claim_favorite_task
         self.report_favorite_result = report_favorite_result
         self.retry_favorite_task = retry_favorite_task
+        self.reconcile_favorite_batch = reconcile_favorite_batch
         self.auth_token = str(auth_token or "")
         self.max_body_bytes = max_body_bytes
         self._server: ThreadingHTTPServer | None = None
@@ -109,6 +111,7 @@ class LocalApiServer:
                     "/api/favorites/claim",
                     "/api/favorites/result",
                     "/api/favorites/retry",
+                    "/api/favorites/reconcile",
                 }:
                     self._send_json(404, {"error": "Not found"})
                     return
@@ -141,6 +144,13 @@ class LocalApiServer:
                             self._send_json(503, {"ok": False, "error": "Native Favorite is unavailable"})
                             return
                         result = parent.retry_favorite_task(payload)
+                        self._send_json(200, {"ok": True, "result": result})
+                        return
+                    if self.path == "/api/favorites/reconcile":
+                        if parent.reconcile_favorite_batch is None:
+                            self._send_json(503, {"ok": False, "error": "Native Favorite is unavailable"})
+                            return
+                        result = parent.reconcile_favorite_batch(payload)
                         self._send_json(200, {"ok": True, "result": result})
                         return
                     if self.path == "/api/automation/start":

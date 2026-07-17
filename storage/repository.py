@@ -1522,6 +1522,80 @@ class CandidateRepository:
             "locked_at": timestamp,
         }
 
+    def reconcile_native_favorite_batch(
+        self,
+        favorite_batch_id: int,
+        *,
+        lock_timeout_seconds: float = 600.0,
+    ) -> dict[str, object]:
+        connection = self.db.get_connection()
+        timestamp = now_iso()
+        stale_before = (
+            datetime.now() - timedelta(seconds=max(float(lock_timeout_seconds), 0.0))
+        ).isoformat(timespec="seconds")
+        recovered = 0
+        with connection:
+            connection.execute("BEGIN IMMEDIATE")
+            stale_rows = connection.execute(
+                """
+                SELECT id, attempt_count, started_at
+                FROM native_favorite_tasks
+                WHERE batch_id = ? AND status = 'running'
+                  AND (locked_at IS NULL OR locked_at = '' OR locked_at <= ?)
+                """,
+                (favorite_batch_id, stale_before),
+            ).fetchall()
+            for stale_row in stale_rows:
+                attempt_number = int(stale_row["attempt_count"]) + 1
+                cursor = connection.execute(
+                    """
+                    UPDATE native_favorite_tasks
+                    SET status = 'unknown', attempt_count = ?, claim_token = '',
+                        locked_at = NULL, locked_by = '',
+                        error_reason = 'claim_lease_expired_requires_manual_resolution',
+                        finished_at = ?, updated_at = ?
+                    WHERE id = ? AND status = 'running'
+                    """,
+                    (attempt_number, timestamp, timestamp, int(stale_row["id"])),
+                )
+                if cursor.rowcount:
+                    recovered += 1
+                    connection.execute(
+                        """
+                        INSERT INTO native_favorite_attempts(
+                            task_id, attempt_number, status, attempted, method, reason,
+                            result_json, started_at, finished_at, created_at
+                        ) VALUES (?, ?, 'unknown', NULL, 'lease_recovery', ?, '{}', ?, ?, ?)
+                        """,
+                        (
+                            int(stale_row["id"]), attempt_number,
+                            "claim_lease_expired_requires_manual_resolution",
+                            stale_row["started_at"], timestamp, timestamp,
+                        ),
+                    )
+            self._refresh_native_favorite_batch_counts(
+                connection, favorite_batch_id, timestamp=timestamp,
+            )
+            counts = connection.execute(
+                """
+                SELECT
+                    SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS running,
+                    SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending,
+                    SUM(CASE WHEN status = 'unknown' THEN 1 ELSE 0 END) AS unknown_count
+                FROM native_favorite_tasks WHERE batch_id = ?
+                """,
+                (favorite_batch_id,),
+            ).fetchone()
+        running = int(counts["running"] or 0)
+        return {
+            "batch_id": favorite_batch_id,
+            "recovered_unknown": recovered,
+            "running": running,
+            "pending": int(counts["pending"] or 0),
+            "unknown": int(counts["unknown_count"] or 0),
+            "can_resume_pending": running == 0,
+        }
+
     def complete_native_favorite_task(
         self,
         task_id: int,
