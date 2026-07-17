@@ -29,6 +29,10 @@
         reason: "trusted_platform_identity_missing",
       };
     }
+    const initialRestriction = detectPlatformRestriction();
+    if (initialRestriction) {
+      return { status: "failed", attempted: false, reason: initialRestriction };
+    }
     const matches = Array.from(document.querySelectorAll(`[${identityAttribute}]`)).filter(
       (node) => String(node.getAttribute?.(identityAttribute) || "").trim() === identityValue,
     );
@@ -60,6 +64,8 @@
       }
 
       const ready = await waitForValue(() => {
+        const restriction = detectPlatformRestriction();
+        if (restriction) return { restriction };
         if (selectionGuard.changed()) return { selectionChanged: true };
         const detailRoot = document.querySelector(DETAIL_SELECTOR);
         const favoriteControl = findFavoriteControl(detailRoot);
@@ -69,6 +75,9 @@
       }, DETAIL_TIMEOUT_MS);
       if (selectionGuard.changed()) {
         return { status: "failed", attempted: false, reason: "candidate_selection_changed" };
+      }
+      if (ready?.restriction) {
+        return { status: "failed", attempted: false, reason: ready.restriction };
       }
       if (!ready) {
         return { status: "failed", attempted: false, reason: "candidate_detail_not_ready" };
@@ -80,20 +89,35 @@
           reason: "favorite_state_active_pending_management_verification",
         };
       }
+      const preWriteRestriction = detectPlatformRestriction();
+      if (preWriteRestriction) {
+        return { status: "failed", attempted: false, reason: preWriteRestriction };
+      }
 
       try {
         ready.favoriteControl.click();
       } catch (_error) {
         return { status: "unknown", attempted: true, reason: "favorite_control_click_uncertain" };
       }
-      const confirmed = await waitForValue(
-        () => isFavorited(ready.detailRoot),
+      const confirmation = await waitForValue(
+        () => {
+          const restriction = detectPlatformRestriction();
+          if (restriction) return { restriction };
+          return isFavorited(ready.detailRoot) ? { favorited: true } : null;
+        },
         FAVORITE_TIMEOUT_MS,
       );
       if (selectionGuard.changed()) {
         return { status: "unknown", attempted: true, reason: "candidate_selection_changed_after_attempt" };
       }
-      if (!confirmed) {
+      if (confirmation?.restriction) {
+        return {
+          status: "unknown",
+          attempted: true,
+          reason: "platform_restriction_after_favorite_attempt",
+        };
+      }
+      if (!confirmation?.favorited) {
         return { status: "unknown", attempted: true, reason: "favorite_state_not_confirmed" };
       }
       return {
@@ -105,6 +129,48 @@
       detailTracker.dispose();
       selectionGuard.dispose();
     }
+  }
+
+  function detectPlatformRestriction() {
+    const directSelectors = [
+      "iframe[src*='captcha']",
+      "iframe[src*='verify']",
+      "[class*='captcha']",
+      "[class*='geetest']",
+    ];
+    if (directSelectors.some((selector) =>
+      Array.from(document.querySelectorAll?.(selector) || []).some(isVisible),
+    )) {
+      return "platform_captcha_or_security_verification";
+    }
+    const surfaces = Array.from(document.querySelectorAll?.(
+      "[role='dialog'], .dialog-wrap, .boss-dialog, .toast, .message, .warning-dialog",
+    ) || []).filter(isVisible);
+    const text = surfaces.map((node) => String(node.textContent || "")).join(" ");
+    if (/验证码|安全验证|滑块|人机验证/.test(text)) {
+      return "platform_captcha_or_security_verification";
+    }
+    if (/重新登录|登录失效|请先登录|账号已退出/.test(text)) {
+      return "platform_login_required";
+    }
+    if (/操作频繁|频繁操作|稍后再试|账号异常|风险|风控|访问受限/.test(text)) {
+      return "platform_rate_or_risk_restriction";
+    }
+    if (/无权限|权限不足|没有权限|禁止操作/.test(text)) {
+      return "platform_permission_denied";
+    }
+    return "";
+  }
+
+  function isVisible(node) {
+    if (!node) return false;
+    const style = typeof globalScope.getComputedStyle === "function"
+      ? globalScope.getComputedStyle(node)
+      : null;
+    if (style && (style.display === "none" || style.visibility === "hidden" || style.opacity === "0")) {
+      return false;
+    }
+    return typeof node.getClientRects !== "function" || node.getClientRects().length > 0;
   }
 
   function findFavoriteControl(detailRoot) {

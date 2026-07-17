@@ -179,9 +179,9 @@ function testBossIdentityEvidenceKeepsIdentifiersAndDropsSecrets() {
 function loadBossNativeFavoriteAdapter(identityNodes = [], documentOverrides = {}, contextOverrides = {}) {
   let queryCount = 0;
   const document = {
-    querySelectorAll() {
+    querySelectorAll(selector) {
       queryCount += 1;
-      return identityNodes;
+      return String(selector || "").startsWith("[data-") ? identityNodes : [];
     },
     querySelector() {
       return null;
@@ -489,6 +489,44 @@ ${fs.readFileSync(path.join(EXTENSION_DIR, "favorite_management_verifier.js"), "
   return context.__bossFavoriteManagementVerifier;
 }
 
+async function testNativeFavoriteRefusesWriteWhenPlatformRestrictionIsVisible() {
+  let candidateClickCount = 0;
+  const candidate = bossIdentityNode("data-geekid", "trusted-geek-1", () => {
+    candidateClickCount += 1;
+  });
+  const restriction = {
+    textContent: "操作频繁，请稍后再试",
+    getClientRects() { return [{}]; },
+  };
+  const { adapter } = loadBossNativeFavoriteAdapter(
+    [candidate],
+    {
+      querySelectorAll(selector) {
+        if (String(selector).startsWith("[data-")) return [candidate];
+        if (String(selector).includes("[role='dialog']")) return [restriction];
+        return [];
+      },
+    },
+    {
+      getComputedStyle() {
+        return { display: "block", visibility: "visible", opacity: "1" };
+      },
+    },
+  );
+
+  const result = await adapter.favoriteOne({
+    platform: "boss",
+    platform_identity: { attribute: "data-geekid", value: "trusted-geek-1" },
+  });
+
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(result)), {
+    status: "failed",
+    attempted: false,
+    reason: "platform_rate_or_risk_restriction",
+  });
+  assert.strictEqual(candidateClickCount, 0);
+}
+
 async function testNativeFavoriteWorkerRejectsWrongSourceTabBeforeAnyWrite() {
   const { api } = loadServiceWorker();
   const result = await api.executeNativeFavoriteTask(
@@ -498,12 +536,14 @@ async function testNativeFavoriteWorkerRejectsWrongSourceTabBeforeAnyWrite() {
       platform_identity: { attribute: "data-geekid", value: "trusted-71" },
       source_page_context: {
         tab_id: 91,
+        document_id: "source-doc-91",
         platform: "boss",
         source_url: "https://www.zhipin.com/web/chat/recommend",
       },
     },
     {
       frameId: 0,
+      documentId: "source-doc-91",
       tab: { id: 92, url: "https://www.zhipin.com/web/chat/recommend" },
     },
   );
@@ -572,12 +612,14 @@ async function testNativeFavoriteVerifyOnlyPreflightNeverExecutesSourceAdapter()
       platform_identity: { attribute: "data-geekid", value: "trusted-71" },
       source_page_context: {
         tab_id: 91,
+        document_id: "source-doc-91",
         platform: "boss",
         source_url: "https://www.zhipin.com/web/chat/recommend",
       },
     },
     {
       frameId: 0,
+      documentId: "source-doc-91",
       tab: { id: 91, url: "https://www.zhipin.com/web/chat/recommend" },
     },
   );
@@ -1124,6 +1166,7 @@ function testCollectionSupportsBossAndLiepinAdapters() {
   assert(popup.includes("target: { tabId, allFrames: true }"));
   assert(popup.includes("document_id: inspection.documentId"));
   assert(popup.includes("source_tab_id: sourceTabId"));
+  assert(popup.includes("source_document_id: merged.sourceDocumentId"));
   assert(popup.includes("自动收藏评级"));
   assert(popup.includes("favorite_interval_seconds"));
   assert(popup.includes("getActiveSupportedTab"));
@@ -1174,10 +1217,12 @@ function testNativeFavoriteBatchHasDedicatedRunnerAndManagementVerification() {
   const service = fs.readFileSync(path.join(EXTENSION_DIR, "service_worker.js"), "utf8");
   const manifest = JSON.parse(fs.readFileSync(path.join(EXTENSION_DIR, "manifest.json"), "utf8"));
   assert(html.includes('id="favoriteBatchId"'));
+  assert(html.includes('id="favoriteSection"'));
   assert(html.includes('id="startFavoriteBatch"'));
   assert(html.includes('id="stopFavoriteBatch"'));
   assert(html.includes('id="favoriteStatus"'));
   assert(popup.includes("startNativeFavoriteBatch"));
+  assert(popup.includes('automationAutoButton.insertAdjacentElement("afterend", favoriteSection)'));
   assert(popup.includes('files: ["favorite_runner.js"]'));
   assert(popup.includes('type: "boss_native_favorite_command"'));
   assert(service.includes('importScripts("favorite_execution.js")'));
@@ -1325,6 +1370,7 @@ async function main() {
   await testFavoriteManagementVerifierRejectsObservationsFromAnotherInspection();
   await testFavoriteManagementVerifierRejectsMixedDocumentEnvelope();
   await testNativeFavoriteUsesUniqueCausalIdentityJoinAndAwaitsManagementVerification();
+  await testNativeFavoriteRefusesWriteWhenPlatformRestrictionIsVisible();
   await testNativeFavoriteDoesNotUseOldControlAfterUnrelatedDetailMutation();
   await testNativeFavoriteStopsForDeepTrustedInterveningSelection();
   await testNativeFavoriteTreatsThrowDuringFavoriteClickAsUnknown();

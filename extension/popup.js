@@ -66,7 +66,12 @@ const applyPairingCodeButton = document.getElementById("applyPairingCode");
 const startFavoriteBatchButton = document.getElementById("startFavoriteBatch");
 const stopFavoriteBatchButton = document.getElementById("stopFavoriteBatch");
 const favoriteStatusEl = document.getElementById("favoriteStatus");
+const favoriteSection = document.getElementById("favoriteSection");
 let batchStatusTimer = null;
+
+if (favoriteSection) {
+  automationAutoButton.insertAdjacentElement("afterend", favoriteSection);
+}
 
 automationAutoButton.addEventListener("click", () => runAutomation());
 applyPairingCodeButton.addEventListener("click", () => applyPairingCodeAndTest());
@@ -680,6 +685,9 @@ function mergeFrameResults(frameResults) {
     framesWithCards,
     roundsCompleted: maxRoundsCompleted,
     platform: platforms.size === 1 ? Array.from(platforms)[0] : "",
+    sourceDocumentId: String(
+      (frameResults || []).find((frameResult) => Number(frameResult?.frameId) === 0)?.documentId || "",
+    ),
     debugSummary: debugLines.join(" || "),
   };
 }
@@ -706,6 +714,7 @@ async function importCards(settings, sourceUrl, merged, automationRequested = fa
           unique_cards: merged.cards.length,
           automation_requested: automationRequested,
           source_tab_id: sourceTabId,
+          source_document_id: merged.sourceDocumentId || "",
           debug: merged.debugSummary,
         },
       }),

@@ -82,6 +82,7 @@ class CardImportService:
                         "platform": str(meta.get("platform") or "").strip().lower(),
                         "source_url": source_url,
                         "tab_id": int(meta.get("source_tab_id") or 0),
+                        "document_id": str(meta.get("source_document_id") or "").strip(),
                     },
                 }
             )

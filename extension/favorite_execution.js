@@ -9,13 +9,16 @@
     "/web/geek/recommend",
   ]);
 
-  function validateSourceContext(task, tab) {
+  function validateSourceContext(task, tab, documentId) {
     const context = task?.source_page_context;
     if (!context || String(context.platform || "").toLowerCase() !== "boss") {
       return { ok: false, reason: "source_page_context_platform_mismatch" };
     }
     if (Number(context.tab_id) !== Number(tab?.id)) {
       return { ok: false, reason: "source_page_context_tab_mismatch" };
+    }
+    if (!context.document_id || String(context.document_id) !== String(documentId || "")) {
+      return { ok: false, reason: "source_page_context_document_mismatch" };
     }
     if (!isBossRecommendationUrl(tab?.url) || !isBossRecommendationUrl(context.source_url)) {
       return { ok: false, reason: "source_page_context_page_mismatch" };
@@ -118,7 +121,7 @@
   function normalizeRecommendationUrl(value) {
     try {
       const url = new URL(String(value || ""));
-      return `${url.hostname.toLowerCase()}${url.pathname.replace(/\/$/, "")}`;
+      return `${url.protocol}//${url.host.toLowerCase()}${url.pathname.replace(/\/$/, "")}${url.search}${url.hash}`;
     } catch (_error) {
       return "";
     }

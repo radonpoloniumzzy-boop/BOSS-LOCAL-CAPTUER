@@ -52,6 +52,7 @@ class CardImportServiceTest(unittest.TestCase):
                     "automation_requested": True,
                     "platform": "boss",
                     "source_tab_id": 91,
+                    "source_document_id": "source-doc-91",
                 },
             }
         )
@@ -67,6 +68,7 @@ class CardImportServiceTest(unittest.TestCase):
                 "platform": "boss",
                 "source_url": "https://www.zhipin.com/web/geek/recommend",
                 "tab_id": 91,
+                "document_id": "source-doc-91",
             },
         )
         self.assertEqual(len(self.repository.list_candidates()), 1)

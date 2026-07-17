@@ -16,11 +16,19 @@
     message: "Ready.",
     startedAt: "",
     updatedAt: "",
+    requiresManualResolution: false,
   };
+  const ready = reconcilePersistedRunnerState();
 
   async function start(settings) {
+    await ready;
     if (state.running) {
       throw new Error("A Native Favorite batch is already running in this source tab.");
+    }
+    if (state.requiresManualResolution) {
+      throw new Error(
+        "The previous source document was interrupted. Native Favorite requires manual resolution before another batch can start.",
+      );
     }
     const batchId = Number(settings?.batchId || 0);
     if (!Number.isInteger(batchId) || batchId <= 0) {
@@ -43,6 +51,7 @@
       currentTaskId: null,
       message: "Native Favorite batch started.",
       startedAt: new Date().toISOString(),
+      requiresManualResolution: false,
     });
     await persistStatus();
 
@@ -78,6 +87,7 @@
             reason: "native_favorite_executor_unavailable",
             method: "extension_execution_bridge",
             stop_batch: true,
+            retryable: true,
             error: error?.message || String(error),
           };
         }
@@ -100,6 +110,21 @@
         state.currentTaskId = null;
         state.message = `Task #${task.task_id}: ${outcome.status} (${outcome.reason || "no reason"}).`;
         await persistStatus();
+
+        const retryAvailable =
+          outcome.status === "failed" &&
+          outcome.retryable === true &&
+          !state.stopRequested &&
+          Number(task.attempt_count || 0) + 1 < Number(task.max_attempts || 1);
+        if (retryAvailable) {
+          await post(apiBase, apiToken, "/api/favorites/retry", {
+            task_id: Number(task.task_id),
+          });
+          state.message += " Explicit failure queued for its single retry.";
+          await persistStatus();
+          await delay(clampInterval(task?.config_snapshot?.favorite_interval_seconds) * 1000);
+          continue;
+        }
 
         if (
           outcome.stop_batch ||
@@ -132,6 +157,11 @@
   }
 
   function stop() {
+    if (state.requiresManualResolution) {
+      state.message = "Interrupted Native Favorite state still requires manual resolution.";
+      void persistStatus();
+      return snapshot();
+    }
     state.stopRequested = true;
     state.message = "Stop requested; the current action will finish before stopping.";
     void persistStatus();
@@ -198,6 +228,29 @@
     await chrome.storage.local.set({ [STATUS_KEY]: snapshot() });
   }
 
+  async function reconcilePersistedRunnerState() {
+    const stored = await chrome.storage.local.get({ [STATUS_KEY]: null });
+    const previous = stored?.[STATUS_KEY];
+    if (!previous?.running) {
+      return snapshot();
+    }
+    Object.assign(state, {
+      batchId: Number(previous.batchId || 0) || null,
+      phase: "interrupted",
+      processed: Number(previous.processed || 0),
+      succeeded: Number(previous.succeeded || 0),
+      failed: Number(previous.failed || 0),
+      currentTaskId: previous.currentTaskId || null,
+      running: false,
+      stopRequested: true,
+      requiresManualResolution: true,
+      startedAt: String(previous.startedAt || ""),
+      message: "The source document was destroyed while Native Favorite was running. The current claim must resolve to unknown before any restart.",
+    });
+    await persistStatus();
+    return snapshot();
+  }
+
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message?.type !== "boss_native_favorite_command") {
       return false;
@@ -216,5 +269,5 @@
     return false;
   });
 
-  globalScope.__bossNativeFavoriteRunner = Object.freeze({ start, stop, getStatus });
+  globalScope.__bossNativeFavoriteRunner = Object.freeze({ start, stop, getStatus, ready });
 })(globalThis);

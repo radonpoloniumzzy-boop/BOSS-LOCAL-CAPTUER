@@ -109,6 +109,7 @@ class NativeFavoriteQueuePublisherTest(unittest.TestCase):
             "source_page_context": {
                 "capture_batch_id": capture_batch_id,
                 "tab_id": 91,
+                "document_id": "source-doc-91",
                 "platform": "boss",
                 "source_url": "https://www.zhipin.com/web/geek/recommend",
             },
@@ -220,12 +221,14 @@ class NativeFavoriteQueuePublisherTest(unittest.TestCase):
             {
                 "capture_batch_id": int(imported["batch_id"]),
                 "tab_id": 91,
+                "document_id": "source-doc-91",
                 "platform": "liepin",
                 "source_url": "https://www.zhipin.com/web/geek/recommend",
             },
             {
                 "capture_batch_id": int(imported["batch_id"]),
                 "tab_id": 91,
+                "document_id": "source-doc-91",
                 "platform": "boss",
                 "source_url": "https://www.zhipin.com/web/geek/friend",
             },

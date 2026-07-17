@@ -36,15 +36,18 @@ function favoriteTask(overrides = {}) {
     platform_identity: { attribute: "data-geekid", value: "trusted-71" },
     source_page_context: {
       tab_id: 91,
+      document_id: "source-doc-91",
       platform: "boss",
       source_url: "https://www.zhipin.com/web/chat/recommend",
     },
     config_snapshot: { favorite_interval_seconds: 3 },
+    attempt_count: 0,
+    max_attempts: 2,
     ...overrides,
   };
 }
 
-function loadRunner({ claims, executionResults }) {
+function loadRunner({ claims, executionResults, initialStatus = null }) {
   const requests = [];
   const stored = [];
   const context = {
@@ -70,11 +73,17 @@ function loadRunner({ claims, executionResults }) {
               result: { task_id: message.payload.task_id, status: message.payload.status },
             };
           }
+          if (message.path === "/api/favorites/retry") {
+            return { ok: true, result: { task_id: message.payload.task_id, status: "pending" } };
+          }
           throw new Error(`Unexpected path: ${message.path}`);
         },
       },
       storage: {
         local: {
+          async get() {
+            return { boss_native_favorite_status: initialStatus };
+          },
           async set(value) { stored.push(value); },
         },
       },
@@ -89,20 +98,49 @@ function loadRunner({ claims, executionResults }) {
   return { runner: context.__bossNativeFavoriteRunner, requests, stored };
 }
 
+async function testDestroyedSourceDocumentIsReconciledAsInterruptedAndCannotRestart() {
+  const { runner, stored } = loadRunner({
+    claims: [],
+    executionResults: [],
+    initialStatus: {
+      running: true,
+      batchId: 19,
+      phase: "running",
+      processed: 2,
+      currentTaskId: 73,
+      message: "Processing",
+    },
+  });
+
+  await runner.ready;
+  assert.strictEqual(runner.getStatus().phase, "interrupted");
+  assert.strictEqual(runner.getStatus().running, false);
+  assert.strictEqual(runner.getStatus().requiresManualResolution, true);
+  await assert.rejects(
+    () => runner.start({
+      batchId: 19,
+      apiBase: "http://127.0.0.1:17863",
+      apiToken: "local-token",
+    }),
+    /manual resolution/i,
+  );
+  assert(stored.some((entry) => entry.boss_native_favorite_status?.phase === "interrupted"));
+}
+
 async function testExecutionContractRejectsWrongContextAndAmbiguousFrames() {
   const contract = loadExecutionContract();
   assert.deepStrictEqual(
     { ...contract.validateSourceContext(favoriteTask(), {
       id: 92,
       url: "https://www.zhipin.com/web/chat/recommend",
-    }) },
+    }, "source-doc-91") },
     { ok: false, reason: "source_page_context_tab_mismatch" },
   );
   assert.deepStrictEqual(
     { ...contract.validateSourceContext(favoriteTask(), {
       id: 91,
       url: "https://www.zhipin.com/web/geek/recommend",
-    }) },
+    }, "source-doc-91") },
     { ok: false, reason: "source_page_context_url_mismatch" },
   );
   assert.deepStrictEqual(
@@ -224,11 +262,53 @@ async function testManualStopFinishesCurrentTaskWithoutClaimingAnother() {
   assert.strictEqual(requests.filter((request) => request.url.endsWith("/claim")).length, 1);
 }
 
+async function testExplicitRetryableFailureRetriesOnceButUnknownNeverRetries() {
+  const firstAttempt = favoriteTask();
+  const secondAttempt = favoriteTask({ attempt_count: 1 });
+  const { runner, requests } = loadRunner({
+    claims: [firstAttempt, secondAttempt, null],
+    executionResults: [
+      {
+        status: "failed",
+        attempted: false,
+        reason: "candidate_detail_not_ready",
+        retryable: true,
+      },
+      {
+        status: "success",
+        attempted: true,
+        reason: "favorite_management_identity_confirmed",
+      },
+    ],
+  });
+
+  const finalStatus = await runner.start({
+    batchId: 19,
+    apiBase: "http://127.0.0.1:17863",
+    apiToken: "local-token",
+  });
+
+  assert.strictEqual(finalStatus.phase, "completed");
+  assert.deepStrictEqual(
+    requests.map((request) => request.url),
+    [
+      "/api/favorites/claim",
+      "/api/favorites/result",
+      "/api/favorites/retry",
+      "/api/favorites/claim",
+      "/api/favorites/result",
+      "/api/favorites/claim",
+    ],
+  );
+}
+
 async function runNativeFavoriteRunnerTests() {
   await testExecutionContractRejectsWrongContextAndAmbiguousFrames();
+  await testDestroyedSourceDocumentIsReconciledAsInterruptedAndCannotRestart();
   await testRunnerClaimsReportsAndFinishesSerially();
   await testRunnerStopsAfterUnknownWithoutClaimingAnotherTask();
   await testManualStopFinishesCurrentTaskWithoutClaimingAnother();
+  await testExplicitRetryableFailureRetriesOnceButUnknownNeverRetries();
 }
 
 module.exports = { runNativeFavoriteRunnerTests };

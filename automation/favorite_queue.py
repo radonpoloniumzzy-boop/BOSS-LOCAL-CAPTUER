@@ -42,6 +42,8 @@ class NativeFavoriteQueuePublisher:
             raise ValueError("Source Page Context does not match the Capture Batch")
         if int(source_context.get("tab_id") or 0) <= 0:
             raise ValueError("Source Page Context is missing the Chrome tab")
+        if not str(source_context.get("document_id") or "").strip():
+            raise ValueError("Source Page Context is missing the Chrome document")
         if str(source_context.get("platform") or "").strip().lower() != "boss":
             raise ValueError("Source Page Context does not identify BOSS")
         source_url = str(source_context.get("source_url") or "").strip()

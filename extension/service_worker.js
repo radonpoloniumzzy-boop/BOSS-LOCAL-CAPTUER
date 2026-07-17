@@ -152,7 +152,7 @@ async function executeNativeFavoriteTask(task, sender) {
     return { ok: false, error: "Native Favorite runner must execute from the source top frame." };
   }
   const sourceTab = sender?.tab;
-  const contextValidation = contract.validateSourceContext(task, sourceTab);
+  const contextValidation = contract.validateSourceContext(task, sourceTab, sender?.documentId);
   if (!contextValidation.ok) {
     return {
       ok: true,
@@ -246,7 +246,11 @@ async function executeNativeFavoriteTask(task, sender) {
   if (action.status === "failed") {
     return {
       ok: true,
-      result: { ...action, method: "native_detail_control" },
+      result: {
+        ...action,
+        method: "native_detail_control",
+        retryable: isRetryableNativeFavoriteFailure(action.reason),
+      },
     };
   }
 
@@ -265,6 +269,13 @@ async function executeNativeFavoriteTask(task, sender) {
       source_action_reason: action.reason,
     },
   };
+}
+
+function isRetryableNativeFavoriteFailure(reason) {
+  return new Set([
+    "candidate_navigation_failed",
+    "candidate_detail_not_ready",
+  ]).has(String(reason || ""));
 }
 
 function isConfirmedFavoriteManagementContext(result) {
