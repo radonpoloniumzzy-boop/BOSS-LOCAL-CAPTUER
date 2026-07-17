@@ -131,11 +131,12 @@ API keys entered in the AI page are kept only in process memory. They are not wr
 1. Configure the role's Favorite Eligibility Policy in `AI Screen`.
 2. In `Automation Flow`, choose `Screen and Favorite`, then run extension `AUTO` collection on the Boss recommendation page.
 3. Wait for Initial Screening to finish and note the Native Favorite batch ID shown by the desktop app.
-4. Keep that original recommendation tab open and open a second Boss tab at `Interaction -> Favorite Talent`.
-5. From the original recommendation tab, enter the batch ID in the extension and start the single favorite batch.
-6. The extension processes one candidate at a time and pauses before the next candidate after unknown, failure, Source Page Context mismatch, or a manual stop request.
+4. On the recommendation page, enter the batch ID and start the source favorite phase. BOSS does not need—and may not allow—a second business page.
+5. When the source phase reports `awaiting_verification`, navigate the same BOSS page to `Interaction -> Favorite Talent`.
+6. Open the extension and click `Verify This Favorite Batch`; this phase is read-only and never repeats a favorite click.
+7. The extension pauses safely on an inconclusive scan, failure, Source Page Context mismatch, or a manual stop request.
 
-Use a fresh batch collected with extension version 0.5.1 or newer so the locked Source Page Context includes both the top Chrome document and the candidate-bearing recommendation frame. Native Favorite success requires exact Platform Identity confirmation in the Boss favorite-management experience. A safe explicit failure may retry once; unknown and platform-restriction outcomes never auto-retry. After an interruption, the recovery control waits for the lease to expire and unlocks pending tasks only when the complete original Source Page Context is still exact; after a real page reload, keep the old batch locked and collect a fresh batch. This version does not refresh the recommendation page, advance to another Capture Batch, contact candidates, or cancel favorites.
+Use a fresh batch collected with extension version 0.6.0 or newer. The source phase locks the top Chrome document and candidate-bearing frame, then records an active favorite control as `verification_pending`, not final success. Final success requires a later exact Platform Identity match after navigating the same BOSS page to Favorite Talent. An inconclusive management scan remains pending for later verification and never repeats the source favorite click. This version does not refresh the recommendation page, advance to another Capture Batch, contact candidates, or cancel favorites.
 
 AI ratings are assistive ranking signals and require human review. The app rejects prompts that use age, sex, marriage/childbearing, health/disability, photos, appearance, or image/temperament as automated employment screening criteria.
 
@@ -151,6 +152,8 @@ The desktop app starts a local HTTP server for the extension:
 - `POST /api/favorites/claim`
 - `POST /api/favorites/result`
 - `POST /api/favorites/retry`
+- `POST /api/favorites/verification/claim`
+- `POST /api/favorites/verification/result`
 
 Default endpoint:
 

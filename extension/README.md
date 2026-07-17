@@ -38,12 +38,12 @@ Single-batch Native Favorite usage:
 
 1. In the desktop app, configure a role's Favorite Eligibility Policy and choose `Screen and Favorite`
 2. Run extension `AUTO` collection and wait for the desktop status to show a Native Favorite batch ID
-3. Keep the original Boss recommendation tab open
-4. Open a second Boss tab at `Interaction -> Favorite Talent` and keep that favorite subview selected
-5. Return to the original recommendation tab, enter the batch ID in the extension, and click `Run Single Favorite Batch`
-6. The source-page runner claims one task at a time, verifies the exact Platform Identity in the dedicated favorite-management tab, and pauses on unknown, failure, context mismatch, or a manual stop request
+3. Keep the original Boss recommendation page open, enter the batch ID, and run the source favorite phase
+4. The source runner serially clicks exact-identity favorite controls; an active control becomes `verification_pending`, never final success
+5. After the source phase finishes, navigate the same BOSS page to `Interaction -> Favorite Talent`
+6. Open the extension and click `Verify This Favorite Batch`; the read-only management phase finalizes exact matches and never repeats source favorite clicks
 
-Only fresh batches collected with extension version 0.5.1 or newer contain both required Chrome identities: the top document and the candidate-bearing recommendation frame. The first version never refreshes the recommendation page and never advances to another Capture Batch. Closing the popup does not stop the page runner; use `Stop Favorite` to stop before the next candidate. A safe explicit failure may retry once; unknown, platform restriction, identity conflict, source-document change, or management-context loss never auto-retries. After an interruption, recovery waits for the claim lease to expire and unlocks pending tasks only if the complete original Source Page Context is still exact. A real page reload requires a fresh capture batch; it never consumes the old pending tasks.
+Only fresh batches collected with extension version 0.6.0 or newer support the single-page two-phase workflow. The source phase never requires a simultaneous management tab. Closing the popup does not stop the runner; use `Stop Favorite` to stop before the next item. Unknown source writes never auto-retry. Inconclusive read-only management scans return to `verification_pending`, so the user may load or scroll the Favorite Talent list and verify again without another favorite click.
 
 Single chat usage:
 

@@ -357,6 +357,7 @@ class MigrationTest(unittest.TestCase):
             self.assertIn("identity_attribute", task_columns)
             self.assertIn("identity_value", task_columns)
             self.assertIn("write_policy", task_columns)
+            self.assertIn("source_action_attempted", task_columns)
             self.assertIn("favorite_eligible_ratings_json", profile_columns)
             self.assertIn("automation_snapshot_json", run_columns)
             self.assertIn("max_actions", favorite_batch_columns)

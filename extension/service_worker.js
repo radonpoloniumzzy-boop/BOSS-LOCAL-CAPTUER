@@ -45,7 +45,6 @@ const DEFAULT_BATCH_STATUS = {
   recentEvents: [],
 };
 const STOP_GUARD_MS = 10 * 60 * 1000;
-const MAX_MANAGEMENT_VERIFICATION_ATTEMPTS = 8;
 const stoppedBatchTabs = new Map();
 
 chrome.runtime.onInstalled.addListener(() => {
@@ -98,6 +97,8 @@ async function handleMessage(message, sender) {
       return trustedClick(message.payload || {}, sender);
     case "native_favorite_execute":
       return executeNativeFavoriteTask(message.task || {}, sender);
+    case "native_favorite_verify":
+      return verifyNativeFavoriteTask(message.task || {}, sender);
     case "native_favorite_api":
       return proxyNativeFavoriteApi(message);
     case "native_favorite_validate_source_context":
@@ -113,6 +114,8 @@ async function proxyNativeFavoriteApi(message) {
     "/api/favorites/result",
     "/api/favorites/retry",
     "/api/favorites/reconcile",
+    "/api/favorites/verification/claim",
+    "/api/favorites/verification/result",
   ]);
   const path = String(message?.path || "");
   if (!allowedPaths.has(path)) {
@@ -169,58 +172,16 @@ async function executeNativeFavoriteTask(task, sender) {
     };
   }
 
-  const preflight = await inspectFavoriteManagementTabs(
-    task.platform_identity,
-    false,
-    sourceTab.id,
-  );
-  const preflightResult = contract.aggregateManagementClassifications(preflight, false);
-  if (preflightResult.status === "already_favorited") {
-    return {
-      ok: true,
-      result: {
-        ...preflightResult,
-        method: "management_identity_preflight",
-      },
-    };
-  }
-  if (preflightResult.reason === "favorite_management_identity_seen_in_multiple_tabs") {
-    return {
-      ok: true,
-      result: {
-        ...preflightResult,
-        method: "management_context_preflight",
-      },
-    };
-  }
-  const managementTabIds = preflight
-    .filter((item) => isConfirmedFavoriteManagementContext(item.result))
-    .map((item) => item.tabId);
-  if (managementTabIds.length === 0) {
-    return {
-      ok: true,
-      result: nativeFavoriteFailure(
-        false,
-        "favorite_management_tab_not_ready",
-        "management_context_preflight",
-      ),
-    };
-  }
-
   const writePolicy = String(task?.write_policy || "");
   if (writePolicy === "verify_only") {
-    const verification = await verifyFavoriteManagementWithRefresh(
-      task.platform_identity,
-      false,
-      sourceTab.id,
-      managementTabIds,
-      preflight,
-    );
     return {
       ok: true,
       result: {
-        ...verification,
-        method: "management_identity_verify_only",
+        status: "verification_pending",
+        attempted: false,
+        reason: "prior_verified_native_favorite_requires_management_recheck",
+        method: "source_phase_deferred_verification",
+        stop_batch: false,
       },
     };
   }
@@ -324,20 +285,23 @@ async function executeNativeFavoriteTask(task, sender) {
       },
     };
   }
-
-  const verification = await verifyFavoriteManagementWithRefresh(
-    task.platform_identity,
-    action.attempted,
-    sourceTab.id,
-    managementTabIds,
-    preflight,
-  );
+  if (action.reason === "favorite_state_active_pending_management_verification") {
+    return {
+      ok: true,
+      result: {
+        status: "verification_pending",
+        attempted: action.attempted,
+        reason: action.reason,
+        method: "native_detail_control",
+        stop_batch: false,
+      },
+    };
+  }
   return {
     ok: true,
     result: {
-      ...verification,
-      method: "native_detail_control+management_identity",
-      source_action_reason: action.reason,
+      ...action,
+      method: "native_detail_control",
     },
   };
 }
@@ -363,58 +327,46 @@ async function validateNativeFavoriteSourceContext(sourcePageContext, sender) {
   };
 }
 
+async function verifyNativeFavoriteTask(task, sender) {
+  const contract = globalThis.__bossNativeFavoriteExecutionContract;
+  if (!contract || Number(sender?.frameId || 0) !== 0) {
+    return { ok: false, error: "Native Favorite verification must run from the top frame." };
+  }
+  const tab = sender?.tab;
+  if (!tab?.id || !isBossTabUrl(tab.url) || String(task?.platform || "").toLowerCase() !== "boss") {
+    return {
+      ok: true,
+      result: nativeFavoriteFailure(false, "favorite_management_context_required", "management_context_guard"),
+    };
+  }
+  const attempted = task?.source_action_attempted === true;
+  const classifications = await inspectFavoriteManagementTabs(
+    task.platform_identity,
+    attempted,
+    -1,
+    new Set([tab.id]),
+  );
+  const verification = contract.aggregateManagementClassifications(classifications, attempted);
+  const safeVerification = verification.status === "failed" && ![
+    "favorite_management_identity_seen_in_multiple_tabs",
+    "multiple_favorite_management_identity_matches",
+  ].includes(String(verification.reason || ""))
+    ? { ...verification, status: "unknown", stop_batch: true }
+    : verification;
+  return {
+    ok: true,
+    result: {
+      ...safeVerification,
+      method: "management_identity_verification",
+    },
+  };
+}
+
 function isRetryableNativeFavoriteFailure(reason) {
   return new Set([
     "candidate_navigation_failed",
     "candidate_detail_not_ready",
   ]).has(String(reason || ""));
-}
-
-function isConfirmedFavoriteManagementContext(result) {
-  return (
-    result?.status === "success" ||
-    result?.status === "already_favorited" ||
-    result?.reason === "favorite_management_identity_not_visible" ||
-    result?.reason === "multiple_favorite_management_identity_matches"
-  );
-}
-
-async function verifyFavoriteManagementWithRefresh(
-  platformIdentity,
-  attempted,
-  sourceTabId,
-  managementTabIds,
-  initialClassifications,
-) {
-  const contract = globalThis.__bossNativeFavoriteExecutionContract;
-  let result = contract.aggregateManagementClassifications(
-    initialClassifications,
-    attempted,
-  );
-  if (result.status === "success" || result.status === "already_favorited") {
-    return result;
-  }
-  await Promise.all(
-    managementTabIds.map((tabId) => chrome.tabs.reload(tabId).catch(() => null)),
-  );
-  for (let attempt = 0; attempt < MAX_MANAGEMENT_VERIFICATION_ATTEMPTS; attempt += 1) {
-    await delay(attempt === 0 ? 1200 : 750);
-    const refreshed = await inspectFavoriteManagementTabs(
-      platformIdentity,
-      attempted,
-      sourceTabId,
-      new Set(managementTabIds),
-    );
-    result = contract.aggregateManagementClassifications(refreshed, attempted);
-    if (
-      result.status === "success" ||
-      result.status === "already_favorited" ||
-      result.reason === "favorite_management_identity_seen_in_multiple_tabs"
-    ) {
-      break;
-    }
-  }
-  return result;
 }
 
 async function inspectFavoriteManagementTabs(

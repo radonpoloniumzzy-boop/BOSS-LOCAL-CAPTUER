@@ -52,7 +52,14 @@ function favoriteTask(overrides = {}) {
   };
 }
 
-function loadRunner({ claims, executionResults, initialStatus = null, sourceValidationResult = { ok: true } }) {
+function loadRunner({
+  claims,
+  executionResults,
+  verificationClaims = [],
+  verificationResults = [],
+  initialStatus = null,
+  sourceValidationResult = { ok: true },
+}) {
   const requests = [];
   const stored = [];
   const context = {
@@ -66,6 +73,9 @@ function loadRunner({ claims, executionResults, initialStatus = null, sourceVali
         async sendMessage(message) {
           if (message.type === "native_favorite_execute") {
             return { ok: true, result: await executionResults.shift() };
+          }
+          if (message.type === "native_favorite_verify") {
+            return { ok: true, result: await verificationResults.shift() };
           }
           if (message.type === "native_favorite_validate_source_context") {
             return { ok: true, result: sourceValidationResult };
@@ -93,6 +103,12 @@ function loadRunner({ claims, executionResults, initialStatus = null, sourceVali
               can_resume_pending: true,
               source_page_context: favoriteTask().source_page_context,
             } };
+          }
+          if (message.path === "/api/favorites/verification/claim") {
+            return { ok: true, result: verificationClaims.shift() ?? null };
+          }
+          if (message.path === "/api/favorites/verification/result") {
+            return { ok: true, result: { task_id: message.payload.task_id, status: message.payload.status } };
           }
           throw new Error(`Unexpected path: ${message.path}`);
         },
@@ -280,6 +296,26 @@ async function testRunnerClaimsReportsAndFinishesSerially() {
   assert(stored.some((entry) => entry.boss_native_favorite_status?.phase === "completed"));
 }
 
+async function testSourceRunnerContinuesAfterDeferredVerification() {
+  const { runner, requests } = loadRunner({
+    claims: [favoriteTask(), favoriteTask({ task_id: 72, claim_token: "claim-72" }), null],
+    executionResults: [
+      { status: "verification_pending", attempted: true, reason: "favorite_state_active_pending_management_verification" },
+      { status: "verification_pending", attempted: false, reason: "favorite_state_active_pending_management_verification" },
+    ],
+  });
+  const finalStatus = await runner.start({
+    batchId: 19,
+    apiBase: "http://127.0.0.1:17863",
+    apiToken: "local-token",
+  });
+  assert.strictEqual(finalStatus.phase, "awaiting_verification");
+  assert.strictEqual(finalStatus.processed, 2);
+  assert.strictEqual(finalStatus.pendingVerification, 2);
+  assert.strictEqual(finalStatus.failed, 0);
+  assert.strictEqual(requests.filter((request) => request.url.endsWith("/claim")).length, 3);
+}
+
 async function testRunnerStopsAfterUnknownWithoutClaimingAnotherTask() {
   const { runner, requests } = loadRunner({
     claims: [favoriteTask(), favoriteTask({ task_id: 72, claim_token: "claim-72" })],
@@ -394,16 +430,71 @@ async function testExecutionBridgeLossIsUnknownAndNeverRetries() {
   assert.strictEqual(requests.some((request) => request.url.endsWith("/retry")), false);
 }
 
+async function testManagementRunnerFinalizesDeferredVerification() {
+  const verificationTask = favoriteTask({
+    status: "verifying",
+    source_action_attempted: true,
+    claim_token: "verify-71",
+  });
+  const { runner, requests } = loadRunner({
+    claims: [],
+    executionResults: [],
+    verificationClaims: [verificationTask, null],
+    verificationResults: [{
+      status: "success",
+      attempted: true,
+      reason: "favorite_management_identity_confirmed",
+    }],
+  });
+  const finalStatus = await runner.startVerification({
+    batchId: 19,
+    apiBase: "http://127.0.0.1:17863",
+    apiToken: "local-token",
+  });
+  assert.strictEqual(finalStatus.phase, "verification_completed");
+  assert.strictEqual(finalStatus.succeeded, 1);
+  assert.deepStrictEqual(
+    requests.map((request) => request.url),
+    [
+      "/api/favorites/verification/claim",
+      "/api/favorites/verification/result",
+      "/api/favorites/verification/claim",
+    ],
+  );
+}
+
+async function testManagementRunnerPausesAndKeepsInconclusiveItemPending() {
+  const { runner, requests } = loadRunner({
+    claims: [], executionResults: [],
+    verificationClaims: [favoriteTask({
+      status: "verifying", source_action_attempted: true, claim_token: "verify-71",
+    })],
+    verificationResults: [{
+      status: "unknown", attempted: true,
+      reason: "favorite_management_identity_not_visible", stop_batch: true,
+    }],
+  });
+  const finalStatus = await runner.startVerification({
+    batchId: 19, apiBase: "http://127.0.0.1:17863", apiToken: "local-token",
+  });
+  assert.strictEqual(finalStatus.phase, "verification_paused");
+  assert.strictEqual(finalStatus.pendingVerification, 1);
+  assert.strictEqual(requests[1].payload.status, "verification_pending");
+}
+
 async function runNativeFavoriteRunnerTests() {
   await testExecutionContractRejectsWrongContextAndAmbiguousFrames();
   await testDestroyedSourceDocumentIsReconciledAsInterruptedAndCannotRestart();
   await testPersistedInterruptionSurvivesAnotherReloadAndCanBeReconciled();
   await testInterruptionStaysLockedWhenSourceContextChanged();
   await testRunnerClaimsReportsAndFinishesSerially();
+  await testSourceRunnerContinuesAfterDeferredVerification();
   await testRunnerStopsAfterUnknownWithoutClaimingAnotherTask();
   await testManualStopFinishesCurrentTaskWithoutClaimingAnother();
   await testExplicitRetryableFailureRetriesOnceButUnknownNeverRetries();
   await testExecutionBridgeLossIsUnknownAndNeverRetries();
+  await testManagementRunnerFinalizesDeferredVerification();
+  await testManagementRunnerPausesAndKeepsInconclusiveItemPending();
 }
 
 module.exports = { runNativeFavoriteRunnerTests };

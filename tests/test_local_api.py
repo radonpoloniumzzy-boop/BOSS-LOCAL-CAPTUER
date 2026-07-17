@@ -230,6 +230,17 @@ class LocalApiServerTest(unittest.TestCase):
             "unknown": 1,
             "can_resume_pending": True,
         }
+        self.server.claim_favorite_verification = lambda payload: {
+            "task_id": 71,
+            "batch_id": int(payload["batch_id"]),
+            "status": "verifying",
+            "source_action_attempted": True,
+            "claim_token": "verification-token-71",
+        }
+        self.server.report_favorite_verification = lambda payload: {
+            "task_id": int(payload["task_id"]),
+            "status": str(payload["status"]),
+        }
 
         claim_body = json.dumps({"batch_id": 19, "worker_id": "extension-tab-91"}).encode(
             "utf-8"
@@ -315,6 +326,32 @@ class LocalApiServerTest(unittest.TestCase):
         reconcile_payload = json.loads(reconcile_response.read().decode("utf-8"))
         self.assertEqual(reconcile_response.status, 200)
         self.assertTrue(reconcile_payload["result"]["can_resume_pending"])
+
+        verify_claim = http.client.HTTPConnection("127.0.0.1", self.server.port, timeout=5)
+        verify_claim.request(
+            "POST", "/api/favorites/verification/claim",
+            body=json.dumps({"batch_id": 19}).encode("utf-8"),
+            headers={"Content-Type": "application/json", "X-Boss-Local-Token": self.token},
+        )
+        verify_claim_response = verify_claim.getresponse()
+        verify_claim_payload = json.loads(verify_claim_response.read().decode("utf-8"))
+        self.assertEqual(verify_claim_response.status, 200)
+        self.assertEqual(verify_claim_payload["result"]["status"], "verifying")
+
+        verify_result = http.client.HTTPConnection("127.0.0.1", self.server.port, timeout=5)
+        verify_result.request(
+            "POST", "/api/favorites/verification/result",
+            body=json.dumps({
+                "task_id": 71,
+                "claim_token": "verification-token-71",
+                "status": "success",
+            }).encode("utf-8"),
+            headers={"Content-Type": "application/json", "X-Boss-Local-Token": self.token},
+        )
+        verify_result_response = verify_result.getresponse()
+        verify_result_payload = json.loads(verify_result_response.read().decode("utf-8"))
+        self.assertEqual(verify_result_response.status, 200)
+        self.assertEqual(verify_result_payload["result"]["status"], "success")
 
 
 if __name__ == "__main__":

@@ -89,6 +89,7 @@ globalThis.__serviceTest = {
   downloadResume,
   executeNativeFavoriteTask,
   getBatchStatus,
+  handleMessage,
   handleBatchProgress,
   hasDirectPdfSignal,
   isValidResumeDownload,
@@ -560,6 +561,108 @@ async function testNativeFavoriteWorkerRejectsWrongSourceTabBeforeAnyWrite() {
   );
 }
 
+async function testNativeFavoriteSourcePhaseWorksWithOnlyOneBossPage() {
+  const { chrome, api } = loadServiceWorker();
+  chrome.tabs.query = async () => [
+    { id: 91, url: "https://www.zhipin.com/web/chat/recommend" },
+  ];
+  chrome.scripting.executeScript = async (request) => {
+    if (request.files) return [];
+    if (Array.isArray(request.target?.documentIds)) {
+      return [{ frameId: 7, documentId: "candidate-doc-7", result: {
+        status: "unknown",
+        attempted: true,
+        reason: "favorite_state_active_pending_management_verification",
+      } }];
+    }
+    return [
+      { frameId: 0, documentId: "source-doc-91", result: {
+        frame_url: "https://www.zhipin.com/web/chat/recommend",
+        restriction: "",
+        identity_match_count: 0,
+      } },
+      { frameId: 7, documentId: "candidate-doc-7", result: {
+        frame_url: "https://www.zhipin.com/web/frame/recommend/",
+        restriction: "",
+        identity_match_count: 1,
+      } },
+    ];
+  };
+  const result = await api.executeNativeFavoriteTask(favoriteTaskForWorker(), {
+    frameId: 0,
+    documentId: "source-doc-91",
+    tab: { id: 91, url: "https://www.zhipin.com/web/chat/recommend" },
+  });
+  assert.strictEqual(result.result.status, "verification_pending");
+  assert.strictEqual(result.result.attempted, true);
+  assert.strictEqual(result.result.stop_batch, false);
+}
+
+async function testNativeFavoriteManagementPhaseVerifiesInCurrentSinglePage() {
+  const { chrome, api } = loadServiceWorker();
+  chrome.tabs.query = async () => [
+    { id: 93, url: "https://www.zhipin.com/web/chat/interaction" },
+  ];
+  chrome.scripting.executeScript = async (request) => {
+    if (request.files) return [];
+    if (request.target?.allFrames) {
+      return [{ frameId: 7, documentId: "management-candidate-doc", result: {} }];
+    }
+    return [{ result: {
+      status: "success",
+      attempted: true,
+      reason: "favorite_management_identity_confirmed",
+    } }];
+  };
+  const result = await api.handleMessage({
+    type: "native_favorite_verify",
+    task: {
+      task_id: 71,
+      batch_id: 19,
+      platform: "boss",
+      platform_identity: { attribute: "data-geekid", value: "trusted-71" },
+      source_action_attempted: true,
+    },
+  }, {
+    frameId: 0,
+    documentId: "management-top-doc",
+    tab: { id: 93, url: "https://www.zhipin.com/web/chat/interaction" },
+  });
+  assert.strictEqual(result.result.status, "success");
+  assert.strictEqual(result.result.reason, "favorite_management_identity_confirmed");
+}
+
+async function testNativeFavoriteWrongManagementContextStaysPending() {
+  const { chrome, api } = loadServiceWorker();
+  chrome.tabs.query = async () => [
+    { id: 93, url: "https://www.zhipin.com/web/chat/interaction" },
+  ];
+  chrome.scripting.executeScript = async (request) => {
+    if (request.files) return [];
+    if (request.target?.allFrames) {
+      return [{ frameId: 0, documentId: "wrong-context", result: {} }];
+    }
+    return [{ result: {
+      status: "failed",
+      attempted: true,
+      reason: "not_favorite_management_context",
+    } }];
+  };
+  const result = await api.handleMessage({
+    type: "native_favorite_verify",
+    task: {
+      platform: "boss",
+      platform_identity: { attribute: "data-geekid", value: "trusted-71" },
+      source_action_attempted: false,
+    },
+  }, {
+    frameId: 0,
+    tab: { id: 93, url: "https://www.zhipin.com/web/chat/interaction" },
+  });
+  assert.strictEqual(result.result.status, "unknown");
+  assert.strictEqual(result.result.stop_batch, true);
+}
+
 async function testNativeFavoriteApiProxyRejectsExternalHostsAndArbitraryPaths() {
   let fetchCount = 0;
   const { api } = loadServiceWorker(async () => {
@@ -583,7 +686,7 @@ async function testNativeFavoriteApiProxyRejectsExternalHostsAndArbitraryPaths()
   assert.strictEqual(fetchCount, 0);
 }
 
-async function testNativeFavoriteVerifyOnlyPreflightNeverExecutesSourceAdapter() {
+async function testNativeFavoriteVerifyOnlyDefersToLaterManagementPhase() {
   const { chrome, api } = loadServiceWorker();
   chrome.tabs.query = async () => [
     { id: 91, url: "https://www.zhipin.com/web/chat/recommend" },
@@ -624,10 +727,10 @@ async function testNativeFavoriteVerifyOnlyPreflightNeverExecutesSourceAdapter()
     },
   );
 
-  assert.strictEqual(result.result.status, "already_favorited");
+  assert.strictEqual(result.result.status, "verification_pending");
   assert.strictEqual(result.result.attempted, false);
-  assert.strictEqual(result.result.method, "management_identity_preflight");
-  assert.strictEqual(executionCount, 3);
+  assert.strictEqual(result.result.method, "source_phase_deferred_verification");
+  assert.strictEqual(executionCount, 0);
 }
 
 async function testNativeFavoriteWholeTabRestrictionPreflightPreventsFrameWrite() {
@@ -1318,7 +1421,7 @@ function testAutomationAutoButtonStartsDesktopWorkflow() {
   assert(html.includes('id="apiToken"'));
   assert(popup.includes("automation_requested"));
   assert(popup.includes("AUTO 采集完成，已提交 AI 初筛"));
-  assert.strictEqual(manifest.version, "0.5.1");
+  assert.strictEqual(manifest.version, "0.6.0");
 }
 
 function testNativeFavoriteBatchHasDedicatedRunnerAndManagementVerification() {
@@ -1332,6 +1435,9 @@ function testNativeFavoriteBatchHasDedicatedRunnerAndManagementVerification() {
   assert(html.includes('id="stopFavoriteBatch"'));
   assert(html.includes('id="favoriteStatus"'));
   assert(popup.includes("startNativeFavoriteBatch"));
+  assert(popup.includes("startNativeFavoriteVerification"));
+  assert(popup.includes('command: "start_verification"'));
+  assert(popup.includes("verifyFavoriteBatch"));
   assert(popup.includes('automationAutoButton.insertAdjacentElement("afterend", favoriteSection)'));
   assert(popup.includes('files: ["favorite_runner.js"]'));
   assert(popup.includes('type: "boss_native_favorite_command"'));
@@ -1341,10 +1447,10 @@ function testNativeFavoriteBatchHasDedicatedRunnerAndManagementVerification() {
   assert(service.includes("executeNativeFavoriteTask"));
   assert(service.includes("proxyNativeFavoriteApi"));
   assert(service.includes("inspectFavoriteManagementTabs"));
-  assert(service.includes("MAX_MANAGEMENT_VERIFICATION_ATTEMPTS"));
+  assert(!service.includes("MAX_MANAGEMENT_VERIFICATION_ATTEMPTS"));
   assert(service.includes('files: ["identity_contract.js", "favorite_adapter.js"]'));
   assert(service.includes('files: ["identity_contract.js", "favorite_management_verifier.js"]'));
-  assert.strictEqual(manifest.version, "0.5.1");
+  assert.strictEqual(manifest.version, "0.6.0");
 }
 
 function testChatAutomationIsOptIn() {
@@ -1465,8 +1571,11 @@ function testFilenameTemplatesMatchDesktopFixtures() {
 async function main() {
   await runNativeFavoriteRunnerTests();
   await testNativeFavoriteWorkerRejectsWrongSourceTabBeforeAnyWrite();
+  await testNativeFavoriteSourcePhaseWorksWithOnlyOneBossPage();
+  await testNativeFavoriteManagementPhaseVerifiesInCurrentSinglePage();
+  await testNativeFavoriteWrongManagementContextStaysPending();
   await testNativeFavoriteApiProxyRejectsExternalHostsAndArbitraryPaths();
-  await testNativeFavoriteVerifyOnlyPreflightNeverExecutesSourceAdapter();
+  await testNativeFavoriteVerifyOnlyDefersToLaterManagementPhase();
   await testNativeFavoriteWholeTabRestrictionPreflightPreventsFrameWrite();
   await testNativeFavoriteFinalTopContextBarrierPreventsSpaStateWrite();
   testBossIdentityEvidenceKeepsIdentifiersAndDropsSecrets();

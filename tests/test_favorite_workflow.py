@@ -148,6 +148,77 @@ class NativeFavoriteWorkflowTest(unittest.TestCase):
             for task in self.repository.list_native_favorite_tasks(favorite_batch_id)
         ))
 
+    def test_source_action_waits_for_later_management_verification(self) -> None:
+        favorite_batch_id, _candidate_ids = self._create_favorite_batch(
+            "two-phase", ["trusted-two-phase-1"]
+        )
+        source_task = self.repository.claim_next_native_favorite_task(favorite_batch_id)
+        pending_verification = self.repository.complete_native_favorite_task(
+            int(source_task["task_id"]),
+            claim_token=str(source_task["claim_token"]),
+            status="verification_pending",
+            attempted=True,
+            reason="favorite_state_active_pending_management_verification",
+            method="native_detail_control",
+        )
+        self.assertEqual(pending_verification["status"], "verification_pending")
+        self.assertIsNone(self.repository.claim_next_native_favorite_task(favorite_batch_id))
+
+        verification = self.repository.claim_next_native_favorite_verification(
+            favorite_batch_id, worker_id="favorite-management-19"
+        )
+        self.assertEqual(verification["status"], "verifying")
+        self.assertTrue(verification["source_action_attempted"])
+        completed = self.repository.complete_native_favorite_verification(
+            int(verification["task_id"]),
+            claim_token=str(verification["claim_token"]),
+            status="success",
+            reason="favorite_management_identity_confirmed",
+            method="management_identity_verification",
+        )
+        self.assertEqual(completed["status"], "success")
+
+    def test_inconclusive_management_scan_returns_to_verification_pending(self) -> None:
+        favorite_batch_id, _candidate_ids = self._create_favorite_batch(
+            "verify-later", ["trusted-verify-later-1"]
+        )
+        source_task = self.repository.claim_next_native_favorite_task(favorite_batch_id)
+        self.repository.complete_native_favorite_task(
+            int(source_task["task_id"]),
+            claim_token=str(source_task["claim_token"]),
+            status="verification_pending",
+            attempted=True,
+            reason="favorite_state_active_pending_management_verification",
+        )
+        first_scan = self.repository.claim_next_native_favorite_verification(favorite_batch_id)
+        inconclusive = self.repository.complete_native_favorite_verification(
+            int(first_scan["task_id"]),
+            claim_token=str(first_scan["claim_token"]),
+            status="verification_pending",
+            reason="favorite_management_identity_not_visible",
+        )
+        self.assertEqual(inconclusive["status"], "verification_pending")
+        second_scan = self.repository.claim_next_native_favorite_verification(favorite_batch_id)
+        self.assertEqual(second_scan["task_id"], first_scan["task_id"])
+
+    def test_management_verification_starts_with_most_recent_source_action(self) -> None:
+        favorite_batch_id, _candidate_ids = self._create_favorite_batch(
+            "verify-order", ["trusted-verify-order-1", "trusted-verify-order-2"]
+        )
+        source_order = []
+        for _index in range(2):
+            task = self.repository.claim_next_native_favorite_task(favorite_batch_id)
+            source_order.append(int(task["task_id"]))
+            self.repository.complete_native_favorite_task(
+                int(task["task_id"]),
+                claim_token=str(task["claim_token"]),
+                status="verification_pending",
+                attempted=True,
+                reason="favorite_state_active_pending_management_verification",
+            )
+        verification = self.repository.claim_next_native_favorite_verification(favorite_batch_id)
+        self.assertEqual(int(verification["task_id"]), source_order[-1])
+
     def test_failed_task_has_one_explicit_retry_and_identity_conflict_maps_to_failed(self) -> None:
         favorite_batch_id, _candidate_ids = self._create_favorite_batch(
             "retry",

@@ -44,6 +44,10 @@ _Avoid_: Local favorite, saved row
 One attempt to establish or verify a Candidate's Native Favorite state. Its outcome may be success, explicit failure, or unknown.
 _Avoid_: Screening result
 
+**Deferred Favorite Verification**:
+The read-only second phase performed after Source Page Favorite Actions finish. A source detail control becoming active moves the task to `verification_pending`; only a later exact Platform Identity match in the favorite management experience produces final success or already-favorited.
+_Avoid_: Source-button success, simultaneous management tab
+
 **Source Page Context**:
 The original recruiting-platform tab and recommendation-page state from which a Capture Batch was collected. The first Native Favorite milestone requires this context to remain valid until all Favorite Actions for the batch finish.
 _Avoid_: Any Boss tab, browser session

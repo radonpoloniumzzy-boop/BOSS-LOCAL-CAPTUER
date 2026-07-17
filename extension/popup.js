@@ -70,9 +70,15 @@ reconcileFavoriteBatchButton.id = "reconcileFavoriteBatch";
 reconcileFavoriteBatchButton.type = "button";
 reconcileFavoriteBatchButton.textContent = "恢复中断后剩余待处理项";
 reconcileFavoriteBatchButton.style.cssText = "margin-top:8px;width:100%";
+const verifyFavoriteBatchButton = document.createElement("button");
+verifyFavoriteBatchButton.id = "verifyFavoriteBatch";
+verifyFavoriteBatchButton.type = "button";
+verifyFavoriteBatchButton.textContent = "核验本批收藏";
+verifyFavoriteBatchButton.style.cssText = "margin-top:8px;width:100%";
 const favoriteStatusEl = document.getElementById("favoriteStatus");
 const favoriteSection = document.getElementById("favoriteSection");
 favoriteSection?.insertBefore(reconcileFavoriteBatchButton, favoriteStatusEl);
+favoriteSection?.insertBefore(verifyFavoriteBatchButton, reconcileFavoriteBatchButton);
 let batchStatusTimer = null;
 
 if (favoriteSection) {
@@ -95,6 +101,7 @@ document.getElementById("stopBatch").addEventListener("click", () => stopBatch()
 startFavoriteBatchButton.addEventListener("click", () => startNativeFavoriteBatch());
 stopFavoriteBatchButton.addEventListener("click", () => stopNativeFavoriteBatch());
 reconcileFavoriteBatchButton.addEventListener("click", () => reconcileNativeFavoriteBatch());
+verifyFavoriteBatchButton.addEventListener("click", () => startNativeFavoriteVerification());
 
 window.addEventListener("beforeunload", () => {
   if (batchStatusTimer) {
@@ -162,6 +169,7 @@ async function startNativeFavoriteBatch() {
       files: ["favorite_runner.js"],
     });
     setStatus("原生收藏批次已启动。请保持推荐来源页和“收藏牛人”专用页打开。\n关闭弹窗不会停止页面执行器。");
+    setStatus("Source favorite phase started. Keep only this recommendation page open; management verification happens later in the same Boss page after you navigate to Favorite Talent.");
     const response = await chrome.tabs.sendMessage(tab.id, {
       type: "boss_native_favorite_command",
       command: "start",
@@ -199,6 +207,37 @@ async function stopNativeFavoriteBatch() {
   }
   setStatus("已请求停止；当前候选人的动作会先得到明确结果，再停止领取下一人。");
   await refreshNativeFavoriteStatus();
+}
+
+async function startNativeFavoriteVerification() {
+  const tab = await getActiveBossTab();
+  if (!tab) return;
+  const settings = collectSettings();
+  const batchId = Number(settings.favoriteBatchId || 0);
+  if (!Number.isInteger(batchId) || batchId <= 0) {
+    setStatus("Enter the Native Favorite batch ID before management verification.");
+    return;
+  }
+  verifyFavoriteBatchButton.disabled = true;
+  await chrome.storage.local.set({ ...settings, favoriteSourceTabId: tab.id });
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: ["favorite_runner.js"],
+    });
+    const response = await chrome.tabs.sendMessage(tab.id, {
+      type: "boss_native_favorite_command",
+      command: "start_verification",
+      settings: { batchId, apiBase: settings.apiBase, apiToken: settings.apiToken },
+    });
+    if (!response?.ok) throw new Error(response?.error || "Management verification failed to start.");
+    setStatus("Management verification started in the current Boss Favorite Talent page. It is read-only and never repeats the favorite click.");
+    await refreshNativeFavoriteStatus();
+  } catch (error) {
+    setStatus(`Management verification failed.\n${error?.message || String(error)}`);
+  } finally {
+    verifyFavoriteBatchButton.disabled = false;
+  }
 }
 
 async function reconcileNativeFavoriteBatch() {
@@ -242,6 +281,7 @@ async function refreshNativeFavoriteStatus() {
     `状态：${status.phase || "idle"}`,
     `已处理：${status.processed || 0}；成功/已收藏：${status.succeeded || 0}；失败/未知：${status.failed || 0}`,
     status.currentTaskId ? `当前任务：#${status.currentTaskId}` : "",
+    `待管理页核验：${status.pendingVerification || 0}`,
     status.message || "",
   ].filter(Boolean).join("\n");
 }

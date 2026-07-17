@@ -23,6 +23,8 @@ class LocalApiServer:
         report_favorite_result: Callable[[dict[str, object]], dict[str, object]] | None = None,
         retry_favorite_task: Callable[[dict[str, object]], dict[str, object]] | None = None,
         reconcile_favorite_batch: Callable[[dict[str, object]], dict[str, object]] | None = None,
+        claim_favorite_verification: Callable[[dict[str, object]], dict[str, object] | None] | None = None,
+        report_favorite_verification: Callable[[dict[str, object]], dict[str, object]] | None = None,
         auth_token: str = "",
         max_body_bytes: int = 25_000_000,
     ) -> None:
@@ -39,6 +41,8 @@ class LocalApiServer:
         self.report_favorite_result = report_favorite_result
         self.retry_favorite_task = retry_favorite_task
         self.reconcile_favorite_batch = reconcile_favorite_batch
+        self.claim_favorite_verification = claim_favorite_verification
+        self.report_favorite_verification = report_favorite_verification
         self.auth_token = str(auth_token or "")
         self.max_body_bytes = max_body_bytes
         self._server: ThreadingHTTPServer | None = None
@@ -112,6 +116,8 @@ class LocalApiServer:
                     "/api/favorites/result",
                     "/api/favorites/retry",
                     "/api/favorites/reconcile",
+                    "/api/favorites/verification/claim",
+                    "/api/favorites/verification/result",
                 }:
                     self._send_json(404, {"error": "Not found"})
                     return
@@ -151,6 +157,20 @@ class LocalApiServer:
                             self._send_json(503, {"ok": False, "error": "Native Favorite is unavailable"})
                             return
                         result = parent.reconcile_favorite_batch(payload)
+                        self._send_json(200, {"ok": True, "result": result})
+                        return
+                    if self.path == "/api/favorites/verification/claim":
+                        if parent.claim_favorite_verification is None:
+                            self._send_json(503, {"ok": False, "error": "Native Favorite verification is unavailable"})
+                            return
+                        result = parent.claim_favorite_verification(payload)
+                        self._send_json(200, {"ok": True, "result": result})
+                        return
+                    if self.path == "/api/favorites/verification/result":
+                        if parent.report_favorite_verification is None:
+                            self._send_json(503, {"ok": False, "error": "Native Favorite verification is unavailable"})
+                            return
+                        result = parent.report_favorite_verification(payload)
                         self._send_json(200, {"ok": True, "result": result})
                         return
                     if self.path == "/api/automation/start":

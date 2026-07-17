@@ -795,6 +795,14 @@ def apply_migrations(connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_native_favorite_tasks_identity "
         "ON native_favorite_tasks(platform, identity_attribute, identity_value, status)"
     )
+    favorite_task_columns = {
+        str(row[1])
+        for row in connection.execute("PRAGMA table_info(native_favorite_tasks)").fetchall()
+    }
+    if "source_action_attempted" not in favorite_task_columns:
+        connection.execute(
+            "ALTER TABLE native_favorite_tasks ADD COLUMN source_action_attempted INTEGER"
+        )
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS native_favorite_attempts (

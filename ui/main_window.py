@@ -440,6 +440,8 @@ class MainWindow(QMainWindow):
             report_favorite_result=self._report_native_favorite_result_from_extension,
             retry_favorite_task=self._retry_native_favorite_task_from_extension,
             reconcile_favorite_batch=self._reconcile_native_favorite_batch_from_extension,
+            claim_favorite_verification=self._claim_native_favorite_verification_from_extension,
+            report_favorite_verification=self._report_native_favorite_verification_from_extension,
             auth_token=self.config.local_api_token,
         )
         try:
@@ -506,6 +508,35 @@ class MainWindow(QMainWindow):
         if batch_id <= 0:
             raise ValueError("Native Favorite batch_id is required")
         return self.repository.reconcile_native_favorite_batch(batch_id)
+
+    def _claim_native_favorite_verification_from_extension(
+        self,
+        payload: dict[str, object],
+    ) -> dict[str, object] | None:
+        batch_id = int(payload.get("batch_id") or 0)
+        if batch_id <= 0:
+            raise ValueError("Native Favorite batch_id is required")
+        return self.repository.claim_next_native_favorite_verification(
+            batch_id,
+            worker_id=str(payload.get("worker_id") or "favorite-management"),
+        )
+
+    def _report_native_favorite_verification_from_extension(
+        self,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        task_id = int(payload.get("task_id") or 0)
+        if task_id <= 0:
+            raise ValueError("Native Favorite task_id is required")
+        result = payload.get("result")
+        return self.repository.complete_native_favorite_verification(
+            task_id,
+            claim_token=str(payload.get("claim_token") or ""),
+            status=str(payload.get("status") or ""),
+            reason=str(payload.get("reason") or ""),
+            method=str(payload.get("method") or "management_identity_verification"),
+            result=dict(result) if isinstance(result, dict) else {},
+        )
 
     def handle_open_browser(self) -> None:
         url = self.dashboard_page.source_url_input.text().strip() or self.config.target_url

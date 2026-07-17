@@ -12,6 +12,7 @@
     processed: 0,
     succeeded: 0,
     failed: 0,
+    pendingVerification: 0,
     currentTaskId: null,
     message: "Ready.",
     startedAt: "",
@@ -48,6 +49,7 @@
       processed: 0,
       succeeded: 0,
       failed: 0,
+      pendingVerification: 0,
       currentTaskId: null,
       message: "Native Favorite batch started.",
       startedAt: new Date().toISOString(),
@@ -62,8 +64,10 @@
           worker_id: `favorite-source-${batchId}`,
         });
         if (!task) {
-          state.phase = "completed";
-          state.message = "No more executable Native Favorite tasks.";
+          state.phase = state.pendingVerification > 0 ? "awaiting_verification" : "completed";
+          state.message = state.pendingVerification > 0
+            ? "Source actions finished. Open Boss Favorite Talent later and verify this batch."
+            : "No more executable Native Favorite tasks.";
           break;
         }
         state.currentTaskId = Number(task.task_id);
@@ -102,7 +106,9 @@
           result: { ...outcome, claim_token: undefined },
         });
         state.processed += 1;
-        if (outcome.status === "success" || outcome.status === "already_favorited") {
+        if (outcome.status === "verification_pending") {
+          state.pendingVerification += 1;
+        } else if (outcome.status === "success" || outcome.status === "already_favorited") {
           state.succeeded += 1;
         } else {
           state.failed += 1;
@@ -147,6 +153,107 @@
       }
     } catch (error) {
       state.phase = "failed";
+      state.message = error?.message || String(error);
+    } finally {
+      state.running = false;
+      state.currentTaskId = null;
+      await persistStatus();
+    }
+    return snapshot();
+  }
+
+  async function startVerification(settings) {
+    await ready;
+    if (state.running) throw new Error("A Native Favorite operation is already running in this tab.");
+    const batchId = Number(settings?.batchId || 0);
+    if (!Number.isInteger(batchId) || batchId <= 0) {
+      throw new Error("Native Favorite batch ID is required.");
+    }
+    const apiBase = normalizeApiBase(settings?.apiBase);
+    const apiToken = String(settings?.apiToken || "").trim();
+    if (!apiToken) throw new Error("Local API token is required.");
+    Object.assign(state, {
+      running: true,
+      stopRequested: false,
+      batchId,
+      phase: "verifying",
+      processed: 0,
+      succeeded: 0,
+      failed: 0,
+      pendingVerification: 0,
+      currentTaskId: null,
+      message: "Native Favorite management verification started.",
+      startedAt: new Date().toISOString(),
+      requiresManualResolution: false,
+    });
+    await persistStatus();
+    try {
+      while (!state.stopRequested) {
+        const task = await post(apiBase, apiToken, "/api/favorites/verification/claim", {
+          batch_id: batchId,
+          worker_id: `favorite-management-${batchId}`,
+        });
+        if (!task) {
+          state.phase = "verification_completed";
+          state.message = "No more Native Favorite items are waiting for management verification.";
+          break;
+        }
+        state.currentTaskId = Number(task.task_id);
+        await persistStatus();
+        let outcome;
+        try {
+          const response = await chrome.runtime.sendMessage({
+            type: "native_favorite_verify",
+            task,
+          });
+          if (!response?.ok || !response.result) {
+            throw new Error(response?.error || "Native Favorite management verification unavailable.");
+          }
+          outcome = normalizeVerificationOutcome(response.result, task);
+        } catch (error) {
+          outcome = {
+            status: "verification_pending",
+            attempted: task.source_action_attempted === true,
+            reason: "management_verification_bridge_unavailable",
+            method: "management_identity_verification_bridge",
+            stop_batch: true,
+            error: error?.message || String(error),
+          };
+        }
+        await post(apiBase, apiToken, "/api/favorites/verification/result", {
+          task_id: Number(task.task_id),
+          claim_token: String(task.claim_token || ""),
+          status: outcome.status,
+          reason: outcome.reason,
+          method: outcome.method,
+          result: { ...outcome },
+        });
+        state.processed += 1;
+        if (outcome.status === "success" || outcome.status === "already_favorited") {
+          state.succeeded += 1;
+        } else if (outcome.status === "verification_pending") {
+          state.pendingVerification += 1;
+        } else {
+          state.failed += 1;
+        }
+        state.currentTaskId = null;
+        state.message = `Verification #${task.task_id}: ${outcome.status} (${outcome.reason}).`;
+        await persistStatus();
+        if (outcome.stop_batch || outcome.status === "verification_pending" || outcome.status === "failed") {
+          state.phase = "verification_paused";
+          state.message += " Verification paused without changing the source favorite action.";
+          break;
+        }
+        if (!state.stopRequested) {
+          await delay(clampInterval(task?.config_snapshot?.favorite_interval_seconds) * 1000);
+        }
+      }
+      if (state.stopRequested) {
+        state.phase = "verification_stopped";
+        state.message = "Stopped before verifying another Native Favorite item.";
+      }
+    } catch (error) {
+      state.phase = "verification_failed";
       state.message = error?.message || String(error);
     } finally {
       state.running = false;
@@ -234,13 +341,28 @@
     const status = String(value?.status || "failed").toLowerCase();
     return {
       ...value,
-      status: ["success", "already_favorited", "failed", "unknown"].includes(status)
+      status: ["success", "already_favorited", "failed", "unknown", "verification_pending"].includes(status)
         ? status
         : "failed",
       attempted: value?.attempted === true,
       reason: String(value?.reason || "native_favorite_result_invalid"),
       method: String(value?.method || "native_detail_control+management_identity"),
       stop_batch: value?.stop_batch === true,
+    };
+  }
+
+  function normalizeVerificationOutcome(value, task) {
+    const rawStatus = String(value?.status || "").toLowerCase();
+    const status = rawStatus === "unknown" ? "verification_pending" : rawStatus;
+    return {
+      ...value,
+      status: ["success", "already_favorited", "failed", "verification_pending"].includes(status)
+        ? status
+        : "verification_pending",
+      attempted: task?.source_action_attempted === true,
+      reason: String(value?.reason || "favorite_management_verification_inconclusive"),
+      method: String(value?.method || "management_identity_verification"),
+      stop_batch: value?.stop_batch === true || status === "verification_pending",
     };
   }
 
@@ -284,6 +406,7 @@
       processed: Number(previous.processed || 0),
       succeeded: Number(previous.succeeded || 0),
       failed: Number(previous.failed || 0),
+      pendingVerification: Number(previous.pendingVerification || 0),
       currentTaskId: previous.currentTaskId || null,
       running: false,
       stopRequested: true,
@@ -305,6 +428,12 @@
         .catch((error) => sendResponse({ ok: false, error: error?.message || String(error) }));
       return true;
     }
+    if (message.command === "start_verification") {
+      startVerification(message.settings || {})
+        .then((status) => sendResponse({ ok: true, status }))
+        .catch((error) => sendResponse({ ok: false, error: error?.message || String(error) }));
+      return true;
+    }
     if (message.command === "stop") {
       sendResponse({ ok: true, status: stop() });
       return false;
@@ -319,5 +448,12 @@
     return false;
   });
 
-  globalScope.__bossNativeFavoriteRunner = Object.freeze({ start, stop, getStatus, resolveInterruption, ready });
+  globalScope.__bossNativeFavoriteRunner = Object.freeze({
+    start,
+    startVerification,
+    stop,
+    getStatus,
+    resolveInterruption,
+    ready,
+  });
 })(globalThis);
