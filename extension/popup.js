@@ -13,6 +13,7 @@ const DEFAULTS = {
   batchActionDelaySeconds: 5,
   maxBatchSessions: 50,
   chatAutomationEnabled: false,
+  favoriteBatchId: "",
 };
 
 const OLD_DEFAULT_SCROLL_WAIT_MS = 1500;
@@ -53,6 +54,7 @@ const fields = {
   batchActionDelaySeconds: document.getElementById("batchActionDelaySeconds"),
   maxBatchSessions: document.getElementById("maxBatchSessions"),
   chatAutomationEnabled: document.getElementById("chatAutomationEnabled"),
+  favoriteBatchId: document.getElementById("favoriteBatchId"),
 };
 
 const statusEl = document.getElementById("status");
@@ -61,6 +63,9 @@ const batchLogEl = document.getElementById("batchLog");
 const automationAutoButton = document.getElementById("automationAuto");
 const pairingCodeInput = document.getElementById("pairingCode");
 const applyPairingCodeButton = document.getElementById("applyPairingCode");
+const startFavoriteBatchButton = document.getElementById("startFavoriteBatch");
+const stopFavoriteBatchButton = document.getElementById("stopFavoriteBatch");
+const favoriteStatusEl = document.getElementById("favoriteStatus");
 let batchStatusTimer = null;
 
 automationAutoButton.addEventListener("click", () => runAutomation());
@@ -76,6 +81,8 @@ document.getElementById("requestAndDownload").addEventListener("click", () => ru
 document.getElementById("startBatchRequest").addEventListener("click", () => startBatch("request_resume"));
 document.getElementById("startBatchDownload").addEventListener("click", () => startBatch("download_only"));
 document.getElementById("stopBatch").addEventListener("click", () => stopBatch());
+startFavoriteBatchButton.addEventListener("click", () => startNativeFavoriteBatch());
+stopFavoriteBatchButton.addEventListener("click", () => stopNativeFavoriteBatch());
 
 window.addEventListener("beforeunload", () => {
   if (batchStatusTimer) {
@@ -119,9 +126,84 @@ async function init() {
     }
   }
   await refreshBatchStatus();
+  await refreshNativeFavoriteStatus();
   batchStatusTimer = window.setInterval(() => {
     void refreshBatchStatus();
+    void refreshNativeFavoriteStatus();
   }, 1000);
+}
+
+async function startNativeFavoriteBatch() {
+  const tab = await getActiveBossRecommendationTab();
+  if (!tab) return;
+  const settings = collectSettings();
+  const batchId = Number(settings.favoriteBatchId || 0);
+  if (!Number.isInteger(batchId) || batchId <= 0) {
+    setStatus("请填写桌面端生成的原生收藏批次 ID。");
+    return;
+  }
+  startFavoriteBatchButton.disabled = true;
+  await chrome.storage.local.set({ ...settings, favoriteSourceTabId: tab.id });
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: ["favorite_runner.js"],
+    });
+    setStatus("原生收藏批次已启动。请保持推荐来源页和“收藏牛人”专用页打开。\n关闭弹窗不会停止页面执行器。");
+    const response = await chrome.tabs.sendMessage(tab.id, {
+      type: "boss_native_favorite_command",
+      command: "start",
+      settings: {
+        batchId,
+        apiBase: settings.apiBase,
+        apiToken: settings.apiToken,
+      },
+    });
+    if (!response?.ok) {
+      throw new Error(response?.error || "原生收藏执行器启动失败。");
+    }
+    await refreshNativeFavoriteStatus();
+  } catch (error) {
+    setStatus(`原生收藏启动失败。\n${error?.message || String(error)}`);
+  } finally {
+    startFavoriteBatchButton.disabled = false;
+  }
+}
+
+async function stopNativeFavoriteBatch() {
+  const stored = await chrome.storage.local.get({ favoriteSourceTabId: null });
+  const sourceTabId = Number(stored.favoriteSourceTabId || 0);
+  if (!sourceTabId) {
+    setStatus("没有记录正在执行原生收藏的来源标签页。");
+    return;
+  }
+  const response = await safeTabsSendMessage(sourceTabId, {
+    type: "boss_native_favorite_command",
+    command: "stop",
+  });
+  if (!response?.ok) {
+    setStatus(`停止请求未送达。\n${response?.error || "来源标签页可能已关闭。"}`);
+    return;
+  }
+  setStatus("已请求停止；当前候选人的动作会先得到明确结果，再停止领取下一人。");
+  await refreshNativeFavoriteStatus();
+}
+
+async function refreshNativeFavoriteStatus() {
+  if (!favoriteStatusEl) return;
+  const stored = await chrome.storage.local.get({ boss_native_favorite_status: null });
+  const status = stored.boss_native_favorite_status;
+  if (!status) {
+    favoriteStatusEl.textContent = "原生收藏：未启动。";
+    return;
+  }
+  favoriteStatusEl.textContent = [
+    `原生收藏批次：${status.batchId || "-"}`,
+    `状态：${status.phase || "idle"}`,
+    `已处理：${status.processed || 0}；成功/已收藏：${status.succeeded || 0}；失败/未知：${status.failed || 0}`,
+    status.currentTaskId ? `当前任务：#${status.currentTaskId}` : "",
+    status.message || "",
+  ].filter(Boolean).join("\n");
 }
 
 async function runAutomation() {
@@ -674,6 +756,30 @@ function detectCollectPlatform(value) {
   return COLLECT_PLATFORMS.find((platform) => platform.matches(url)) || null;
 }
 
+async function getActiveBossRecommendationTab() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id) {
+    setStatus("未找到当前活动标签页。");
+    return null;
+  }
+  try {
+    const url = new URL(String(tab.url || ""));
+    const allowedPaths = new Set([
+      "/web/chat/recommend",
+      "/web/frame/recommend",
+      "/web/geek/recommend",
+    ]);
+    if (!isBossUrl(tab.url) || !allowedPaths.has(url.pathname.replace(/\/$/, ""))) {
+      setStatus("请先切回本批次原始的 BOSS 推荐牛人标签页。");
+      return null;
+    }
+  } catch (_error) {
+    setStatus("当前标签页地址无效。");
+    return null;
+  }
+  return tab;
+}
+
 function applyPlatformDefaults(settings, platform) {
   if (!platform) {
     return settings;
@@ -713,6 +819,7 @@ function collectSettings() {
     batchActionDelayMs: Math.max(Number(fields.batchActionDelaySeconds.value || DEFAULTS.batchActionDelaySeconds), 1) * 1000,
     maxBatchSessions: Math.min(Math.max(Number(fields.maxBatchSessions.value || DEFAULTS.maxBatchSessions), 1), 50),
     chatAutomationEnabled: Boolean(fields.chatAutomationEnabled?.checked),
+    favoriteBatchId: fields.favoriteBatchId?.value.trim() || "",
   };
 }
 

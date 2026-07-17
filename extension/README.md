@@ -34,6 +34,17 @@ One-click automation usage:
 4. Click `AUTO: Scroll + Collect + AI Screen` in the extension popup
 5. The extension confirms the desktop workflow, auto-scrolls, imports the cards, and submits that batch for AI screening
 
+Single-batch Native Favorite usage:
+
+1. In the desktop app, configure a role's Favorite Eligibility Policy and choose `Screen and Favorite`
+2. Run extension `AUTO` collection and wait for the desktop status to show a Native Favorite batch ID
+3. Keep the original Boss recommendation tab open
+4. Open a second Boss tab at `Interaction -> Favorite Talent` and keep that favorite subview selected
+5. Return to the original recommendation tab, enter the batch ID in the extension, and click `Run Single Favorite Batch`
+6. The source-page runner claims one task at a time, verifies the exact Platform Identity in the dedicated favorite-management tab, and pauses on unknown, failure, context mismatch, or a manual stop request
+
+The first version never refreshes the recommendation page and never advances to another Capture Batch. Closing the popup does not stop the page runner; use `Stop Favorite` to stop before the next candidate.
+
 Single chat usage:
 
 1. Open a Boss chat page and select a candidate conversation

@@ -1,0 +1,234 @@
+const assert = require("assert");
+const fs = require("fs");
+const path = require("path");
+const vm = require("vm");
+
+const EXTENSION_DIR = path.resolve(__dirname, "..");
+
+function loadExecutionContract() {
+  const context = { URL };
+  context.globalThis = context;
+  vm.runInNewContext(
+    fs.readFileSync(path.join(EXTENSION_DIR, "favorite_execution.js"), "utf8"),
+    context,
+    { filename: "favorite_execution.js" },
+  );
+  return context.__bossNativeFavoriteExecutionContract;
+}
+
+function response(result, ok = true, status = 200) {
+  return {
+    ok,
+    status,
+    async json() {
+      return ok ? { ok: true, result } : { ok: false, error: String(result) };
+    },
+  };
+}
+
+function favoriteTask(overrides = {}) {
+  return {
+    task_id: 71,
+    batch_id: 19,
+    claim_token: "claim-71",
+    platform: "boss",
+    write_policy: "write_allowed",
+    platform_identity: { attribute: "data-geekid", value: "trusted-71" },
+    source_page_context: {
+      tab_id: 91,
+      platform: "boss",
+      source_url: "https://www.zhipin.com/web/chat/recommend",
+    },
+    config_snapshot: { favorite_interval_seconds: 3 },
+    ...overrides,
+  };
+}
+
+function loadRunner({ claims, executionResults }) {
+  const requests = [];
+  const stored = [];
+  const context = {
+    URL,
+    location: { href: "https://www.zhipin.com/web/chat/recommend" },
+    setTimeout(callback) { callback(); },
+    clearTimeout() {},
+    chrome: {
+      runtime: {
+        onMessage: { addListener() {} },
+        async sendMessage(message) {
+          if (message.type === "native_favorite_execute") {
+            return { ok: true, result: await executionResults.shift() };
+          }
+          assert.strictEqual(message.type, "native_favorite_api");
+          requests.push({ url: message.path, payload: message.payload });
+          if (message.path === "/api/favorites/claim") {
+            return { ok: true, result: claims.shift() ?? null };
+          }
+          if (message.path === "/api/favorites/result") {
+            return {
+              ok: true,
+              result: { task_id: message.payload.task_id, status: message.payload.status },
+            };
+          }
+          throw new Error(`Unexpected path: ${message.path}`);
+        },
+      },
+      storage: {
+        local: {
+          async set(value) { stored.push(value); },
+        },
+      },
+    },
+  };
+  context.globalThis = context;
+  vm.runInNewContext(
+    fs.readFileSync(path.join(EXTENSION_DIR, "favorite_runner.js"), "utf8"),
+    context,
+    { filename: "favorite_runner.js" },
+  );
+  return { runner: context.__bossNativeFavoriteRunner, requests, stored };
+}
+
+async function testExecutionContractRejectsWrongContextAndAmbiguousFrames() {
+  const contract = loadExecutionContract();
+  assert.deepStrictEqual(
+    { ...contract.validateSourceContext(favoriteTask(), {
+      id: 92,
+      url: "https://www.zhipin.com/web/chat/recommend",
+    }) },
+    { ok: false, reason: "source_page_context_tab_mismatch" },
+  );
+  assert.deepStrictEqual(
+    { ...contract.validateSourceContext(favoriteTask(), {
+      id: 91,
+      url: "https://www.zhipin.com/web/geek/recommend",
+    }) },
+    { ok: false, reason: "source_page_context_url_mismatch" },
+  );
+  assert.deepStrictEqual(
+    { ...contract.aggregateAdapterExecutions([
+      { result: { status: "unknown", attempted: true, reason: "favorite_state_active_pending_management_verification" } },
+      { result: { status: "unknown", attempted: true, reason: "favorite_state_active_pending_management_verification" } },
+    ]) },
+    {
+      status: "failed",
+      attempted: true,
+      reason: "multiple_source_frame_identity_matches",
+      stop_batch: true,
+    },
+  );
+  assert.deepStrictEqual(
+    { ...contract.aggregateManagementClassifications([
+      { result: { status: "success", reason: "favorite_management_identity_confirmed" } },
+    ], true) },
+    {
+      status: "success",
+      attempted: true,
+      reason: "favorite_management_identity_confirmed",
+      stop_batch: false,
+    },
+  );
+  assert.deepStrictEqual(
+    { ...contract.aggregateManagementClassifications([
+      { result: { status: "failed", reason: "not_favorite_management_context" } },
+    ], false) },
+    {
+      status: "failed",
+      attempted: false,
+      reason: "favorite_management_tab_not_ready",
+      stop_batch: true,
+    },
+  );
+}
+
+async function testRunnerClaimsReportsAndFinishesSerially() {
+  const { runner, requests, stored } = loadRunner({
+    claims: [favoriteTask(), null],
+    executionResults: [{
+      status: "success",
+      attempted: true,
+      reason: "favorite_management_identity_confirmed",
+      method: "native_detail_control+management_identity",
+    }],
+  });
+
+  const finalStatus = await runner.start({
+    batchId: 19,
+    apiBase: "http://127.0.0.1:17863",
+    apiToken: "local-token",
+  });
+
+  assert.strictEqual(finalStatus.phase, "completed");
+  assert.strictEqual(finalStatus.processed, 1);
+  assert.deepStrictEqual(
+    requests.map((request) => request.url.split("/api/")[1]),
+    ["favorites/claim", "favorites/result", "favorites/claim"],
+  );
+  assert.strictEqual(requests[1].payload.claim_token, "claim-71");
+  assert.strictEqual(requests[1].payload.status, "success");
+  assert(stored.some((entry) => entry.boss_native_favorite_status?.phase === "completed"));
+}
+
+async function testRunnerStopsAfterUnknownWithoutClaimingAnotherTask() {
+  const { runner, requests } = loadRunner({
+    claims: [favoriteTask(), favoriteTask({ task_id: 72, claim_token: "claim-72" })],
+    executionResults: [{
+      status: "unknown",
+      attempted: true,
+      reason: "favorite_management_identity_not_visible",
+      method: "native_detail_control+management_identity",
+      stop_batch: true,
+    }],
+  });
+
+  const finalStatus = await runner.start({
+    batchId: 19,
+    apiBase: "http://127.0.0.1:17863",
+    apiToken: "local-token",
+  });
+
+  assert.strictEqual(finalStatus.phase, "paused");
+  assert.strictEqual(finalStatus.processed, 1);
+  assert.strictEqual(requests.filter((request) => request.url.endsWith("/claim")).length, 1);
+  assert.strictEqual(requests[1].payload.status, "unknown");
+}
+
+async function testManualStopFinishesCurrentTaskWithoutClaimingAnother() {
+  let finishExecution;
+  const pendingExecution = new Promise((resolve) => {
+    finishExecution = resolve;
+  });
+  const { runner, requests } = loadRunner({
+    claims: [favoriteTask(), favoriteTask({ task_id: 72, claim_token: "claim-72" })],
+    executionResults: [pendingExecution],
+  });
+
+  const runPromise = runner.start({
+    batchId: 19,
+    apiBase: "http://127.0.0.1:17863",
+    apiToken: "local-token",
+  });
+  for (let attempt = 0; attempt < 10 && requests.length === 0; attempt += 1) {
+    await Promise.resolve();
+  }
+  runner.stop();
+  finishExecution({
+    status: "success",
+    attempted: true,
+    reason: "favorite_management_identity_confirmed",
+  });
+  const finalStatus = await runPromise;
+
+  assert.strictEqual(finalStatus.phase, "stopped");
+  assert.strictEqual(finalStatus.processed, 1);
+  assert.strictEqual(requests.filter((request) => request.url.endsWith("/claim")).length, 1);
+}
+
+async function runNativeFavoriteRunnerTests() {
+  await testExecutionContractRejectsWrongContextAndAmbiguousFrames();
+  await testRunnerClaimsReportsAndFinishesSerially();
+  await testRunnerStopsAfterUnknownWithoutClaimingAnotherTask();
+  await testManualStopFinishesCurrentTaskWithoutClaimingAnother();
+}
+
+module.exports = { runNativeFavoriteRunnerTests };

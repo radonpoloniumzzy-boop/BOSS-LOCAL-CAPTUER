@@ -126,6 +126,17 @@ Automation API keys remain in process memory and are never written to `config.js
 
 API keys entered in the AI page are kept only in process memory. They are not written to SQLite or `config.json`.
 
+## Single-Batch Native Favorite Workflow
+
+1. Configure the role's Favorite Eligibility Policy in `AI Screen`.
+2. In `Automation Flow`, choose `Screen and Favorite`, then run extension `AUTO` collection on the Boss recommendation page.
+3. Wait for Initial Screening to finish and note the Native Favorite batch ID shown by the desktop app.
+4. Keep that original recommendation tab open and open a second Boss tab at `Interaction -> Favorite Talent`.
+5. From the original recommendation tab, enter the batch ID in the extension and start the single favorite batch.
+6. The extension processes one candidate at a time and pauses before the next candidate after unknown, failure, Source Page Context mismatch, or a manual stop request.
+
+Native Favorite success requires exact Platform Identity confirmation in the Boss favorite-management experience. This version does not refresh the recommendation page, advance to another Capture Batch, contact candidates, or cancel favorites.
+
 AI ratings are assistive ranking signals and require human review. The app rejects prompts that use age, sex, marriage/childbearing, health/disability, photos, appearance, or image/temperament as automated employment screening criteria.
 
 ## Local API
@@ -137,6 +148,9 @@ The desktop app starts a local HTTP server for the extension:
 - `POST /api/import/cards`
 - `GET /api/automation/status`
 - `POST /api/automation/start`
+- `POST /api/favorites/claim`
+- `POST /api/favorites/result`
+- `POST /api/favorites/retry`
 
 Default endpoint:
 

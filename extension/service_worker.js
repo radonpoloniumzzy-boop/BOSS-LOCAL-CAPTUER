@@ -1,3 +1,7 @@
+if (typeof importScripts === "function") {
+  importScripts("favorite_execution.js");
+}
+
 const BATCH_STATUS_KEY = "boss_batch_status";
 const EXTENSION_VERSION = chrome.runtime.getManifest?.().version || "dev";
 const SERVICE_WORKER_DOWNLOAD_CLICK_REVISION = "top-toolbar-first-v1";
@@ -41,6 +45,7 @@ const DEFAULT_BATCH_STATUS = {
   recentEvents: [],
 };
 const STOP_GUARD_MS = 10 * 60 * 1000;
+const MAX_MANAGEMENT_VERIFICATION_ATTEMPTS = 8;
 const stoppedBatchTabs = new Map();
 
 chrome.runtime.onInstalled.addListener(() => {
@@ -91,8 +96,316 @@ async function handleMessage(message, sender) {
       return resolveActivePdfUrl(message.payload || {}, sender);
     case "trusted_click":
       return trustedClick(message.payload || {}, sender);
+    case "native_favorite_execute":
+      return executeNativeFavoriteTask(message.task || {}, sender);
+    case "native_favorite_api":
+      return proxyNativeFavoriteApi(message);
     default:
       return { ok: false, error: `Unknown message type: ${String(message?.type || "")}` };
+  }
+}
+
+async function proxyNativeFavoriteApi(message) {
+  const allowedPaths = new Set([
+    "/api/favorites/claim",
+    "/api/favorites/result",
+    "/api/favorites/retry",
+  ]);
+  const path = String(message?.path || "");
+  if (!allowedPaths.has(path)) {
+    return { ok: false, error: "Native Favorite API path is not allowed." };
+  }
+  let apiBase;
+  try {
+    const url = new URL(String(message?.apiBase || ""));
+    if (!['http:', 'https:'].includes(url.protocol)) {
+      throw new Error("invalid protocol");
+    }
+    if (!["127.0.0.1", "localhost"].includes(url.hostname)) {
+      throw new Error("non-local host");
+    }
+    apiBase = url.toString().replace(/\/$/, "");
+  } catch (_error) {
+    return { ok: false, error: "Native Favorite API must use the local desktop endpoint." };
+  }
+  const response = await fetch(`${apiBase}${path}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Boss-Local-Token": String(message?.apiToken || ""),
+    },
+    body: JSON.stringify(message?.payload || {}),
+  });
+  const body = await response.json();
+  if (!response.ok || !body.ok) {
+    return { ok: false, error: body.error || `Local API returned ${response.status}.` };
+  }
+  return { ok: true, result: body.result ?? null };
+}
+
+async function executeNativeFavoriteTask(task, sender) {
+  const contract = globalThis.__bossNativeFavoriteExecutionContract;
+  if (!contract) {
+    return { ok: false, error: "Native Favorite execution contract unavailable." };
+  }
+  if (Number(sender?.frameId || 0) !== 0) {
+    return { ok: false, error: "Native Favorite runner must execute from the source top frame." };
+  }
+  const sourceTab = sender?.tab;
+  const contextValidation = contract.validateSourceContext(task, sourceTab);
+  if (!contextValidation.ok) {
+    return {
+      ok: true,
+      result: nativeFavoriteFailure(false, contextValidation.reason, "source_context_guard"),
+    };
+  }
+  if (String(task?.platform || "").toLowerCase() !== "boss") {
+    return {
+      ok: true,
+      result: nativeFavoriteFailure(false, "unsupported_platform", "source_context_guard"),
+    };
+  }
+
+  const preflight = await inspectFavoriteManagementTabs(
+    task.platform_identity,
+    false,
+    sourceTab.id,
+  );
+  const preflightResult = contract.aggregateManagementClassifications(preflight, false);
+  if (preflightResult.status === "already_favorited") {
+    return {
+      ok: true,
+      result: {
+        ...preflightResult,
+        method: "management_identity_preflight",
+      },
+    };
+  }
+  if (preflightResult.reason === "favorite_management_identity_seen_in_multiple_tabs") {
+    return {
+      ok: true,
+      result: {
+        ...preflightResult,
+        method: "management_context_preflight",
+      },
+    };
+  }
+  const managementTabIds = preflight
+    .filter((item) => isConfirmedFavoriteManagementContext(item.result))
+    .map((item) => item.tabId);
+  if (managementTabIds.length === 0) {
+    return {
+      ok: true,
+      result: nativeFavoriteFailure(
+        false,
+        "favorite_management_tab_not_ready",
+        "management_context_preflight",
+      ),
+    };
+  }
+
+  const writePolicy = String(task?.write_policy || "");
+  if (writePolicy === "verify_only") {
+    const verification = await verifyFavoriteManagementWithRefresh(
+      task.platform_identity,
+      false,
+      sourceTab.id,
+      managementTabIds,
+      preflight,
+    );
+    return {
+      ok: true,
+      result: {
+        ...verification,
+        method: "management_identity_verify_only",
+      },
+    };
+  }
+  if (writePolicy !== "establish_or_verify") {
+    return {
+      ok: true,
+      result: nativeFavoriteFailure(false, "invalid_write_policy", "write_policy_guard"),
+    };
+  }
+
+  await chrome.scripting.executeScript({
+    target: { tabId: sourceTab.id, allFrames: true },
+    files: ["identity_contract.js", "favorite_adapter.js"],
+  });
+  const executions = await chrome.scripting.executeScript({
+    target: { tabId: sourceTab.id, allFrames: true },
+    args: [task],
+    func: async (favoriteTask) =>
+      globalThis.__bossNativeFavoriteAdapter?.favoriteOne?.(favoriteTask) || {
+        status: "failed",
+        attempted: false,
+        reason: "favorite_adapter_unavailable",
+      },
+  });
+  const action = contract.aggregateAdapterExecutions(executions);
+  if (action.status === "failed") {
+    return {
+      ok: true,
+      result: { ...action, method: "native_detail_control" },
+    };
+  }
+
+  const verification = await verifyFavoriteManagementWithRefresh(
+    task.platform_identity,
+    action.attempted,
+    sourceTab.id,
+    managementTabIds,
+    preflight,
+  );
+  return {
+    ok: true,
+    result: {
+      ...verification,
+      method: "native_detail_control+management_identity",
+      source_action_reason: action.reason,
+    },
+  };
+}
+
+function isConfirmedFavoriteManagementContext(result) {
+  return (
+    result?.status === "success" ||
+    result?.status === "already_favorited" ||
+    result?.reason === "favorite_management_identity_not_visible" ||
+    result?.reason === "multiple_favorite_management_identity_matches"
+  );
+}
+
+async function verifyFavoriteManagementWithRefresh(
+  platformIdentity,
+  attempted,
+  sourceTabId,
+  managementTabIds,
+  initialClassifications,
+) {
+  const contract = globalThis.__bossNativeFavoriteExecutionContract;
+  let result = contract.aggregateManagementClassifications(
+    initialClassifications,
+    attempted,
+  );
+  if (result.status === "success" || result.status === "already_favorited") {
+    return result;
+  }
+  await Promise.all(
+    managementTabIds.map((tabId) => chrome.tabs.reload(tabId).catch(() => null)),
+  );
+  for (let attempt = 0; attempt < MAX_MANAGEMENT_VERIFICATION_ATTEMPTS; attempt += 1) {
+    await delay(attempt === 0 ? 1200 : 750);
+    const refreshed = await inspectFavoriteManagementTabs(
+      platformIdentity,
+      attempted,
+      sourceTabId,
+      new Set(managementTabIds),
+    );
+    result = contract.aggregateManagementClassifications(refreshed, attempted);
+    if (
+      result.status === "success" ||
+      result.status === "already_favorited" ||
+      result.reason === "favorite_management_identity_seen_in_multiple_tabs"
+    ) {
+      break;
+    }
+  }
+  return result;
+}
+
+async function inspectFavoriteManagementTabs(
+  platformIdentity,
+  attempted,
+  sourceTabId,
+  allowedTabIds = null,
+) {
+  const tabs = await chrome.tabs.query({});
+  const bossTabs = tabs.filter((tab) =>
+    tab.id !== sourceTabId &&
+    (!allowedTabIds || allowedTabIds.has(tab.id)) &&
+    isBossTabUrl(tab.url),
+  );
+  const classifications = [];
+  for (const tab of bossTabs) {
+    try {
+      const request = {
+        platform: "boss",
+        platform_identity: platformIdentity,
+        favorite_action_attempted: attempted === true,
+        inspection_id: crypto.randomUUID(),
+        tab_id: tab.id,
+      };
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id, allFrames: true },
+        files: ["identity_contract.js", "favorite_management_verifier.js"],
+      });
+      const inspections = await chrome.scripting.executeScript({
+        target: { tabId: tab.id, allFrames: true },
+        args: [request],
+        func: async (verificationRequest) =>
+          globalThis.__bossFavoriteManagementVerifier?.inspectFrame?.(verificationRequest) || null,
+      });
+      const envelope = {
+        inspection_id: request.inspection_id,
+        tab_id: tab.id,
+        executions: inspections.map((inspection) => ({
+          frame_id: inspection.frameId,
+          document_id: inspection.documentId,
+          observation: inspection.result,
+        })),
+      };
+      const [classification] = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        args: [request, envelope],
+        func: async (verificationRequest, executionEnvelope) =>
+          globalThis.__bossFavoriteManagementVerifier?.classify?.(
+            verificationRequest,
+            executionEnvelope,
+          ) || null,
+      });
+      classifications.push({
+        tabId: tab.id,
+        result: classification?.result || {
+          status: "failed",
+          attempted: attempted === true,
+          reason: "favorite_management_classifier_unavailable",
+        },
+      });
+    } catch (error) {
+      classifications.push({
+        tabId: tab.id,
+        result: {
+          status: "failed",
+          attempted: attempted === true,
+          reason: "favorite_management_inspection_failed",
+          error: error?.message || String(error),
+        },
+      });
+    }
+  }
+  return classifications;
+}
+
+function nativeFavoriteFailure(attempted, reason, method) {
+  return {
+    status: "failed",
+    attempted: attempted === true,
+    reason,
+    method,
+    stop_batch: true,
+  };
+}
+
+function isBossTabUrl(value) {
+  try {
+    const host = new URL(String(value || "")).hostname.toLowerCase();
+    return (
+      host === "zhipin.com" || host.endsWith(".zhipin.com") ||
+      host === "bosszhipin.com" || host.endsWith(".bosszhipin.com")
+    );
+  } catch (_error) {
+    return false;
   }
 }
 
