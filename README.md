@@ -154,6 +154,7 @@ The desktop app starts a local HTTP server for the extension:
 - `POST /api/favorites/retry`
 - `POST /api/favorites/verification/claim`
 - `POST /api/favorites/verification/result`
+- `POST /api/favorites/status`
 
 Default endpoint:
 

@@ -163,12 +163,17 @@ class NativeFavoriteWorkflowTest(unittest.TestCase):
         )
         self.assertEqual(pending_verification["status"], "verification_pending")
         self.assertIsNone(self.repository.claim_next_native_favorite_task(favorite_batch_id))
+        durable_status = self.repository.get_native_favorite_batch_status(favorite_batch_id)
+        self.assertEqual(durable_status["status"], "awaiting_verification")
+        self.assertEqual(durable_status["pending_verification"], 1)
+        self.assertEqual(durable_status["source_tab_id"], 91)
 
         verification = self.repository.claim_next_native_favorite_verification(
             favorite_batch_id, worker_id="favorite-management-19"
         )
         self.assertEqual(verification["status"], "verifying")
         self.assertTrue(verification["source_action_attempted"])
+        self.assertEqual(verification["source_tab_id"], 91)
         completed = self.repository.complete_native_favorite_verification(
             int(verification["task_id"]),
             claim_token=str(verification["claim_token"]),
@@ -177,6 +182,13 @@ class NativeFavoriteWorkflowTest(unittest.TestCase):
             method="management_identity_verification",
         )
         self.assertEqual(completed["status"], "success")
+        self.assertIsNone(
+            self.repository.claim_next_native_favorite_verification(favorite_batch_id)
+        )
+        self.assertEqual(
+            self.repository.get_native_favorite_batch_status(favorite_batch_id)["status"],
+            "completed",
+        )
 
     def test_inconclusive_management_scan_returns_to_verification_pending(self) -> None:
         favorite_batch_id, _candidate_ids = self._create_favorite_batch(
@@ -219,6 +231,21 @@ class NativeFavoriteWorkflowTest(unittest.TestCase):
         verification = self.repository.claim_next_native_favorite_verification(favorite_batch_id)
         self.assertEqual(int(verification["task_id"]), source_order[-1])
 
+    def test_management_verification_cannot_start_before_source_phase_finishes(self) -> None:
+        favorite_batch_id, _candidate_ids = self._create_favorite_batch(
+            "phase-barrier", ["trusted-phase-barrier-1", "trusted-phase-barrier-2"]
+        )
+        first = self.repository.claim_next_native_favorite_task(favorite_batch_id)
+        self.repository.complete_native_favorite_task(
+            int(first["task_id"]),
+            claim_token=str(first["claim_token"]),
+            status="verification_pending",
+            attempted=True,
+            reason="favorite_state_active_pending_management_verification",
+        )
+        with self.assertRaisesRegex(ValueError, "source phase must finish"):
+            self.repository.claim_next_native_favorite_verification(favorite_batch_id)
+
     def test_failed_task_has_one_explicit_retry_and_identity_conflict_maps_to_failed(self) -> None:
         favorite_batch_id, _candidate_ids = self._create_favorite_batch(
             "retry",
@@ -226,7 +253,7 @@ class NativeFavoriteWorkflowTest(unittest.TestCase):
         )
         first = self.repository.claim_next_native_favorite_task(favorite_batch_id)
 
-        with self.assertRaisesRegex(ValueError, "terminal status"):
+        with self.assertRaisesRegex(ValueError, "source phase status"):
             self.repository.complete_native_favorite_task(
                 int(first["task_id"]),
                 claim_token=str(first["claim_token"]),
@@ -269,8 +296,17 @@ class NativeFavoriteWorkflowTest(unittest.TestCase):
         self.repository.complete_native_favorite_task(
             int(first["task_id"]),
             claim_token=str(first["claim_token"]),
-            status="success",
+            status="verification_pending",
             attempted=True,
+            reason="favorite_state_active_pending_management_verification",
+        )
+        first_verification = self.repository.claim_next_native_favorite_verification(
+            first_batch_id
+        )
+        self.repository.complete_native_favorite_verification(
+            int(first_verification["task_id"]),
+            claim_token=str(first_verification["claim_token"]),
+            status="success",
             reason="favorite_management_identity_confirmed",
         )
 
@@ -283,7 +319,7 @@ class NativeFavoriteWorkflowTest(unittest.TestCase):
         self.assertIsNotNone(verification)
         self.assertEqual(verification["write_policy"], "verify_only")
         self.assertEqual(verification["status"], "running")
-        with self.assertRaisesRegex(ValueError, "verify_only"):
+        with self.assertRaisesRegex(ValueError, "source phase status"):
             self.repository.complete_native_favorite_task(
                 int(verification["task_id"]),
                 claim_token=str(verification["claim_token"]),
@@ -291,11 +327,21 @@ class NativeFavoriteWorkflowTest(unittest.TestCase):
                 attempted=True,
                 reason="favorite_management_identity_confirmed",
             )
-        verified = self.repository.complete_native_favorite_task(
+        source_deferred = self.repository.complete_native_favorite_task(
             int(verification["task_id"]),
             claim_token=str(verification["claim_token"]),
-            status="already_favorited",
+            status="verification_pending",
             attempted=False,
+            reason="prior_verified_native_favorite_requires_management_recheck",
+        )
+        self.assertEqual(source_deferred["status"], "verification_pending")
+        management_verification = self.repository.claim_next_native_favorite_verification(
+            next_batch_id
+        )
+        verified = self.repository.complete_native_favorite_verification(
+            int(management_verification["task_id"]),
+            claim_token=str(management_verification["claim_token"]),
+            status="already_favorited",
             reason="favorite_management_identity_confirmed",
         )
         self.assertEqual(verified["status"], "already_favorited")
@@ -375,7 +421,7 @@ class NativeFavoriteWorkflowTest(unittest.TestCase):
                 method="native_detail_control",
             )
 
-        with self.assertRaisesRegex(ValueError, "requires an attempted write"):
+        with self.assertRaisesRegex(ValueError, "source phase status"):
             self.repository.complete_native_favorite_task(
                 int(claimed["task_id"]),
                 claim_token=str(claimed["claim_token"]),

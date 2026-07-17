@@ -116,6 +116,7 @@ async function proxyNativeFavoriteApi(message) {
     "/api/favorites/reconcile",
     "/api/favorites/verification/claim",
     "/api/favorites/verification/result",
+    "/api/favorites/status",
   ]);
   const path = String(message?.path || "");
   if (!allowedPaths.has(path)) {
@@ -333,10 +334,21 @@ async function verifyNativeFavoriteTask(task, sender) {
     return { ok: false, error: "Native Favorite verification must run from the top frame." };
   }
   const tab = sender?.tab;
-  if (!tab?.id || !isBossTabUrl(tab.url) || String(task?.platform || "").toLowerCase() !== "boss") {
+  if (
+    !tab?.id ||
+    Number(task?.source_tab_id || 0) !== Number(tab.id) ||
+    !isBossTabUrl(tab.url) ||
+    String(task?.platform || "").toLowerCase() !== "boss"
+  ) {
     return {
       ok: true,
-      result: nativeFavoriteFailure(false, "favorite_management_context_required", "management_context_guard"),
+      result: {
+        status: "unknown",
+        attempted: task?.source_action_attempted === true,
+        reason: "favorite_management_same_source_tab_required",
+        method: "management_context_guard",
+        stop_batch: true,
+      },
     };
   }
   const attempted = task?.source_action_attempted === true;

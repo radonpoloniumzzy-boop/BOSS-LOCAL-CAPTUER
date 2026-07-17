@@ -622,6 +622,7 @@ async function testNativeFavoriteManagementPhaseVerifiesInCurrentSinglePage() {
       platform: "boss",
       platform_identity: { attribute: "data-geekid", value: "trusted-71" },
       source_action_attempted: true,
+      source_tab_id: 93,
     },
   }, {
     frameId: 0,
@@ -654,12 +655,32 @@ async function testNativeFavoriteWrongManagementContextStaysPending() {
       platform: "boss",
       platform_identity: { attribute: "data-geekid", value: "trusted-71" },
       source_action_attempted: false,
+      source_tab_id: 93,
     },
   }, {
     frameId: 0,
     tab: { id: 93, url: "https://www.zhipin.com/web/chat/interaction" },
   });
   assert.strictEqual(result.result.status, "unknown");
+  assert.strictEqual(result.result.stop_batch, true);
+}
+
+async function testNativeFavoriteManagementPhaseRejectsAnotherBossTabWithoutConsumingTask() {
+  const { api } = loadServiceWorker();
+  const result = await api.handleMessage({
+    type: "native_favorite_verify",
+    task: {
+      platform: "boss",
+      platform_identity: { attribute: "data-geekid", value: "trusted-71" },
+      source_action_attempted: true,
+      source_tab_id: 91,
+    },
+  }, {
+    frameId: 0,
+    tab: { id: 104, url: "https://www.zhipin.com/web/chat/interaction" },
+  });
+  assert.strictEqual(result.result.status, "unknown");
+  assert.strictEqual(result.result.reason, "favorite_management_same_source_tab_required");
   assert.strictEqual(result.result.stop_batch, true);
 }
 
@@ -1574,6 +1595,7 @@ async function main() {
   await testNativeFavoriteSourcePhaseWorksWithOnlyOneBossPage();
   await testNativeFavoriteManagementPhaseVerifiesInCurrentSinglePage();
   await testNativeFavoriteWrongManagementContextStaysPending();
+  await testNativeFavoriteManagementPhaseRejectsAnotherBossTabWithoutConsumingTask();
   await testNativeFavoriteApiProxyRejectsExternalHostsAndArbitraryPaths();
   await testNativeFavoriteVerifyOnlyDefersToLaterManagementPhase();
   await testNativeFavoriteWholeTabRestrictionPreflightPreventsFrameWrite();

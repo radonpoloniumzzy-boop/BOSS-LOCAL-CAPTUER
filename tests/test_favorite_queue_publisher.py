@@ -163,15 +163,15 @@ class NativeFavoriteQueuePublisherTest(unittest.TestCase):
         self.repository.complete_native_favorite_task(
             int(claimed["task_id"]),
             claim_token=str(claimed["claim_token"]),
-            status="success",
+            status="verification_pending",
             attempted=True,
-            reason="favorite_management_identity_confirmed",
+            reason="favorite_state_active_pending_management_verification",
         )
         self.assertIsNone(
             self.repository.claim_next_native_favorite_task(int(favorite_batch_id))
         )
         remaining = self.repository.list_native_favorite_tasks(int(favorite_batch_id))
-        self.assertEqual(sum(str(task["status"]) == "pending" for task in remaining), 1)
+        self.assertEqual(sum(str(task["status"]) == "deferred" for task in remaining), 1)
         names = {
             str(row["name"]): str(row["rating"])
             for row in self.repository.list_screening_results(int(screening["run_id"]))

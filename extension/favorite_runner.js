@@ -64,10 +64,12 @@
           worker_id: `favorite-source-${batchId}`,
         });
         if (!task) {
-          state.phase = state.pendingVerification > 0 ? "awaiting_verification" : "completed";
+          const summary = await post(apiBase, apiToken, "/api/favorites/status", { batch_id: batchId });
+          state.pendingVerification = Number(summary?.pending_verification || 0);
+          state.phase = String(summary?.status || "completed");
           state.message = state.pendingVerification > 0
             ? "Source actions finished. Open Boss Favorite Talent later and verify this batch."
-            : "No more executable Native Favorite tasks.";
+            : `Source phase finished with durable batch status: ${state.phase}.`;
           break;
         }
         state.currentTaskId = Number(task.task_id);
@@ -165,6 +167,9 @@
   async function startVerification(settings) {
     await ready;
     if (state.running) throw new Error("A Native Favorite operation is already running in this tab.");
+    if (state.requiresManualResolution) {
+      throw new Error("An interrupted source action requires resolution before management verification.");
+    }
     const batchId = Number(settings?.batchId || 0);
     if (!Number.isInteger(batchId) || batchId <= 0) {
       throw new Error("Native Favorite batch ID is required.");
@@ -194,8 +199,12 @@
           worker_id: `favorite-management-${batchId}`,
         });
         if (!task) {
-          state.phase = "verification_completed";
-          state.message = "No more Native Favorite items are waiting for management verification.";
+          const summary = await post(apiBase, apiToken, "/api/favorites/status", { batch_id: batchId });
+          state.pendingVerification = Number(summary?.pending_verification || 0);
+          state.phase = ["completed", "completed_with_deferred"].includes(String(summary?.status || ""))
+            ? "verification_completed"
+            : `verification_${String(summary?.status || "blocked")}`;
+          state.message = `Durable Native Favorite batch status: ${String(summary?.status || "unknown")}.`;
           break;
         }
         state.currentTaskId = Number(task.task_id);

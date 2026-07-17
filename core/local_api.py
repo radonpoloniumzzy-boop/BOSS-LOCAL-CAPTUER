@@ -25,6 +25,7 @@ class LocalApiServer:
         reconcile_favorite_batch: Callable[[dict[str, object]], dict[str, object]] | None = None,
         claim_favorite_verification: Callable[[dict[str, object]], dict[str, object] | None] | None = None,
         report_favorite_verification: Callable[[dict[str, object]], dict[str, object]] | None = None,
+        get_favorite_batch_status: Callable[[dict[str, object]], dict[str, object]] | None = None,
         auth_token: str = "",
         max_body_bytes: int = 25_000_000,
     ) -> None:
@@ -43,6 +44,7 @@ class LocalApiServer:
         self.reconcile_favorite_batch = reconcile_favorite_batch
         self.claim_favorite_verification = claim_favorite_verification
         self.report_favorite_verification = report_favorite_verification
+        self.get_favorite_batch_status = get_favorite_batch_status
         self.auth_token = str(auth_token or "")
         self.max_body_bytes = max_body_bytes
         self._server: ThreadingHTTPServer | None = None
@@ -118,6 +120,7 @@ class LocalApiServer:
                     "/api/favorites/reconcile",
                     "/api/favorites/verification/claim",
                     "/api/favorites/verification/result",
+                    "/api/favorites/status",
                 }:
                     self._send_json(404, {"error": "Not found"})
                     return
@@ -171,6 +174,13 @@ class LocalApiServer:
                             self._send_json(503, {"ok": False, "error": "Native Favorite verification is unavailable"})
                             return
                         result = parent.report_favorite_verification(payload)
+                        self._send_json(200, {"ok": True, "result": result})
+                        return
+                    if self.path == "/api/favorites/status":
+                        if parent.get_favorite_batch_status is None:
+                            self._send_json(503, {"ok": False, "error": "Native Favorite status is unavailable"})
+                            return
+                        result = parent.get_favorite_batch_status(payload)
                         self._send_json(200, {"ok": True, "result": result})
                         return
                     if self.path == "/api/automation/start":

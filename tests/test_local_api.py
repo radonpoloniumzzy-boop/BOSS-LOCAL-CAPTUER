@@ -241,6 +241,11 @@ class LocalApiServerTest(unittest.TestCase):
             "task_id": int(payload["task_id"]),
             "status": str(payload["status"]),
         }
+        self.server.get_favorite_batch_status = lambda payload: {
+            "batch_id": int(payload["batch_id"]),
+            "status": "awaiting_verification",
+            "pending_verification": 1,
+        }
 
         claim_body = json.dumps({"batch_id": 19, "worker_id": "extension-tab-91"}).encode(
             "utf-8"
@@ -352,6 +357,17 @@ class LocalApiServerTest(unittest.TestCase):
         verify_result_payload = json.loads(verify_result_response.read().decode("utf-8"))
         self.assertEqual(verify_result_response.status, 200)
         self.assertEqual(verify_result_payload["result"]["status"], "success")
+
+        status_connection = http.client.HTTPConnection("127.0.0.1", self.server.port, timeout=5)
+        status_connection.request(
+            "POST", "/api/favorites/status",
+            body=json.dumps({"batch_id": 19}).encode("utf-8"),
+            headers={"Content-Type": "application/json", "X-Boss-Local-Token": self.token},
+        )
+        status_response = status_connection.getresponse()
+        status_payload = json.loads(status_response.read().decode("utf-8"))
+        self.assertEqual(status_response.status, 200)
+        self.assertEqual(status_payload["result"]["status"], "awaiting_verification")
 
 
 if __name__ == "__main__":

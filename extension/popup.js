@@ -212,6 +212,12 @@ async function stopNativeFavoriteBatch() {
 async function startNativeFavoriteVerification() {
   const tab = await getActiveBossTab();
   if (!tab) return;
+  const stored = await chrome.storage.local.get({ favoriteSourceTabId: null });
+  const sourceTabId = Number(stored.favoriteSourceTabId || 0);
+  if (!sourceTabId || sourceTabId !== Number(tab.id)) {
+    setStatus("Open Favorite Talent by navigating the same BOSS tab that ran the source favorite phase.");
+    return;
+  }
   const settings = collectSettings();
   const batchId = Number(settings.favoriteBatchId || 0);
   if (!Number.isInteger(batchId) || batchId <= 0) {
@@ -219,7 +225,7 @@ async function startNativeFavoriteVerification() {
     return;
   }
   verifyFavoriteBatchButton.disabled = true;
-  await chrome.storage.local.set({ ...settings, favoriteSourceTabId: tab.id });
+  await chrome.storage.local.set({ ...settings });
   try {
     await chrome.scripting.executeScript({
       target: { tabId: tab.id },

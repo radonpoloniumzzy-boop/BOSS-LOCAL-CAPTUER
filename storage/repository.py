@@ -67,9 +67,7 @@ NATIVE_FAVORITE_TERMINAL_STATUSES = {
     "stopped",
 }
 
-NATIVE_FAVORITE_REPORTABLE_STATUSES = {
-    "success",
-    "already_favorited",
+NATIVE_FAVORITE_SOURCE_REPORTABLE_STATUSES = {
     "failed",
     "unknown",
     "verification_pending",
@@ -1466,6 +1464,9 @@ class CandidateRepository:
                 ),
             ).fetchone()
             if claimed_row is None:
+                self._defer_native_favorite_tasks_over_action_limit(
+                    connection, favorite_batch_id, timestamp=timestamp,
+                )
                 self._refresh_native_favorite_batch_counts(
                     connection,
                     favorite_batch_id,
@@ -1622,8 +1623,8 @@ class CandidateRepository:
         if normalized_status == "identity_conflict":
             normalized_status = "failed"
             normalized_reason = normalized_reason or "multiple_favorite_management_identity_matches"
-        if normalized_status not in NATIVE_FAVORITE_REPORTABLE_STATUSES:
-            raise ValueError(f"Invalid Native Favorite terminal status: {status}")
+        if normalized_status not in NATIVE_FAVORITE_SOURCE_REPORTABLE_STATUSES:
+            raise ValueError(f"Invalid Native Favorite source phase status: {status}")
         if not isinstance(attempted, bool):
             raise ValueError("Native Favorite attempted must be boolean")
         if normalized_status == "success" and not attempted:
@@ -1726,6 +1727,23 @@ class CandidateRepository:
         claim_token = secrets.token_urlsafe(24)
         with connection:
             connection.execute("BEGIN IMMEDIATE")
+            self._defer_native_favorite_tasks_over_action_limit(
+                connection, favorite_batch_id, timestamp=timestamp,
+            )
+            self._refresh_native_favorite_batch_counts(
+                connection, favorite_batch_id, timestamp=timestamp,
+            )
+            batch = connection.execute(
+                "SELECT status FROM native_favorite_batches WHERE id = ?",
+                (favorite_batch_id,),
+            ).fetchone()
+            if batch is None:
+                raise ValueError(f"Native Favorite batch not found: {favorite_batch_id}")
+            batch_status = str(batch["status"])
+            if batch_status in {"completed", "completed_with_deferred"}:
+                return None
+            if batch_status not in {"awaiting_verification", "verifying"}:
+                raise ValueError("Native Favorite source phase must finish before verification")
             connection.execute(
                 """
                 UPDATE native_favorite_tasks
@@ -1767,7 +1785,7 @@ class CandidateRepository:
                 """
                 SELECT t.id AS task_id, t.batch_id, t.platform, t.identity_attribute,
                        t.identity_value, t.source_action_attempted, t.attempt_count,
-                       t.max_attempts, b.config_snapshot_json
+                       t.max_attempts, b.config_snapshot_json, b.source_page_context_json
                 FROM native_favorite_tasks t
                 JOIN native_favorite_batches b ON b.id = t.batch_id
                 WHERE t.id = ?
@@ -1790,6 +1808,9 @@ class CandidateRepository:
             "attempt_count": int(row["attempt_count"]),
             "max_attempts": int(row["max_attempts"]),
             "config_snapshot": json.loads(str(row["config_snapshot_json"] or "{}")),
+            "source_tab_id": int(
+                json.loads(str(row["source_page_context_json"] or "{}")).get("tab_id") or 0
+            ),
             "claim_token": claim_token,
             "locked_at": timestamp,
         }
@@ -1876,6 +1897,47 @@ class CandidateRepository:
             "reason": str(reason or ""),
         }
 
+    def get_native_favorite_batch_status(
+        self,
+        favorite_batch_id: int,
+    ) -> dict[str, object]:
+        connection = self.db.get_connection()
+        row = connection.execute(
+            """
+            SELECT status, source_page_context_json, total_tasks, completed_tasks
+            FROM native_favorite_batches WHERE id = ?
+            """,
+            (favorite_batch_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"Native Favorite batch not found: {favorite_batch_id}")
+        counts = connection.execute(
+            """
+            SELECT
+                SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending_source,
+                SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS running_source,
+                SUM(CASE WHEN status = 'verification_pending' THEN 1 ELSE 0 END) AS pending_verification,
+                SUM(CASE WHEN status = 'verifying' THEN 1 ELSE 0 END) AS verifying,
+                SUM(CASE WHEN status = 'deferred' THEN 1 ELSE 0 END) AS deferred,
+                SUM(CASE WHEN status IN ('success', 'already_favorited') THEN 1 ELSE 0 END) AS verified,
+                SUM(CASE WHEN status IN ('failed', 'unknown', 'identity_incomplete', 'stopped') THEN 1 ELSE 0 END) AS terminal_other
+            FROM native_favorite_tasks WHERE batch_id = ?
+            """,
+            (favorite_batch_id,),
+        ).fetchone()
+        source_context = json.loads(str(row["source_page_context_json"] or "{}"))
+        return {
+            "batch_id": favorite_batch_id,
+            "status": str(row["status"]),
+            "source_tab_id": int(source_context.get("tab_id") or 0),
+            "total_tasks": int(row["total_tasks"] or 0),
+            "completed_tasks": int(row["completed_tasks"] or 0),
+            **{name: int(counts[name] or 0) for name in (
+                "pending_source", "running_source", "pending_verification",
+                "verifying", "deferred", "verified", "terminal_other",
+            )},
+        }
+
     def retry_native_favorite_task(self, task_id: int) -> dict[str, object]:
         connection = self.db.get_connection()
         timestamp = now_iso()
@@ -1928,6 +1990,41 @@ class CandidateRepository:
         }
 
     @staticmethod
+    def _defer_native_favorite_tasks_over_action_limit(
+        connection: sqlite3.Connection,
+        favorite_batch_id: int,
+        *,
+        timestamp: str,
+    ) -> None:
+        limit = connection.execute(
+            "SELECT max_actions FROM native_favorite_batches WHERE id = ?",
+            (favorite_batch_id,),
+        ).fetchone()
+        if limit is None:
+            return
+        started = connection.execute(
+            """
+            SELECT COUNT(*) FROM native_favorite_tasks
+            WHERE batch_id = ? AND started_at IS NOT NULL
+            """,
+            (favorite_batch_id,),
+        ).fetchone()[0]
+        running = connection.execute(
+            "SELECT COUNT(*) FROM native_favorite_tasks WHERE batch_id = ? AND status = 'running'",
+            (favorite_batch_id,),
+        ).fetchone()[0]
+        if int(running or 0) == 0 and int(started or 0) >= int(limit["max_actions"] or 20):
+            connection.execute(
+                """
+                UPDATE native_favorite_tasks
+                SET status = 'deferred', error_reason = 'batch_action_limit_reached',
+                    updated_at = ?
+                WHERE batch_id = ? AND status = 'pending'
+                """,
+                (timestamp, favorite_batch_id),
+            )
+
+    @staticmethod
     def _refresh_native_favorite_batch_counts(
         connection: sqlite3.Connection,
         favorite_batch_id: int,
@@ -1939,7 +2036,8 @@ class CandidateRepository:
             SELECT
                 SUM(CASE WHEN status IN ('pending', 'running') THEN 1 ELSE 0 END) AS remaining,
                 SUM(CASE WHEN status IN ('verification_pending', 'verifying') THEN 1 ELSE 0 END) AS verification_remaining,
-                SUM(CASE WHEN status NOT IN ('pending', 'running', 'verification_pending', 'verifying') THEN 1 ELSE 0 END) AS completed,
+                SUM(CASE WHEN status = 'deferred' THEN 1 ELSE 0 END) AS deferred,
+                SUM(CASE WHEN status NOT IN ('pending', 'running', 'verification_pending', 'verifying', 'deferred') THEN 1 ELSE 0 END) AS completed,
                 SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS running
                 ,SUM(CASE WHEN status = 'verifying' THEN 1 ELSE 0 END) AS verifying
                 ,SUM(CASE WHEN started_at IS NOT NULL THEN 1 ELSE 0 END) AS started
@@ -1953,6 +2051,7 @@ class CandidateRepository:
         running = int(counts["running"] or 0)
         verification_remaining = int(counts["verification_remaining"] or 0)
         verifying = int(counts["verifying"] or 0)
+        deferred = int(counts["deferred"] or 0)
         started = int(counts["started"] or 0)
         batch_row = connection.execute(
             "SELECT max_actions FROM native_favorite_batches WHERE id = ?",
@@ -1960,7 +2059,7 @@ class CandidateRepository:
         ).fetchone()
         max_actions = int(batch_row["max_actions"] or 20) if batch_row is not None else 20
         status = (
-            "completed"
+            ("completed_with_deferred" if deferred else "completed")
             if remaining == 0 and verification_remaining == 0
             else (
                 "running"
@@ -1980,7 +2079,7 @@ class CandidateRepository:
             """
             UPDATE native_favorite_batches
             SET status = ?, completed_tasks = ?,
-                completed_at = CASE WHEN ? = 'completed' THEN ? ELSE NULL END,
+                completed_at = CASE WHEN ? IN ('completed', 'completed_with_deferred') THEN ? ELSE NULL END,
                 updated_at = ?
             WHERE id = ?
             """,
