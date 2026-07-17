@@ -82,12 +82,12 @@
           outcome = normalizeOutcome(response.result);
         } catch (error) {
           outcome = {
-            status: "failed",
-            attempted: false,
-            reason: "native_favorite_executor_unavailable",
+            status: "unknown",
+            attempted: true,
+            reason: "native_favorite_execution_bridge_outcome_unknown",
             method: "extension_execution_bridge",
             stop_batch: true,
-            retryable: true,
+            retryable: false,
             error: error?.message || String(error),
           };
         }

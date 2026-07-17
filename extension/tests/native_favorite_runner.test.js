@@ -302,6 +302,25 @@ async function testExplicitRetryableFailureRetriesOnceButUnknownNeverRetries() {
   );
 }
 
+async function testExecutionBridgeLossIsUnknownAndNeverRetries() {
+  const { runner, requests } = loadRunner({
+    claims: [favoriteTask(), favoriteTask({ task_id: 72, claim_token: "claim-72" })],
+    executionResults: [Promise.reject(new Error("message port closed"))],
+  });
+
+  const finalStatus = await runner.start({
+    batchId: 19,
+    apiBase: "http://127.0.0.1:17863",
+    apiToken: "local-token",
+  });
+
+  assert.strictEqual(finalStatus.phase, "paused");
+  assert.strictEqual(requests.filter((request) => request.url.endsWith("/claim")).length, 1);
+  assert.strictEqual(requests[1].payload.status, "unknown");
+  assert.strictEqual(requests[1].payload.attempted, true);
+  assert.strictEqual(requests.some((request) => request.url.endsWith("/retry")), false);
+}
+
 async function runNativeFavoriteRunnerTests() {
   await testExecutionContractRejectsWrongContextAndAmbiguousFrames();
   await testDestroyedSourceDocumentIsReconciledAsInterruptedAndCannotRestart();
@@ -309,6 +328,7 @@ async function runNativeFavoriteRunnerTests() {
   await testRunnerStopsAfterUnknownWithoutClaimingAnotherTask();
   await testManualStopFinishesCurrentTaskWithoutClaimingAnother();
   await testExplicitRetryableFailureRetriesOnceButUnknownNeverRetries();
+  await testExecutionBridgeLossIsUnknownAndNeverRetries();
 }
 
 module.exports = { runNativeFavoriteRunnerTests };
