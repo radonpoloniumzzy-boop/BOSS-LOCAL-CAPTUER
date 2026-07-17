@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import json
-from urllib.parse import urlparse
 
 from core.models import BOSS_TRUSTED_PLATFORM_UID_ATTRIBUTES, SCREENING_RATINGS
+from core.platform import is_boss_recommendation_url
 
 
 class NativeFavoriteQueuePublisher:
@@ -42,9 +42,11 @@ class NativeFavoriteQueuePublisher:
             raise ValueError("Source Page Context does not match the Capture Batch")
         if int(source_context.get("tab_id") or 0) <= 0:
             raise ValueError("Source Page Context is missing the Chrome tab")
+        if str(source_context.get("platform") or "").strip().lower() != "boss":
+            raise ValueError("Source Page Context does not identify BOSS")
         source_url = str(source_context.get("source_url") or "").strip()
-        if not self._is_boss_url(source_url):
-            raise ValueError("Native Favorite is only available for BOSS source pages")
+        if not is_boss_recommendation_url(source_url):
+            raise ValueError("Native Favorite is only available for BOSS recommendation pages")
 
         tasks = []
         for priority, row in enumerate(
@@ -101,8 +103,3 @@ class NativeFavoriteQueuePublisher:
             if str(evidence.get(attribute) or "").strip() == platform_uid:
                 return {"attribute": attribute, "value": platform_uid}
         return None
-
-    @staticmethod
-    def _is_boss_url(value: str) -> bool:
-        host = (urlparse(value).hostname or "").lower()
-        return host == "zhipin.com" or host.endswith(".zhipin.com") or host == "bosszhipin.com" or host.endswith(".bosszhipin.com")

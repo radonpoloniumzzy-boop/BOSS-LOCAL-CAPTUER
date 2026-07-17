@@ -109,6 +109,7 @@ class NativeFavoriteQueuePublisherTest(unittest.TestCase):
             "source_page_context": {
                 "capture_batch_id": capture_batch_id,
                 "tab_id": 91,
+                "platform": "boss",
                 "source_url": "https://www.zhipin.com/web/geek/recommend",
             },
         }
@@ -198,6 +199,60 @@ class NativeFavoriteQueuePublisherTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "completed"):
             NativeFavoriteQueuePublisher(self.repository).publish(run_id)
+
+    def test_queue_rejects_non_boss_or_non_recommendation_source_context(self) -> None:
+        imported = self.importer.import_cards(
+            {
+                "job_title": "Source Guard Role",
+                "source_url": "https://www.zhipin.com/web/geek/recommend",
+                "cards": [{"raw_card_text": "Guard candidate", "name": "Guard"}],
+            }
+        )
+        profile = self.repository.save_screening_profile(
+            ScreeningProfile(
+                job_title="Source Guard Role",
+                jd_text="Guard",
+                prompt_text="Evaluate",
+                favorite_eligible_ratings=["SSR"],
+            )
+        )
+        invalid_contexts = (
+            {
+                "capture_batch_id": int(imported["batch_id"]),
+                "tab_id": 91,
+                "platform": "liepin",
+                "source_url": "https://www.zhipin.com/web/geek/recommend",
+            },
+            {
+                "capture_batch_id": int(imported["batch_id"]),
+                "tab_id": 91,
+                "platform": "boss",
+                "source_url": "https://www.zhipin.com/web/geek/friend",
+            },
+        )
+        for source_context in invalid_contexts:
+            with self.subTest(source_context=source_context):
+                run_id = self.repository.create_screening_run(
+                    profile_id=int(profile.id),
+                    source_job_title=profile.job_title,
+                    batch_id=int(imported["batch_id"]),
+                    provider="fake",
+                    model="fake-model",
+                    total_candidates=0,
+                    origin="automation",
+                    automation_snapshot={
+                        "post_screen_action": "screen_and_favorite",
+                        "profile_id": int(profile.id),
+                        "profile_version": int(profile.version),
+                        "favorite_eligible_ratings": ["SSR"],
+                        "favorite_interval_seconds": 5,
+                        "favorite_max_candidates": 20,
+                        "source_page_context": source_context,
+                    },
+                )
+                self.repository.finalize_screening_run(run_id, "completed", 0, 0)
+                with self.assertRaisesRegex(ValueError, "BOSS"):
+                    NativeFavoriteQueuePublisher(self.repository).publish(run_id)
 
 
 if __name__ == "__main__":

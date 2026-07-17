@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import threading
+from copy import deepcopy
 from datetime import datetime, timedelta
 from types import SimpleNamespace
-from urllib.parse import urlparse
 
 from PySide6.QtCore import QObject, QSettings, Qt, QThread, Signal
 from PySide6.QtGui import QAction, QCloseEvent
@@ -34,6 +34,7 @@ from core.credentials import CredentialStore
 from core.local_api import LocalApiServer
 from core.logger import LoggingService
 from core.models import AutomationFlowConfig, ScreeningProfile
+from core.platform import is_boss_recommendation_url
 from storage.db import DatabaseManager
 from storage.export_service import ExportService
 from storage.repository import CandidateRepository
@@ -122,6 +123,7 @@ class MainWindow(QMainWindow):
         self._ai_test_running = False
         self._ai_test_context: dict[str, object] = {}
         self._automation_armed = False
+        self._armed_automation_snapshot: dict[str, object] | None = None
         self._queued_automation_batches: list[dict[str, object]] = []
         self._automation_config_lock = threading.RLock()
         self._capture_running = False
@@ -818,6 +820,28 @@ class MainWindow(QMainWindow):
         else:
             self.automation_flow_page.show_results([])
 
+    @staticmethod
+    def _build_automation_launch_snapshot(
+        flow: AutomationFlowConfig,
+        profile: dict[str, object],
+    ) -> dict[str, object]:
+        return {
+            "profile": deepcopy(profile),
+            "flow": {
+                "profile_id": flow.profile_id,
+                "job_title": flow.job_title,
+                "source_url": flow.source_url,
+                "max_candidates": flow.max_candidates,
+                "provider": flow.provider,
+                "model": flow.model,
+                "api_base": flow.api_base,
+                "api_key_env": flow.api_key_env,
+                "post_screen_action": flow.post_screen_action,
+                "favorite_interval_seconds": flow.favorite_interval_seconds,
+                "favorite_max_candidates": flow.favorite_max_candidates,
+            },
+        }
+
     def _automation_status_payload(self) -> dict[str, object]:
         with self._automation_config_lock:
             config = self.config_service.load()
@@ -870,6 +894,10 @@ class MainWindow(QMainWindow):
             self.config_service.save(config)
             self.config = config
             self._automation_armed = True
+            self._armed_automation_snapshot = self._build_automation_launch_snapshot(
+                flow,
+                dict(profile),
+            )
             result = self._automation_status_payload()
             result["message"] = "自动化流程已启动，等待插件完成滚动采集。"
             self.logger.info(
@@ -907,14 +935,7 @@ class MainWindow(QMainWindow):
                 "当前岗位未配置自动收藏评级，不能保存“筛选并收藏”。"
             )
             return False
-        source_host = (urlparse(source_url).hostname or "").lower()
-        is_boss_source = (
-            source_host == "zhipin.com"
-            or source_host.endswith(".zhipin.com")
-            or source_host == "bosszhipin.com"
-            or source_host.endswith(".bosszhipin.com")
-        )
-        if post_screen_action == "screen_and_favorite" and not is_boss_source:
+        if post_screen_action == "screen_and_favorite" and not is_boss_recommendation_url(source_url):
             self.automation_flow_page.set_status("筛选并收藏目前只支持 BOSS 推荐牛人页面。")
             return False
 
@@ -953,6 +974,11 @@ class MainWindow(QMainWindow):
         if not self._save_automation_flow(payload):
             return
         self._automation_armed = True
+        profile = self.repository.get_screening_profile(int(flow.profile_id))
+        self._armed_automation_snapshot = self._build_automation_launch_snapshot(
+            flow,
+            dict(profile),
+        )
         self.automation_flow_page.set_waiting(True)
         flow = self.config.automation_flow
         self.dashboard_page.job_title_input.setText(flow.job_title)
@@ -961,6 +987,7 @@ class MainWindow(QMainWindow):
 
     def _cancel_automation_flow(self) -> None:
         self._automation_armed = False
+        self._armed_automation_snapshot = None
         self._queued_automation_batches.clear()
         self.config.automation_flow.enabled = False
         self.config_service.save(self.config)
@@ -1272,9 +1299,7 @@ class MainWindow(QMainWindow):
         return payload
 
     def _queue_automation_screening(self, capture_result: dict[str, object]) -> None:
-        with self._automation_config_lock:
-            self.config = self.config_service.load()
-        if not self.config.automation_flow.enabled:
+        if not self._automation_armed or self._armed_automation_snapshot is None:
             return
         batch_id = capture_result.get("batch_id")
         total_items = int(
@@ -1286,12 +1311,17 @@ class MainWindow(QMainWindow):
         if batch_id is None or total_items <= 0:
             self.automation_flow_page.set_status("采集结束，但本批次没有可用于初筛的候选人。")
             return
+        launch_snapshot = deepcopy(self._armed_automation_snapshot)
+        flow_snapshot = dict(launch_snapshot.get("flow") or {})
         payload = {
             "batch_id": int(batch_id),
-            "job_title": str(capture_result.get("job_title") or self.config.automation_flow.job_title),
-            "source_url": str(capture_result.get("source_url") or self.config.automation_flow.source_url),
+            "job_title": str(capture_result.get("job_title") or flow_snapshot.get("job_title") or ""),
+            "source_url": str(capture_result.get("source_url") or flow_snapshot.get("source_url") or ""),
             "source_page_context": dict(capture_result.get("source_page_context") or {}),
+            "launch_snapshot": launch_snapshot,
         }
+        self._automation_armed = False
+        self._armed_automation_snapshot = None
         if self._ai_screening_thread is not None:
             queued_ids = {int(item["batch_id"]) for item in self._queued_automation_batches}
             if int(payload["batch_id"]) not in queued_ids:
@@ -1303,17 +1333,24 @@ class MainWindow(QMainWindow):
         self._start_automation_screening(payload)
 
     def _start_automation_screening(self, capture_result: dict[str, object]) -> None:
-        flow = self.config.automation_flow
-        if not flow.enabled or flow.profile_id is None:
+        launch_snapshot = capture_result.get("launch_snapshot")
+        if not isinstance(launch_snapshot, dict):
             return
-        profile_row = self.repository.get_screening_profile(int(flow.profile_id))
-        if profile_row is None:
-            self.automation_flow_page.set_status("自动化筛选方案已不存在，请重新选择并保存。")
+        flow_snapshot = launch_snapshot.get("flow")
+        profile_row = launch_snapshot.get("profile")
+        if not isinstance(flow_snapshot, dict) or not isinstance(profile_row, dict):
+            self.automation_flow_page.set_status("自动化配置快照无效，未启动本批次筛选。")
             return
         batch_id = int(capture_result["batch_id"])
+        post_screen_action = str(flow_snapshot.get("post_screen_action") or "screen_only")
+        screening_limit = (
+            0
+            if post_screen_action == "screen_and_favorite"
+            else int(flow_snapshot.get("max_candidates") or 0)
+        )
         candidates = self.repository.list_screening_candidates(
             batch_id=batch_id,
-            limit=flow.max_candidates,
+            limit=screening_limit,
         )
         if not candidates:
             self.automation_flow_page.set_status(f"批次 #{batch_id} 没有可用于初筛的候选人。")
@@ -1321,42 +1358,43 @@ class MainWindow(QMainWindow):
         page_provider = self.automation_flow_page.provider_payload()
         api_key = str(page_provider.get("api_key") or "")
         ai_page_provider = self.ai_page.provider_payload()
-        if not api_key and str(ai_page_provider.get("provider") or "") == flow.provider:
+        if not api_key and str(ai_page_provider.get("provider") or "") == str(flow_snapshot.get("provider") or ""):
             api_key = str(ai_page_provider.get("api_key") or "")
         provider = {
-            "provider": flow.provider,
-            "model": flow.model,
-            "api_base": flow.api_base,
+            "provider": str(flow_snapshot.get("provider") or ""),
+            "model": str(flow_snapshot.get("model") or ""),
+            "api_base": str(flow_snapshot.get("api_base") or ""),
             "api_key": api_key,
-            "api_key_env": flow.api_key_env,
+            "api_key_env": str(flow_snapshot.get("api_key_env") or ""),
         }
         worker_payload = {
             "profile": dict(profile_row),
             "provider": provider,
-            "source_job_title": str(capture_result.get("job_title") or flow.job_title),
+            "source_job_title": str(capture_result.get("job_title") or flow_snapshot.get("job_title") or ""),
             "batch_id": batch_id,
-            "limit": flow.max_candidates,
+            "limit": screening_limit,
             "candidates": candidates,
             "origin": "automation",
             "automation_snapshot": {
-                "post_screen_action": flow.post_screen_action,
+                "post_screen_action": post_screen_action,
+                "job_title": str(capture_result.get("job_title") or flow_snapshot.get("job_title") or ""),
                 "profile_id": int(profile_row["id"]),
                 "profile_version": int(profile_row.get("version") or 1),
+                "screening_profile_snapshot": deepcopy(profile_row),
                 "favorite_eligible_ratings": list(
                     profile_row.get("favorite_eligible_ratings") or []
                 ),
-                "favorite_interval_seconds": int(flow.favorite_interval_seconds),
-                "favorite_max_candidates": int(flow.favorite_max_candidates),
+                "favorite_interval_seconds": int(flow_snapshot.get("favorite_interval_seconds") or 0),
+                "favorite_max_candidates": int(flow_snapshot.get("favorite_max_candidates") or 0),
                 "source_page_context": {
                     **dict(capture_result.get("source_page_context") or {}),
                     "capture_batch_id": batch_id,
                     "source_url": str(
-                        capture_result.get("source_url") or flow.source_url
+                        capture_result.get("source_url") or flow_snapshot.get("source_url") or ""
                     ),
                 },
             },
         }
-        self._automation_armed = False
         self._launch_ai_screening(worker_payload, origin="automation")
 
     def _on_ai_screening_progress(self, progress, origin: str) -> None:
@@ -1528,7 +1566,8 @@ class MainWindow(QMainWindow):
             f"扩展已导入 {result.get('parsed_cards', 0)} 张卡片，当前批次 #{result.get('batch_id')}。"
         )
         self.statusBar().showMessage(f"扩展导入完成：批次 #{result.get('batch_id')}")
-        self._queue_automation_screening(result)
+        if bool(result.get("automation_requested")):
+            self._queue_automation_screening(result)
 
     def _on_extension_import_error(self, message: str) -> None:
         self.dashboard_page.set_message(message)
