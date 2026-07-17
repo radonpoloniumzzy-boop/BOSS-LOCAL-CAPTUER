@@ -51,6 +51,7 @@ class AutomationFlowPage(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self._result_rows: list[dict[str, object]] = []
+        self._profiles_by_id: dict[int, dict[str, object]] = {}
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -72,6 +73,19 @@ class AutomationFlowPage(QWidget):
         self.max_candidates_input.setRange(0, 10000)
         self.max_candidates_input.setSpecialValueText("全部")
 
+        self.post_screen_action_combo = QComboBox()
+        self.post_screen_action_combo.addItem("仅采集并筛选", "screen_only")
+        self.post_screen_action_combo.addItem("筛选并收藏（单批次）", "screen_and_favorite")
+        self.favorite_interval_input = QSpinBox()
+        self.favorite_interval_input.setRange(3, 8)
+        self.favorite_interval_input.setValue(5)
+        self.favorite_interval_input.setSuffix(" 秒")
+        self.favorite_max_candidates_input = QSpinBox()
+        self.favorite_max_candidates_input.setRange(1, 50)
+        self.favorite_max_candidates_input.setValue(20)
+        self.favorite_policy_label = QLabel("当前岗位未配置自动收藏评级")
+        self.favorite_policy_label.setWordWrap(True)
+
         self.provider_combo = QComboBox()
         self.provider_combo.addItem("OpenAI", "openai")
         self.provider_combo.addItem("DeepSeek", "deepseek")
@@ -89,6 +103,10 @@ class AutomationFlowPage(QWidget):
         settings_form.addRow("采集岗位", self.job_title_input)
         settings_form.addRow("采集页面", self.source_url_input)
         settings_form.addRow("最多筛选人数", self.max_candidates_input)
+        settings_form.addRow("筛选后动作", self.post_screen_action_combo)
+        settings_form.addRow("收藏动作间隔", self.favorite_interval_input)
+        settings_form.addRow("单批收藏上限", self.favorite_max_candidates_input)
+        settings_form.addRow("岗位收藏评级", self.favorite_policy_label)
         settings_form.addRow("AI 服务商", self.provider_combo)
         settings_form.addRow("模型", self.model_combo)
         settings_form.addRow("API Base", self.api_base_input)
@@ -179,12 +197,18 @@ class AutomationFlowPage(QWidget):
             self.api_base_input.setText(flow.api_base)
         if flow.api_key_env:
             self.api_key_env_input.setText(flow.api_key_env)
+        action_index = self.post_screen_action_combo.findData(flow.post_screen_action)
+        self.post_screen_action_combo.setCurrentIndex(max(0, action_index))
+        self.favorite_interval_input.setValue(int(flow.favorite_interval_seconds))
+        self.favorite_max_candidates_input.setValue(int(flow.favorite_max_candidates))
         profile_index = self.profile_combo.findData(flow.profile_id)
         if profile_index >= 0:
             self.profile_combo.setCurrentIndex(profile_index)
+        self._profile_changed()
         self.status_label.setText("已启用，等待下一次采集" if flow.enabled else "未启用")
 
     def set_profiles(self, rows: list[dict[str, object]], selected_profile_id: int | None = None) -> None:
+        self._profiles_by_id = {int(row["id"]): dict(row) for row in rows}
         current = selected_profile_id
         if current is None:
             current = self.profile_combo.currentData()
@@ -196,6 +220,7 @@ class AutomationFlowPage(QWidget):
         index = self.profile_combo.findData(current)
         self.profile_combo.setCurrentIndex(max(0, index))
         self.profile_combo.blockSignals(False)
+        self._profile_changed()
 
     def set_runs(self, rows: list[dict[str, object]], selected_run_id: int | None = None) -> None:
         current = selected_run_id or self.run_combo.currentData()
@@ -222,6 +247,9 @@ class AutomationFlowPage(QWidget):
             "job_title": self.job_title_input.text().strip(),
             "source_url": self.source_url_input.text().strip(),
             "limit": self.max_candidates_input.value(),
+            "post_screen_action": str(self.post_screen_action_combo.currentData() or "screen_only"),
+            "favorite_interval_seconds": self.favorite_interval_input.value(),
+            "favorite_max_candidates": self.favorite_max_candidates_input.value(),
             "provider": self.provider_payload(),
         }
 
@@ -270,14 +298,32 @@ class AutomationFlowPage(QWidget):
         if not provider.get("model"):
             self.set_status("请填写 AI 模型名称。")
             return
+        if (
+            payload["post_screen_action"] == "screen_and_favorite"
+            and not self._selected_profile_favorite_ratings()
+        ):
+            self.set_status("当前岗位未配置自动收藏评级，不能启动“筛选并收藏”。")
+            return
         self.enabled_checkbox.setChecked(True)
         payload["enabled"] = True
         self.arm_requested.emit(payload)
 
     def _profile_changed(self) -> None:
         if self.profile_combo.currentData() is None:
+            self.favorite_policy_label.setText("当前岗位未配置自动收藏评级")
             return
         self.job_title_input.setText(self.profile_combo.currentText())
+        ratings = self._selected_profile_favorite_ratings()
+        self.favorite_policy_label.setText(
+            "、".join(ratings) if ratings else "当前岗位未配置自动收藏评级"
+        )
+
+    def _selected_profile_favorite_ratings(self) -> list[str]:
+        profile_id = self.profile_combo.currentData()
+        if profile_id is None:
+            return []
+        profile = self._profiles_by_id.get(int(profile_id), {})
+        return [str(value) for value in profile.get("favorite_eligible_ratings") or []]
 
     def _provider_changed(self) -> None:
         provider = str(self.provider_combo.currentData() or "openai")

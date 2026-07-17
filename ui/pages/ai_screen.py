@@ -5,6 +5,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QFormLayout,
@@ -121,6 +122,16 @@ class AIScreenPage(QWidget):
         ]:
             profile_layout.addWidget(QLabel(label))
             profile_layout.addWidget(widget)
+
+        favorite_rating_row = QHBoxLayout()
+        self.favorite_rating_checks: dict[str, QCheckBox] = {}
+        for rating in ["UR", "SSR", "SR", "R", "N"]:
+            checkbox = QCheckBox(rating)
+            self.favorite_rating_checks[rating] = checkbox
+            favorite_rating_row.addWidget(checkbox)
+        favorite_rating_row.addStretch(1)
+        profile_layout.addWidget(QLabel("自动收藏评级（不勾选则禁止筛选后收藏）"))
+        profile_layout.addLayout(favorite_rating_row)
 
         text_splitter = QSplitter(Qt.Horizontal)
         jd_group = QGroupBox("岗位 JD（必填）")
@@ -335,6 +346,9 @@ class AIScreenPage(QWidget):
         self.evidence_policy_input.setText(
             json.dumps(row.get("evidence_policy") or {}, ensure_ascii=False, sort_keys=True)
         )
+        selected_favorite_ratings = set(row.get("favorite_eligible_ratings") or [])
+        for rating, checkbox in self.favorite_rating_checks.items():
+            checkbox.setChecked(rating in selected_favorite_ratings)
         self._setting_prompt = True
         self.prompt_text.setPlainText(str(row.get("prompt_text") or ""))
         self._setting_prompt = False
@@ -362,6 +376,8 @@ class AIScreenPage(QWidget):
             self.evidence_policy_input,
         ]:
             widget.clear()
+        for checkbox in self.favorite_rating_checks.values():
+            checkbox.setChecked(False)
 
     def set_source_options(self, job_titles: list[str], batches: list[dict[str, object]]) -> None:
         current_job = self.source_job_combo.currentData()
@@ -688,6 +704,11 @@ class AIScreenPage(QWidget):
             "exclusions": items(self.exclusions_input),
             "interview_checks": items(self.interview_checks_input),
             "evidence_policy": evidence_policy,
+            "favorite_eligible_ratings": [
+                rating
+                for rating, checkbox in self.favorite_rating_checks.items()
+                if checkbox.isChecked()
+            ],
         }
 
     def provider_payload(self) -> dict[str, object]:

@@ -84,6 +84,25 @@ class AIScreenPageTest(unittest.TestCase):
         self.assertIn("market=A股", detail)
         self.assertIn("action=下单,风控", detail)
 
+    def test_profile_payload_round_trips_user_selected_favorite_ratings(self) -> None:
+        page = AIScreenPage(PromptManager(Path("assets/prompts")))
+        self.addCleanup(page.deleteLater)
+        page.show_profile(
+            {
+                "id": 8,
+                "job_title": "Quant Researcher",
+                "jd_text": "Research",
+                "favorite_eligible_ratings": ["SSR", "SR"],
+            }
+        )
+
+        payload = page.profile_payload()
+
+        self.assertEqual(payload["favorite_eligible_ratings"], ["SSR", "SR"])
+        self.assertFalse(page.favorite_rating_checks["UR"].isChecked())
+        self.assertTrue(page.favorite_rating_checks["SSR"].isChecked())
+        self.assertTrue(page.favorite_rating_checks["SR"].isChecked())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -41,6 +41,9 @@ class ConfigServiceTest(unittest.TestCase):
                 model="gpt-5.4-mini",
                 api_base="https://api.openai.com/v1",
                 api_key_env="OPENAI_API_KEY",
+                post_screen_action="screen_and_favorite",
+                favorite_interval_seconds=5,
+                favorite_max_candidates=20,
             )
             service.save(config)
 
@@ -50,6 +53,9 @@ class ConfigServiceTest(unittest.TestCase):
             self.assertEqual(loaded.automation_flow.profile_id, 12)
             self.assertEqual(loaded.automation_flow.job_title, "Java工程师")
             self.assertEqual(loaded.automation_flow.max_candidates, 80)
+            self.assertEqual(loaded.automation_flow.post_screen_action, "screen_and_favorite")
+            self.assertEqual(loaded.automation_flow.favorite_interval_seconds, 5)
+            self.assertEqual(loaded.automation_flow.favorite_max_candidates, 20)
             raw = json.loads(service.config_path.read_text(encoding="utf-8"))
             self.assertNotIn("api_key", raw["automation_flow"])
 

@@ -77,6 +77,12 @@ class CardImportService:
                     "job_title": job_title,
                     "source_url": source_url,
                     "automation_requested": bool(meta.get("automation_requested")),
+                    "source_page_context": {
+                        "capture_batch_id": int(batch.id),
+                        "platform": str(meta.get("platform") or "").strip().lower(),
+                        "source_url": source_url,
+                        "tab_id": int(meta.get("source_tab_id") or 0),
+                    },
                 }
             )
             self._log(

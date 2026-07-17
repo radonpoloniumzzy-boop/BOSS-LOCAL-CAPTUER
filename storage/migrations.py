@@ -695,10 +695,18 @@ def apply_migrations(connection) -> None:
         "evidence_policy_json": "TEXT NOT NULL DEFAULT '{}'",
         "version": "INTEGER NOT NULL DEFAULT 1",
         "parent_profile_id": "INTEGER",
+        "favorite_eligible_ratings_json": "TEXT NOT NULL DEFAULT '[]'",
     }
     for column, declaration in structured_columns.items():
         if column not in profile_columns:
             connection.execute(f"ALTER TABLE screening_profiles ADD COLUMN {column} {declaration}")
+    run_columns = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(screening_runs)").fetchall()
+    }
+    if "automation_snapshot_json" not in run_columns:
+        connection.execute(
+            "ALTER TABLE screening_runs ADD COLUMN automation_snapshot_json TEXT NOT NULL DEFAULT '{}'"
+        )
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_candidates_job_updated ON candidates(job_title, updated_at DESC)"
     )
@@ -722,6 +730,7 @@ def apply_migrations(connection) -> None:
             source_page_url TEXT NOT NULL,
             source_page_context_json TEXT NOT NULL DEFAULT '{}',
             config_snapshot_json TEXT NOT NULL DEFAULT '{}',
+            max_actions INTEGER NOT NULL DEFAULT 20,
             total_tasks INTEGER NOT NULL DEFAULT 0,
             completed_tasks INTEGER NOT NULL DEFAULT 0,
             started_at TEXT,
@@ -739,6 +748,14 @@ def apply_migrations(connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_native_favorite_batches_status "
         "ON native_favorite_batches(status, created_at)"
     )
+    favorite_batch_columns = {
+        str(row[1])
+        for row in connection.execute("PRAGMA table_info(native_favorite_batches)").fetchall()
+    }
+    if "max_actions" not in favorite_batch_columns:
+        connection.execute(
+            "ALTER TABLE native_favorite_batches ADD COLUMN max_actions INTEGER NOT NULL DEFAULT 20"
+        )
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS native_favorite_tasks (
@@ -802,5 +819,5 @@ def apply_migrations(connection) -> None:
         "ON native_favorite_attempts(task_id, attempt_number)"
     )
     connection.execute("DELETE FROM schema_version")
-    connection.execute("INSERT INTO schema_version(version) VALUES (15)")
+    connection.execute("INSERT INTO schema_version(version) VALUES (16)")
     connection.commit()

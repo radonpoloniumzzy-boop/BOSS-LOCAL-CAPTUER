@@ -142,7 +142,12 @@ async function runAutomation() {
         `筛选方案: ${automation.profile_job_title || "-"}`,
         `采集岗位: ${fields.jobTitle.value || "-"}`,
         `AI 模型: ${automation.provider || "-"} / ${automation.model || "-"}`,
-      ].join("\n"),
+        `筛选后动作: ${automation.post_screen_action === "screen_and_favorite" ? "筛选并收藏" : "仅采集并筛选"}`,
+        `自动收藏评级: ${(automation.favorite_eligible_ratings || []).join("、") || "未配置"}`,
+        automation.post_screen_action === "screen_and_favorite"
+          ? `收藏节流/上限: ${automation.favorite_interval_seconds || "-"}秒 / ${automation.favorite_max_candidates || "-"}人`
+          : "",
+      ].filter(Boolean).join("\n"),
     );
     await runCollection(true, { automationRequested: true, automation });
   } catch (error) {
@@ -280,6 +285,7 @@ async function runCollection(autoScroll, options = {}) {
       tab.url,
       merged,
       Boolean(options.automationRequested),
+      tab.id,
     );
     setStatus(
       [
@@ -596,7 +602,7 @@ function mergeFrameResults(frameResults) {
   };
 }
 
-async function importCards(settings, sourceUrl, merged, automationRequested = false) {
+async function importCards(settings, sourceUrl, merged, automationRequested = false, sourceTabId = null) {
   const apiBase = normalizeLocalApiBase(settings.apiBase);
   let response;
   try {
@@ -617,6 +623,7 @@ async function importCards(settings, sourceUrl, merged, automationRequested = fa
           rounds_completed: merged.roundsCompleted,
           unique_cards: merged.cards.length,
           automation_requested: automationRequested,
+          source_tab_id: sourceTabId,
           debug: merged.debugSummary,
         },
       }),

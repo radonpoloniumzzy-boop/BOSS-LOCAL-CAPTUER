@@ -1019,6 +1019,9 @@ function testCollectionSupportsBossAndLiepinAdapters() {
   assert(popup.includes("async function verifyFavoriteManagementAcrossFrames"));
   assert(popup.includes("target: { tabId, allFrames: true }"));
   assert(popup.includes("document_id: inspection.documentId"));
+  assert(popup.includes("source_tab_id: sourceTabId"));
+  assert(popup.includes("自动收藏评级"));
+  assert(popup.includes("favorite_interval_seconds"));
   assert(popup.includes("getActiveSupportedTab"));
   assert(popup.includes("getActiveBossTab"));
   assert(popup.includes("applyPlatformDefaults"));

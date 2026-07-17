@@ -50,6 +50,8 @@ class CardImportServiceTest(unittest.TestCase):
                     "rounds_completed": 5,
                     "unique_cards": 1,
                     "automation_requested": True,
+                    "platform": "boss",
+                    "source_tab_id": 91,
                 },
             }
         )
@@ -58,6 +60,15 @@ class CardImportServiceTest(unittest.TestCase):
         self.assertEqual(result["job_title"], "Recruiting Intern")
         self.assertEqual(result["source_url"], "https://www.zhipin.com/web/geek/recommend")
         self.assertTrue(result["automation_requested"])
+        self.assertEqual(
+            result["source_page_context"],
+            {
+                "capture_batch_id": int(result["batch_id"]),
+                "platform": "boss",
+                "source_url": "https://www.zhipin.com/web/geek/recommend",
+                "tab_id": 91,
+            },
+        )
         self.assertEqual(len(self.repository.list_candidates()), 1)
 
     def test_import_liepin_cards_reuses_existing_candidate_model(self) -> None:

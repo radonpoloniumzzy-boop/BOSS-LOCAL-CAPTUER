@@ -195,6 +195,39 @@ class ConfigService:
         automation_clean["max_candidates"] = int(
             automation_clean.get("max_candidates", defaults.automation_flow.max_candidates)
         )
+        action = str(
+            automation_clean.get(
+                "post_screen_action",
+                defaults.automation_flow.post_screen_action,
+            )
+        )
+        automation_clean["post_screen_action"] = (
+            action if action in {"screen_only", "screen_and_favorite"} else "screen_only"
+        )
+        automation_clean["favorite_interval_seconds"] = min(
+            8,
+            max(
+                3,
+                int(
+                    automation_clean.get(
+                        "favorite_interval_seconds",
+                        defaults.automation_flow.favorite_interval_seconds,
+                    )
+                ),
+            ),
+        )
+        automation_clean["favorite_max_candidates"] = min(
+            50,
+            max(
+                1,
+                int(
+                    automation_clean.get(
+                        "favorite_max_candidates",
+                        defaults.automation_flow.favorite_max_candidates,
+                    )
+                ),
+            ),
+        )
         clean["automation_flow"] = AutomationFlowConfig(**automation_clean)
         return AppConfig(**clean)
 

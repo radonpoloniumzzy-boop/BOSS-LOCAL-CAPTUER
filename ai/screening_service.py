@@ -75,6 +75,7 @@ class ScreeningService:
         origin: str = "manual",
         progress_callback: Callable[[ScreeningProgress], None] | None = None,
         run_id: int | None = None,
+        automation_snapshot: dict[str, object] | None = None,
     ) -> dict[str, object]:
         self._stop_requested = False
         prompt_text = self.prompt_manager.finalize_prompt(
@@ -113,6 +114,7 @@ class ScreeningService:
                 model=model,
                 total_candidates=len(candidates),
                 origin=origin,
+                automation_snapshot=automation_snapshot,
             )
         self.repository.create_screening_tasks(
             run_id=run_id,

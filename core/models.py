@@ -44,6 +44,15 @@ DEFAULT_CSV_COLUMNS = [
     "candidate_key",
 ]
 
+SCREENING_RATINGS = ("UR", "SSR", "SR", "R", "N")
+BOSS_TRUSTED_PLATFORM_UID_ATTRIBUTES = (
+    "data-candidate-id",
+    "data-encrypt-geek-id",
+    "data-encrypt-uid",
+    "data-geek-id",
+    "data-geekid",
+)
+
 
 @dataclass(slots=True)
 class AIProviderConfig:
@@ -67,6 +76,9 @@ class AutomationFlowConfig:
     model: str = "gpt-5.4-mini"
     api_base: str = "https://api.openai.com/v1"
     api_key_env: str = "OPENAI_API_KEY"
+    post_screen_action: str = "screen_only"
+    favorite_interval_seconds: int = 5
+    favorite_max_candidates: int = 20
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -239,6 +251,7 @@ class ScreeningProfile:
     exclusions: list[str] = field(default_factory=list)
     interview_checks: list[str] = field(default_factory=list)
     evidence_policy: dict[str, Any] = field(default_factory=dict)
+    favorite_eligible_ratings: list[str] = field(default_factory=list)
     version: int = 1
     parent_profile_id: int | None = None
     id: int | None = None

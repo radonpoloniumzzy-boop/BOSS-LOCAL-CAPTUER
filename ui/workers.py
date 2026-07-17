@@ -7,6 +7,7 @@ from PySide6.QtCore import QObject, Signal, Slot
 
 from automation.browser import BrowserService
 from automation.collector import CaptureService
+from automation.favorite_queue import NativeFavoriteQueuePublisher
 from automation.parser import CandidateParser
 from automation.scroller import PageScroller
 from automation.selectors import BossSelectorConfig
@@ -284,7 +285,19 @@ class AIScreeningWorker(QObject):
                 origin=str(self.payload.get("origin") or "manual"),
                 progress_callback=self.progress.emit,
                 run_id=self.payload.get("run_id"),
+                automation_snapshot=(
+                    dict(self.payload["automation_snapshot"])
+                    if isinstance(self.payload.get("automation_snapshot"), dict)
+                    else None
+                ),
             )
+            if str(self.payload.get("origin") or "manual") == "automation":
+                try:
+                    result["favorite_batch_id"] = NativeFavoriteQueuePublisher(
+                        self.repository
+                    ).publish(int(result["run_id"]))
+                except Exception as exc:
+                    result["favorite_publish_error"] = str(exc)
             self.finished.emit(result)
         except Exception as exc:
             self.error.emit(str(exc))

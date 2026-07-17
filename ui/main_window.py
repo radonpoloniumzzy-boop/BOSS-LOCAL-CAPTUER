@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 from datetime import datetime, timedelta
 from types import SimpleNamespace
+from urllib.parse import urlparse
 
 from PySide6.QtCore import QObject, QSettings, Qt, QThread, Signal
 from PySide6.QtGui import QAction, QCloseEvent
@@ -827,6 +828,9 @@ class MainWindow(QMainWindow):
                 else None
             )
             ready = profile is not None and bool(flow.model and flow.provider)
+            favorite_ratings = list(profile.get("favorite_eligible_ratings") or []) if profile else []
+            if flow.post_screen_action == "screen_and_favorite" and not favorite_ratings:
+                ready = False
             return {
                 "ready": ready,
                 "enabled": bool(flow.enabled),
@@ -837,6 +841,10 @@ class MainWindow(QMainWindow):
                 "provider": flow.provider,
                 "model": flow.model,
                 "max_candidates": flow.max_candidates,
+                "post_screen_action": flow.post_screen_action,
+                "favorite_eligible_ratings": favorite_ratings,
+                "favorite_interval_seconds": flow.favorite_interval_seconds,
+                "favorite_max_candidates": flow.favorite_max_candidates,
             }
 
     def _start_automation_from_extension(self, _payload: dict[str, object]) -> dict[str, object]:
@@ -850,6 +858,11 @@ class MainWindow(QMainWindow):
                 raise ValueError("自动化筛选方案不存在，请在桌面端重新选择并保存。")
             if not flow.provider or not flow.model:
                 raise ValueError("自动化流程缺少 AI 服务商或模型配置。")
+            if (
+                flow.post_screen_action == "screen_and_favorite"
+                and not list(profile.get("favorite_eligible_ratings") or [])
+            ):
+                raise ValueError("当前岗位未配置自动收藏评级，不能启动“筛选并收藏”。")
             flow.enabled = True
             if not flow.job_title:
                 flow.job_title = str(profile["job_title"])
@@ -881,6 +894,29 @@ class MainWindow(QMainWindow):
         if not source_url:
             self.automation_flow_page.set_status("请填写采集页面。")
             return False
+        post_screen_action = str(payload.get("post_screen_action") or "screen_only")
+        if post_screen_action not in {"screen_only", "screen_and_favorite"}:
+            self.automation_flow_page.set_status("筛选后动作无效。")
+            return False
+        profile = self.repository.get_screening_profile(int(profile_id))
+        if (
+            post_screen_action == "screen_and_favorite"
+            and not list(profile.get("favorite_eligible_ratings") or [])
+        ):
+            self.automation_flow_page.set_status(
+                "当前岗位未配置自动收藏评级，不能保存“筛选并收藏”。"
+            )
+            return False
+        source_host = (urlparse(source_url).hostname or "").lower()
+        is_boss_source = (
+            source_host == "zhipin.com"
+            or source_host.endswith(".zhipin.com")
+            or source_host == "bosszhipin.com"
+            or source_host.endswith(".bosszhipin.com")
+        )
+        if post_screen_action == "screen_and_favorite" and not is_boss_source:
+            self.automation_flow_page.set_status("筛选并收藏目前只支持 BOSS 推荐牛人页面。")
+            return False
 
         self.config.automation_flow = AutomationFlowConfig(
             enabled=bool(payload.get("enabled")),
@@ -892,6 +928,15 @@ class MainWindow(QMainWindow):
             model=model,
             api_base=str(provider.get("api_base") or "").strip(),
             api_key_env=str(provider.get("api_key_env") or "").strip(),
+            post_screen_action=post_screen_action,
+            favorite_interval_seconds=min(
+                8,
+                max(3, int(payload.get("favorite_interval_seconds") or 5)),
+            ),
+            favorite_max_candidates=min(
+                50,
+                max(1, int(payload.get("favorite_max_candidates") or 20)),
+            ),
         )
         self.config_service.save(self.config)
         self.automation_flow_page.set_status(
@@ -1005,6 +1050,7 @@ class MainWindow(QMainWindow):
                 exclusions=list(payload.get("exclusions") or []),
                 interview_checks=list(payload.get("interview_checks") or []),
                 evidence_policy=evidence_policy,
+                favorite_eligible_ratings=list(payload.get("favorite_eligible_ratings") or []),
             )
             prompt_text = str(payload.get("prompt_text") or "")
             prompt_source = str(payload.get("prompt_source") or "generated")
@@ -1244,6 +1290,7 @@ class MainWindow(QMainWindow):
             "batch_id": int(batch_id),
             "job_title": str(capture_result.get("job_title") or self.config.automation_flow.job_title),
             "source_url": str(capture_result.get("source_url") or self.config.automation_flow.source_url),
+            "source_page_context": dict(capture_result.get("source_page_context") or {}),
         }
         if self._ai_screening_thread is not None:
             queued_ids = {int(item["batch_id"]) for item in self._queued_automation_batches}
@@ -1291,6 +1338,23 @@ class MainWindow(QMainWindow):
             "limit": flow.max_candidates,
             "candidates": candidates,
             "origin": "automation",
+            "automation_snapshot": {
+                "post_screen_action": flow.post_screen_action,
+                "profile_id": int(profile_row["id"]),
+                "profile_version": int(profile_row.get("version") or 1),
+                "favorite_eligible_ratings": list(
+                    profile_row.get("favorite_eligible_ratings") or []
+                ),
+                "favorite_interval_seconds": int(flow.favorite_interval_seconds),
+                "favorite_max_candidates": int(flow.favorite_max_candidates),
+                "source_page_context": {
+                    **dict(capture_result.get("source_page_context") or {}),
+                    "capture_batch_id": batch_id,
+                    "source_url": str(
+                        capture_result.get("source_url") or flow.source_url
+                    ),
+                },
+            },
         }
         self._automation_armed = False
         self._launch_ai_screening(worker_payload, origin="automation")
@@ -1314,7 +1378,12 @@ class MainWindow(QMainWindow):
         run_id = int(result["run_id"])
         if self._ai_screening_origin == "automation":
             self.automation_flow_page.set_running(False)
-            self.automation_flow_page.set_status(str(result.get("message") or "自动化 AI 初筛完成。"))
+            status_message = str(result.get("message") or "自动化 AI 初筛完成。")
+            if result.get("favorite_publish_error"):
+                status_message += f" 收藏队列未生成：{result['favorite_publish_error']}"
+            elif result.get("favorite_batch_id"):
+                status_message += f" 收藏批次 #{result['favorite_batch_id']} 已生成，等待扩展执行。"
+            self.automation_flow_page.set_status(status_message)
             self.refresh_automation_flow(selected_run_id=run_id)
         else:
             self.ai_page.set_running(False)

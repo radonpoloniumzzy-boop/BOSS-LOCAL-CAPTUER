@@ -7,7 +7,14 @@ import sqlite3
 from collections.abc import Iterable
 from datetime import datetime, timedelta
 
-from core.models import CandidateRecord, CaptureBatch, CaptureBatchItem, ScreeningProfile, ScreeningResult
+from core.models import (
+    SCREENING_RATINGS,
+    CandidateRecord,
+    CaptureBatch,
+    CaptureBatchItem,
+    ScreeningProfile,
+    ScreeningResult,
+)
 from core.utils import now_iso
 from storage.db import DatabaseManager
 from talent.profile_builder import StandardProfileBuilder
@@ -821,6 +828,17 @@ class CandidateRepository:
     def save_screening_profile(self, profile: ScreeningProfile) -> ScreeningProfile:
         connection = self.db.get_connection()
         timestamp = now_iso()
+        supplied_ratings = {
+            str(rating or "").strip().upper()
+            for rating in profile.favorite_eligible_ratings
+            if str(rating or "").strip()
+        }
+        invalid_ratings = supplied_ratings.difference(SCREENING_RATINGS)
+        if invalid_ratings:
+            raise ValueError(f"Invalid favorite eligibility ratings: {sorted(invalid_ratings)}")
+        profile.favorite_eligible_ratings = [
+            rating for rating in SCREENING_RATINGS if rating in supplied_ratings
+        ]
         existing = None
         if profile.id is not None:
             existing = connection.execute(
@@ -844,6 +862,7 @@ class CandidateRepository:
             json.dumps(profile.exclusions, ensure_ascii=False),
             json.dumps(profile.interview_checks, ensure_ascii=False),
             json.dumps(profile.evidence_policy, ensure_ascii=False, sort_keys=True),
+            json.dumps(profile.favorite_eligible_ratings, ensure_ascii=False),
         )
         if existing is None:
             cursor = connection.execute(
@@ -851,9 +870,10 @@ class CandidateRepository:
                 INSERT INTO screening_profiles(
                     job_title, jd_text, prompt_text, prompt_source,
                     must_have_json, nice_to_have_json, risk_flags_json, exclusions_json,
-                    interview_checks_json, evidence_policy_json, version, parent_profile_id,
+                    interview_checks_json, evidence_policy_json, favorite_eligible_ratings_json,
+                    version, parent_profile_id,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (*values, max(1, int(profile.version)), profile.parent_profile_id, timestamp, timestamp),
             )
@@ -869,7 +889,7 @@ class CandidateRepository:
                 SET job_title = ?, jd_text = ?, prompt_text = ?, prompt_source = ?,
                     must_have_json = ?, nice_to_have_json = ?, risk_flags_json = ?,
                     exclusions_json = ?, interview_checks_json = ?, evidence_policy_json = ?,
-                    version = ?, parent_profile_id = ?, updated_at = ?
+                    favorite_eligible_ratings_json = ?, version = ?, parent_profile_id = ?, updated_at = ?
                 WHERE id = ?
                 """,
                 (*values, profile.version, profile.parent_profile_id, timestamp, profile.id),
@@ -900,6 +920,7 @@ class CandidateRepository:
             ("exclusions", "exclusions_json"),
             ("interview_checks", "interview_checks_json"),
             ("evidence_policy", "evidence_policy_json"),
+            ("favorite_eligible_ratings", "favorite_eligible_ratings_json"),
         ]:
             try:
                 result[target] = json.loads(str(result.get(source) or "[]"))
@@ -932,6 +953,7 @@ class CandidateRepository:
                 exclusions=list(source.get("exclusions") or []),
                 interview_checks=list(source.get("interview_checks") or []),
                 evidence_policy=dict(source.get("evidence_policy") or {}),
+                favorite_eligible_ratings=list(source.get("favorite_eligible_ratings") or []),
                 parent_profile_id=profile_id,
             )
         )
@@ -951,14 +973,16 @@ class CandidateRepository:
         model: str,
         total_candidates: int,
         origin: str = "manual",
+        automation_snapshot: dict[str, object] | None = None,
     ) -> int:
         connection = self.db.get_connection()
         cursor = connection.execute(
             """
             INSERT INTO screening_runs(
                 profile_id, source_job_title, batch_id, provider, model, origin, status,
-                total_candidates, completed_candidates, failed_candidates, started_at
-            ) VALUES (?, ?, ?, ?, ?, ?, 'running', ?, 0, 0, ?)
+                total_candidates, completed_candidates, failed_candidates, started_at,
+                automation_snapshot_json
+            ) VALUES (?, ?, ?, ?, ?, ?, 'running', ?, 0, 0, ?, ?)
             """,
             (
                 profile_id,
@@ -969,6 +993,7 @@ class CandidateRepository:
                 origin,
                 total_candidates,
                 now_iso(),
+                json.dumps(automation_snapshot or {}, ensure_ascii=False, sort_keys=True),
             ),
         )
         connection.commit()
@@ -1210,6 +1235,10 @@ class CandidateRepository:
         connection = self.db.get_connection()
         timestamp = now_iso()
         task_snapshots = list(tasks)
+        max_actions = min(
+            50,
+            max(1, int(config_snapshot.get("favorite_max_candidates") or 20)),
+        )
         with connection:
             existing = connection.execute(
                 "SELECT id FROM native_favorite_batches WHERE screening_run_id = ?",
@@ -1222,8 +1251,8 @@ class CandidateRepository:
                 INSERT INTO native_favorite_batches(
                     capture_batch_id, screening_run_id, role_id, platform, status,
                     source_page_url, source_page_context_json, config_snapshot_json,
-                    total_tasks, completed_tasks, created_at, updated_at
-                ) VALUES (?, ?, ?, 'boss', 'pending', ?, ?, ?, 0, 0, ?, ?)
+                    max_actions, total_tasks, completed_tasks, created_at, updated_at
+                ) VALUES (?, ?, ?, 'boss', 'pending', ?, ?, ?, ?, 0, 0, ?, ?)
                 """,
                 (
                     capture_batch_id,
@@ -1232,6 +1261,7 @@ class CandidateRepository:
                     str(source_page_url or "").strip(),
                     json.dumps(source_page_context, ensure_ascii=False, sort_keys=True),
                     json.dumps(config_snapshot, ensure_ascii=False, sort_keys=True),
+                    max_actions,
                     timestamp,
                     timestamp,
                 ),
@@ -1408,6 +1438,12 @@ class CandidateRepository:
                       AND b.platform = 'boss'
                       AND b.status IN ('pending', 'running')
                       AND t.status = 'pending'
+                      AND (
+                          SELECT COUNT(*)
+                          FROM native_favorite_tasks processed
+                          WHERE processed.batch_id = t.batch_id
+                            AND processed.started_at IS NOT NULL
+                      ) < b.max_actions
                       AND NOT EXISTS (
                           SELECT 1
                           FROM native_favorite_tasks active
@@ -1649,6 +1685,7 @@ class CandidateRepository:
                 SUM(CASE WHEN status IN ('pending', 'running') THEN 1 ELSE 0 END) AS remaining,
                 SUM(CASE WHEN status NOT IN ('pending', 'running') THEN 1 ELSE 0 END) AS completed,
                 SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS running
+                ,SUM(CASE WHEN started_at IS NOT NULL THEN 1 ELSE 0 END) AS started
             FROM native_favorite_tasks
             WHERE batch_id = ?
             """,
@@ -1657,7 +1694,21 @@ class CandidateRepository:
         remaining = int(counts["remaining"] or 0)
         completed = int(counts["completed"] or 0)
         running = int(counts["running"] or 0)
-        status = "completed" if remaining == 0 else ("running" if running else "pending")
+        started = int(counts["started"] or 0)
+        batch_row = connection.execute(
+            "SELECT max_actions FROM native_favorite_batches WHERE id = ?",
+            (favorite_batch_id,),
+        ).fetchone()
+        max_actions = int(batch_row["max_actions"] or 20) if batch_row is not None else 20
+        status = (
+            "completed"
+            if remaining == 0
+            else (
+                "running"
+                if running
+                else ("limit_reached" if started >= max_actions else "pending")
+            )
+        )
         connection.execute(
             """
             UPDATE native_favorite_batches
@@ -1689,6 +1740,54 @@ class CandidateRepository:
             ORDER BY priority DESC, id
             """,
             (favorite_batch_id,),
+        ).fetchall()
+
+    def list_native_favorite_queue_candidates(
+        self,
+        run_id: int,
+        eligible_ratings: Iterable[str],
+    ) -> list[sqlite3.Row]:
+        ratings = [str(rating) for rating in eligible_ratings]
+        if not ratings:
+            return []
+        placeholders = ", ".join("?" for _ in ratings)
+        return self.db.get_connection().execute(
+            f"""
+            SELECT
+                t.candidate_id,
+                c.name,
+                r.rating,
+                pac.platform,
+                pac.platform_uid,
+                pi.raw_identity_json
+            FROM screening_tasks t
+            JOIN screening_runs sr ON sr.id = t.run_id
+            JOIN candidates c ON c.id = t.candidate_id
+            JOIN screening_results r ON r.id = t.result_id
+            LEFT JOIN candidate_platform_action_contexts pac
+              ON pac.candidate_id = t.candidate_id
+             AND pac.capture_batch_id = sr.batch_id
+             AND pac.platform = 'boss'
+            LEFT JOIN candidate_platform_identities pi
+              ON pi.candidate_id = t.candidate_id
+             AND pi.platform = pac.platform
+             AND pi.platform_uid = pac.platform_uid
+            WHERE t.run_id = ?
+              AND t.status = 'success'
+              AND r.status = 'completed'
+              AND r.rating IN ({placeholders})
+            ORDER BY
+                CASE r.rating
+                    WHEN 'UR' THEN 0
+                    WHEN 'SSR' THEN 1
+                    WHEN 'SR' THEN 2
+                    WHEN 'R' THEN 3
+                    WHEN 'N' THEN 4
+                    ELSE 5
+                END,
+                t.id
+            """,
+            (run_id, *ratings),
         ).fetchall()
 
     def mark_screening_task_success(

@@ -33,6 +33,7 @@ class StructuredScreeningProfileTest(unittest.TestCase):
                 exclusions=["无任何交易相关经历"],
                 interview_checks=["核验独立下单范围"],
                 evidence_policy={"explicit_evidence_required": True},
+                favorite_eligible_ratings=["UR", "SSR"],
             )
         )
         profile.nice_to_have.append("风控经验")
@@ -43,6 +44,7 @@ class StructuredScreeningProfileTest(unittest.TestCase):
         self.assertEqual(row["must_have"], ["证券交易经验"])
         self.assertEqual(row["nice_to_have"], ["量化策略", "风控经验"])
         self.assertTrue(row["evidence_policy"]["explicit_evidence_required"])
+        self.assertEqual(row["favorite_eligible_ratings"], ["UR", "SSR"])
 
     def test_clone_is_independent_and_starts_new_version_line(self) -> None:
         source = self.repository.save_screening_profile(
@@ -51,6 +53,7 @@ class StructuredScreeningProfileTest(unittest.TestCase):
                 jd_text="JD",
                 prompt_text="Prompt",
                 must_have=["证券交易"],
+                favorite_eligible_ratings=["SSR", "SR"],
             )
         )
         clone = self.repository.clone_screening_profile(int(source.id), "Trader Copy")
@@ -62,6 +65,7 @@ class StructuredScreeningProfileTest(unittest.TestCase):
         self.assertEqual(source_row["must_have"], ["证券交易"])
         self.assertEqual(clone_row["must_have"], ["证券交易", "风险控制"])
         self.assertEqual(clone_row["parent_profile_id"], source.id)
+        self.assertEqual(clone_row["favorite_eligible_ratings"], ["SSR", "SR"])
 
     def test_structured_prompt_is_deterministic_and_keeps_output_protocol(self) -> None:
         manager = PromptManager(Path(self.temp_dir.name))
