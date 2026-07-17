@@ -1536,6 +1536,12 @@ class CandidateRepository:
         recovered = 0
         with connection:
             connection.execute("BEGIN IMMEDIATE")
+            batch_row = connection.execute(
+                "SELECT source_page_context_json FROM native_favorite_batches WHERE id = ?",
+                (favorite_batch_id,),
+            ).fetchone()
+            if batch_row is None:
+                raise ValueError(f"Native Favorite batch not found: {favorite_batch_id}")
             stale_rows = connection.execute(
                 """
                 SELECT id, attempt_count, started_at
@@ -1594,6 +1600,9 @@ class CandidateRepository:
             "pending": int(counts["pending"] or 0),
             "unknown": int(counts["unknown_count"] or 0),
             "can_resume_pending": running == 0,
+            "source_page_context": json.loads(
+                str(batch_row["source_page_context_json"] or "{}")
+            ),
         }
 
     def complete_native_favorite_task(

@@ -198,6 +198,15 @@
     if (Number(result?.batch_id || 0) !== batchId) {
       throw new Error("Native Favorite reconciliation returned the wrong batch.");
     }
+    const sourceValidation = await chrome.runtime.sendMessage({
+      type: "native_favorite_validate_source_context",
+      sourcePageContext: result?.source_page_context || {},
+    });
+    if (!sourceValidation?.ok || !sourceValidation?.result?.ok) {
+      state.message = "The original Source Page Context changed. This batch stays locked; collect a fresh batch instead of consuming pending tasks.";
+      await persistStatus();
+      return snapshot();
+    }
     state.requiresManualResolution = false;
     state.stopRequested = false;
     state.currentTaskId = null;

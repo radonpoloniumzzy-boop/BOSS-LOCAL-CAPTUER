@@ -52,7 +52,7 @@ function favoriteTask(overrides = {}) {
   };
 }
 
-function loadRunner({ claims, executionResults, initialStatus = null }) {
+function loadRunner({ claims, executionResults, initialStatus = null, sourceValidationResult = { ok: true } }) {
   const requests = [];
   const stored = [];
   const context = {
@@ -66,6 +66,9 @@ function loadRunner({ claims, executionResults, initialStatus = null }) {
         async sendMessage(message) {
           if (message.type === "native_favorite_execute") {
             return { ok: true, result: await executionResults.shift() };
+          }
+          if (message.type === "native_favorite_validate_source_context") {
+            return { ok: true, result: sourceValidationResult };
           }
           assert.strictEqual(message.type, "native_favorite_api");
           requests.push({ url: message.path, payload: message.payload });
@@ -82,7 +85,14 @@ function loadRunner({ claims, executionResults, initialStatus = null }) {
             return { ok: true, result: { task_id: message.payload.task_id, status: "pending" } };
           }
           if (message.path === "/api/favorites/reconcile") {
-            return { ok: true, result: { batch_id: 19, running: 0, pending: 2, unknown: 1, can_resume_pending: true } };
+            return { ok: true, result: {
+              batch_id: 19,
+              running: 0,
+              pending: 2,
+              unknown: 1,
+              can_resume_pending: true,
+              source_page_context: favoriteTask().source_page_context,
+            } };
           }
           throw new Error(`Unexpected path: ${message.path}`);
         },
@@ -157,6 +167,29 @@ async function testPersistedInterruptionSurvivesAnotherReloadAndCanBeReconciled(
   assert.strictEqual(status.requiresManualResolution, false);
   assert.strictEqual(status.phase, "paused");
   assert.strictEqual(requests[0].url, "/api/favorites/reconcile");
+}
+
+async function testInterruptionStaysLockedWhenSourceContextChanged() {
+  const { runner } = loadRunner({
+    claims: [],
+    executionResults: [],
+    sourceValidationResult: { ok: false, reason: "source_page_context_document_mismatch" },
+    initialStatus: {
+      running: false,
+      batchId: 19,
+      phase: "interrupted",
+      requiresManualResolution: true,
+    },
+  });
+  await runner.ready;
+  const status = await runner.resolveInterruption({
+    batchId: 19,
+    apiBase: "http://127.0.0.1:17863",
+    apiToken: "local-token",
+  });
+  assert.strictEqual(status.requiresManualResolution, true);
+  assert.strictEqual(status.phase, "interrupted");
+  assert.match(status.message, /fresh batch/i);
 }
 
 async function testExecutionContractRejectsWrongContextAndAmbiguousFrames() {
@@ -365,6 +398,7 @@ async function runNativeFavoriteRunnerTests() {
   await testExecutionContractRejectsWrongContextAndAmbiguousFrames();
   await testDestroyedSourceDocumentIsReconciledAsInterruptedAndCannotRestart();
   await testPersistedInterruptionSurvivesAnotherReloadAndCanBeReconciled();
+  await testInterruptionStaysLockedWhenSourceContextChanged();
   await testRunnerClaimsReportsAndFinishesSerially();
   await testRunnerStopsAfterUnknownWithoutClaimingAnotherTask();
   await testManualStopFinishesCurrentTaskWithoutClaimingAnother();

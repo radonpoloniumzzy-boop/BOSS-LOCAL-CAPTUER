@@ -142,6 +142,7 @@ class NativeFavoriteWorkflowTest(unittest.TestCase):
         self.assertEqual(recovered["recovered_unknown"], 1)
         self.assertEqual(recovered["pending"], 1)
         self.assertEqual(recovered["unknown"], 1)
+        self.assertEqual(recovered["source_page_context"]["tab_id"], 91)
         self.assertFalse(any(
             str(task["status"]) == "running"
             for task in self.repository.list_native_favorite_tasks(favorite_batch_id)

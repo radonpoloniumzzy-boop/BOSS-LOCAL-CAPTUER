@@ -223,7 +223,9 @@ async function reconcileNativeFavoriteBatch() {
     setStatus(`Native Favorite reconciliation failed.\n${response?.error || "Unknown error"}`);
     return;
   }
-  setStatus("Interruption checked. If the old lease expired, start the same batch again to continue pending tasks. Unknown tasks are never retried automatically.");
+  setStatus(response.status?.requiresManualResolution
+    ? response.status.message
+    : "Interruption checked. The same Source Page Context is still exact, so the batch can continue pending tasks. Unknown tasks are never retried automatically.");
   await refreshNativeFavoriteStatus();
 }
 

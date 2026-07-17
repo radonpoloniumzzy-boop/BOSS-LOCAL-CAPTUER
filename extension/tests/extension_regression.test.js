@@ -673,6 +673,54 @@ async function testNativeFavoriteWholeTabRestrictionPreflightPreventsFrameWrite(
   assert.strictEqual(requests.some((request) => Array.isArray(request.target?.documentIds)), false);
 }
 
+async function testNativeFavoriteFinalTopContextBarrierPreventsSpaStateWrite() {
+  const { chrome, api } = loadServiceWorker();
+  chrome.tabs.query = async () => [
+    { id: 91, url: "https://www.zhipin.com/web/chat/recommend" },
+    { id: 93, url: "https://www.zhipin.com/web/chat/interaction" },
+  ];
+  let sourceInspectionCount = 0;
+  const requests = [];
+  chrome.scripting.executeScript = async (request) => {
+    requests.push(request);
+    if (request.files) return [];
+    if (request.target?.tabId === 93 && request.target?.allFrames) {
+      return [{ frameId: 0, documentId: "management-doc", result: {} }];
+    }
+    if (request.target?.tabId === 93) {
+      return [{ result: {
+        status: "failed",
+        attempted: false,
+        reason: "favorite_management_identity_not_visible",
+      } }];
+    }
+    sourceInspectionCount += 1;
+    const topUrl = sourceInspectionCount === 1
+      ? "https://www.zhipin.com/web/chat/recommend"
+      : "https://www.zhipin.com/web/geek/recommend?job=changed";
+    return [
+      { frameId: 0, documentId: "source-doc-91", result: {
+        frame_url: topUrl,
+        restriction: "",
+        identity_match_count: 0,
+      } },
+      { frameId: 7, documentId: "candidate-doc-7", result: {
+        frame_url: "https://www.zhipin.com/web/frame/recommend/",
+        restriction: "",
+        identity_match_count: 1,
+      } },
+    ];
+  };
+  const result = await api.executeNativeFavoriteTask(favoriteTaskForWorker(), {
+    frameId: 0,
+    documentId: "source-doc-91",
+    tab: { id: 91, url: "https://www.zhipin.com/web/chat/recommend" },
+  });
+  assert.strictEqual(result.result.reason, "source_page_context_url_mismatch");
+  assert.strictEqual(result.result.attempted, false);
+  assert.strictEqual(requests.some((request) => Array.isArray(request.target?.documentIds)), false);
+}
+
 function favoriteTaskForWorker() {
   return {
     platform: "boss",
@@ -1420,6 +1468,7 @@ async function main() {
   await testNativeFavoriteApiProxyRejectsExternalHostsAndArbitraryPaths();
   await testNativeFavoriteVerifyOnlyPreflightNeverExecutesSourceAdapter();
   await testNativeFavoriteWholeTabRestrictionPreflightPreventsFrameWrite();
+  await testNativeFavoriteFinalTopContextBarrierPreventsSpaStateWrite();
   testBossIdentityEvidenceKeepsIdentifiersAndDropsSecrets();
   await testFavoriteManagementVerifierRequiresSelectedFavoriteSubviewObservation();
   await testFavoriteManagementVerifierInspectsSelectedSubviewAndScopedVisibleIdentity();

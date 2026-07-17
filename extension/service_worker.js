@@ -100,6 +100,8 @@ async function handleMessage(message, sender) {
       return executeNativeFavoriteTask(message.task || {}, sender);
     case "native_favorite_api":
       return proxyNativeFavoriteApi(message);
+    case "native_favorite_validate_source_context":
+      return validateNativeFavoriteSourceContext(message.sourcePageContext || {}, sender);
     default:
       return { ok: false, error: `Unknown message type: ${String(message?.type || "")}` };
   }
@@ -279,6 +281,17 @@ async function executeNativeFavoriteTask(task, sender) {
     target: { tabId: sourceTab.id, allFrames: true },
     func: () => globalThis.__bossNativeFavoriteAdapter?.inspectFrame?.({}) || null,
   });
+  const finalTopInspection = finalRestrictionInspections.find(
+    (item) => Number(item?.frameId) === 0,
+  );
+  const finalTopValidation = contract.validateSourceContext(
+    task,
+    { id: sourceTab.id, url: finalTopInspection?.result?.frame_url || "" },
+    finalTopInspection?.documentId,
+  );
+  if (!finalTopValidation.ok) {
+    return { ok: true, result: nativeFavoriteFailure(false, finalTopValidation.reason, "source_context_write_barrier") };
+  }
   const finalCandidateDocumentValidation = contract.validateCandidateDocuments(
     task.source_page_context,
     finalRestrictionInspections,
@@ -326,6 +339,27 @@ async function executeNativeFavoriteTask(task, sender) {
       method: "native_detail_control+management_identity",
       source_action_reason: action.reason,
     },
+  };
+}
+
+async function validateNativeFavoriteSourceContext(sourcePageContext, sender) {
+  const contract = globalThis.__bossNativeFavoriteExecutionContract;
+  if (!contract || Number(sender?.frameId || 0) !== 0) {
+    return { ok: false, error: "Source context validation must run from the source top frame." };
+  }
+  const topValidation = contract.validateSourceContext(
+    { source_page_context: sourcePageContext },
+    sender?.tab,
+    sender?.documentId,
+  );
+  if (!topValidation.ok) return { ok: true, result: topValidation };
+  const inspections = await chrome.scripting.executeScript({
+    target: { tabId: sender.tab.id, allFrames: true },
+    func: () => ({ frame_url: location.href }),
+  });
+  return {
+    ok: true,
+    result: contract.validateCandidateDocuments(sourcePageContext, inspections),
   };
 }
 
