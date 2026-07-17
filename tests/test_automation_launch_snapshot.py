@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import unittest
 from types import SimpleNamespace
 
@@ -116,6 +117,91 @@ class AutomationLaunchSnapshotTest(unittest.TestCase):
         )
         self.assertEqual(waiting, [True])
         self.assertEqual(len(saved), 1)
+
+    def test_saving_disabled_clears_the_persisted_and_in_memory_arm(self) -> None:
+        old_snapshot = {"flow": {"model": "model-a"}, "profile": {"id": 7}}
+        flow = AutomationFlowConfig(
+            enabled=True,
+            profile_id=7,
+            armed_launch_snapshot=old_snapshot,
+        )
+        target = SimpleNamespace(
+            repository=SimpleNamespace(
+                get_screening_profile=lambda _profile_id: {
+                    "id": 7,
+                    "favorite_eligible_ratings": ["SSR"],
+                }
+            ),
+            automation_flow_page=SimpleNamespace(set_status=lambda _message: None),
+            config=SimpleNamespace(automation_flow=flow),
+            config_service=SimpleNamespace(save=lambda _config: None),
+            statusBar=lambda: _StatusBar(),
+            _automation_armed=True,
+            _armed_automation_snapshot=old_snapshot,
+        )
+
+        saved = MainWindow._save_automation_flow(
+            target,
+            {
+                "enabled": False,
+                "profile_id": 7,
+                "provider": {"provider": "openai", "model": "model-a"},
+                "source_url": "https://www.zhipin.com/web/geek/recommend",
+                "post_screen_action": "screen_only",
+            },
+        )
+
+        self.assertTrue(saved)
+        self.assertFalse(target._automation_armed)
+        self.assertIsNone(target._armed_automation_snapshot)
+        self.assertEqual(target.config.automation_flow.armed_launch_snapshot, {})
+
+    def test_extension_status_uses_the_armed_snapshot_not_later_edits(self) -> None:
+        current_flow = AutomationFlowConfig(
+            enabled=True,
+            profile_id=7,
+            model="new-model",
+            post_screen_action="screen_only",
+        )
+        target = SimpleNamespace(
+            _automation_config_lock=threading.RLock(),
+            _automation_armed=True,
+            _armed_automation_snapshot={
+                "flow": {
+                    "profile_id": 7,
+                    "job_title": "Locked Role",
+                    "source_url": "https://www.zhipin.com/web/geek/recommend",
+                    "max_candidates": 0,
+                    "provider": "openai",
+                    "model": "locked-model",
+                    "post_screen_action": "screen_and_favorite",
+                    "favorite_interval_seconds": 5,
+                    "favorite_max_candidates": 20,
+                },
+                "profile": {
+                    "id": 7,
+                    "version": 3,
+                    "job_title": "Locked Role",
+                    "favorite_eligible_ratings": ["SSR"],
+                },
+            },
+            config_service=SimpleNamespace(load=lambda: SimpleNamespace(automation_flow=current_flow)),
+            repository=SimpleNamespace(
+                get_screening_profile=lambda _profile_id: {
+                    "id": 7,
+                    "version": 4,
+                    "job_title": "Changed Role",
+                    "favorite_eligible_ratings": ["R"],
+                }
+            ),
+        )
+
+        status = MainWindow._automation_status_payload(target)
+
+        self.assertEqual(status["model"], "locked-model")
+        self.assertEqual(status["profile_version"], 3)
+        self.assertEqual(status["favorite_eligible_ratings"], ["SSR"])
+        self.assertEqual(status["post_screen_action"], "screen_and_favorite")
 
     def test_favorite_mode_screens_the_complete_capture_batch_from_locked_snapshot(self) -> None:
         repository = _Repository()

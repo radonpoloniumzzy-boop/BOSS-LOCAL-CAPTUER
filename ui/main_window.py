@@ -123,9 +123,11 @@ class MainWindow(QMainWindow):
         self._ai_test_running = False
         self._ai_test_context: dict[str, object] = {}
         persisted_launch_snapshot = self.config.automation_flow.armed_launch_snapshot
-        self._automation_armed = bool(persisted_launch_snapshot)
+        self._automation_armed = bool(
+            self.config.automation_flow.enabled and persisted_launch_snapshot
+        )
         self._armed_automation_snapshot: dict[str, object] | None = (
-            deepcopy(persisted_launch_snapshot) if persisted_launch_snapshot else None
+            deepcopy(persisted_launch_snapshot) if self._automation_armed else None
         )
         self._queued_automation_batches: list[dict[str, object]] = []
         self._automation_config_lock = threading.RLock()
@@ -847,6 +849,35 @@ class MainWindow(QMainWindow):
 
     def _automation_status_payload(self) -> dict[str, object]:
         with self._automation_config_lock:
+            if self._automation_armed and self._armed_automation_snapshot:
+                armed_flow = dict(self._armed_automation_snapshot.get("flow") or {})
+                armed_profile = dict(self._armed_automation_snapshot.get("profile") or {})
+                return {
+                    "ready": True,
+                    "enabled": True,
+                    "profile_id": armed_flow.get("profile_id"),
+                    "profile_version": armed_profile.get("version"),
+                    "profile_job_title": str(armed_profile.get("job_title") or ""),
+                    "job_title": str(
+                        armed_flow.get("job_title") or armed_profile.get("job_title") or ""
+                    ),
+                    "source_url": str(armed_flow.get("source_url") or ""),
+                    "provider": str(armed_flow.get("provider") or ""),
+                    "model": str(armed_flow.get("model") or ""),
+                    "max_candidates": int(armed_flow.get("max_candidates") or 0),
+                    "post_screen_action": str(
+                        armed_flow.get("post_screen_action") or "screen_only"
+                    ),
+                    "favorite_eligible_ratings": list(
+                        armed_profile.get("favorite_eligible_ratings") or []
+                    ),
+                    "favorite_interval_seconds": int(
+                        armed_flow.get("favorite_interval_seconds") or 0
+                    ),
+                    "favorite_max_candidates": int(
+                        armed_flow.get("favorite_max_candidates") or 0
+                    ),
+                }
             config = self.config_service.load()
             flow = config.automation_flow
             profile = (
@@ -941,8 +972,9 @@ class MainWindow(QMainWindow):
             self.automation_flow_page.set_status("筛选并收藏目前只支持 BOSS 推荐牛人页面。")
             return False
 
+        enabled = bool(payload.get("enabled"))
         self.config.automation_flow = AutomationFlowConfig(
-            enabled=bool(payload.get("enabled")),
+            enabled=enabled,
             profile_id=int(profile_id),
             job_title=str(payload.get("job_title") or "").strip(),
             source_url=source_url,
@@ -961,9 +993,12 @@ class MainWindow(QMainWindow):
                 max(1, int(payload.get("favorite_max_candidates") or 20)),
             ),
             armed_launch_snapshot=deepcopy(
-                self.config.automation_flow.armed_launch_snapshot
+                self.config.automation_flow.armed_launch_snapshot if enabled else {}
             ),
         )
+        if not enabled:
+            self._automation_armed = False
+            self._armed_automation_snapshot = None
         self.config_service.save(self.config)
         self.automation_flow_page.set_status(
             "设置已保存，等待下一次采集。"
