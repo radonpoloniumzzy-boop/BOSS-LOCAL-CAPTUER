@@ -128,7 +128,10 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
     id: platform.id,
     label: platform.label,
   }));
-  globalThis.__bossLocalCollectorTest = { extractBossIdentityEvidence };
+  globalThis.__bossLocalCollectorTest = {
+    extractBossIdentityEvidence,
+    mergeCollectedCard,
+  };
 
   globalThis.__bossLocalRequestScrollPause = function bossLocalRequestScrollPause(reason) {
     const control = getScrollControl();
@@ -162,6 +165,9 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
     const result = await collectCards(platform, Boolean(autoScroll), settings || {});
     markScrollControlStopped();
     const lastDebug = result.lastDebug || { strategy: "none", actionCount: 0, nodeCount: 0 };
+    const trustedIdentityCount = result.cards.filter((card) =>
+      Boolean(normalizeText(card?.action_platform_uid || "")),
+    ).length;
     return {
       cards: result.cards,
       debug: [
@@ -174,6 +180,7 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
         `noMore=${result.scrollInfo.noMoreDetected}`,
         `paused=${result.scrollInfo.pauseRequested}`,
         `unique=${result.cards.length}`,
+        `trustedIds=${trustedIdentityCount}`,
       ].join(", "),
       meta: {
         platform: platform.id,
@@ -199,7 +206,7 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
       const extracted = extractLoadedCards(platform);
       lastDebug = extracted.debug;
       for (const card of extracted.cards) {
-        cardsByKey.set(buildCardKey(card), card);
+        mergeCollectedCard(cardsByKey, card);
       }
 
       const newCount = cardsByKey.size - beforeCount;
@@ -697,7 +704,7 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
     const detailUrl = firstHref(card, platform.selectors.detailLink) || inferred.detail_url;
     const platformUid = normalizePlatformUid(platform, firstAttr(card, platform.selectors.platformUidAttrs) || inferred.platform_uid);
     const identity = platform.id === "boss"
-      ? extractBossIdentityEvidence(card, detailUrl)
+      ? extractBossIdentityEvidence(card, detailUrl, platform)
       : {
           platform_uid: "",
           friend_id: "",
@@ -731,7 +738,7 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
     };
   }
 
-  function extractBossIdentityEvidence(card, detailUrl) {
+  function extractBossIdentityEvidence(card, detailUrl, platform = null) {
     const aliases = {
       ...Object.fromEntries(
         BOSS_TRUSTED_PLATFORM_UID_ATTRIBUTES.map((name) => [name.replace(/[^a-z0-9]/g, ""), "platform_uid"]),
@@ -756,8 +763,7 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
       raw_identity: {},
       raw_action_context: {},
     };
-    const nodes = [card, ...querySelectorAllSafe(card, "*")];
-    for (const node of nodes) {
+    const readAttributes = (node) => {
       for (const attribute of Array.from(node?.attributes || [])) {
         const name = String(attribute?.name || "").toLowerCase();
         const canonical = aliases[name.replace(/[^a-z0-9]/g, "")];
@@ -774,6 +780,19 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
           identity[canonical] = value;
         }
       }
+    };
+    const nodes = [card, ...querySelectorAllSafe(card, "*")];
+    for (const node of nodes) {
+      readAttributes(node);
+    }
+
+    // Some BOSS recommendation variants put data-geekid on the immediate
+    // wrapper outside the visible card node selected by the collector. Do not
+    // walk beyond that wrapper: a higher ancestor may own multiple candidates.
+    const wrapper = card?.parentElement || null;
+    const bossPlatform = platform || PLATFORM_ADAPTERS.find((item) => item.id === "boss");
+    if (!identity.platform_uid && isSingleCandidateWrapper(wrapper, card, bossPlatform)) {
+      readAttributes(wrapper);
     }
 
     try {
@@ -804,6 +823,38 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
       // A malformed detail URL is not identity evidence.
     }
     return identity;
+  }
+
+  function isSingleCandidateWrapper(wrapper, card, platform) {
+    if (!wrapper || !card || !platform?.selectors?.card) {
+      return false;
+    }
+    const candidateDescendants = uniqueElements(
+      platform.selectors.card.flatMap((selector) => querySelectorAllSafe(wrapper, selector)),
+    );
+    return candidateDescendants.length === 1 && candidateDescendants[0] === card;
+  }
+
+  function mergeCollectedCard(cardsByKey, incoming) {
+    const key = buildCardKey(incoming);
+    const previous = cardsByKey.get(key);
+    if (!previous) {
+      cardsByKey.set(key, incoming);
+      return;
+    }
+    const previousIdentity = normalizeText(previous.action_platform_uid || "");
+    const incomingIdentity = normalizeText(incoming.action_platform_uid || "");
+    if (previousIdentity && incomingIdentity && previousIdentity !== incomingIdentity) {
+      // Never combine two candidates that only collided through a legacy key.
+      cardsByKey.set(`${key}:identity-conflict:${incomingIdentity}`, incoming);
+      return;
+    }
+    if (previousIdentity && !incomingIdentity) {
+      // Keep the complete observation as a whole; never graft its identity
+      // onto different candidate content from an incomplete observation.
+      return;
+    }
+    cardsByKey.set(key, incoming);
   }
 
   function findCandidateCardsByAction(platform) {
@@ -1005,7 +1056,13 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
   }
 
   function buildCardKey(card) {
-    return card.platform_uid || card.detail_url || card.raw_card_text || JSON.stringify(card);
+    return (
+      card.action_platform_uid ||
+      card.platform_uid ||
+      card.detail_url ||
+      card.raw_card_text ||
+      JSON.stringify(card)
+    );
   }
 
   function firstText(root, selectors) {

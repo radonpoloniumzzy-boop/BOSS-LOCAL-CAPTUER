@@ -1073,7 +1073,13 @@ function translateBatchPhase(value) {
 }
 
 function buildKey(card) {
-  return card.platform_uid || card.detail_url || card.raw_card_text || JSON.stringify(card);
+  return (
+    card.action_platform_uid ||
+    card.platform_uid ||
+    card.detail_url ||
+    card.raw_card_text ||
+    JSON.stringify(card)
+  );
 }
 
 function trimTrailingSlash(value) {

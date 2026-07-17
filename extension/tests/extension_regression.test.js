@@ -177,6 +177,53 @@ function testBossIdentityEvidenceKeepsIdentifiersAndDropsSecrets() {
   assert.strictEqual(JSON.stringify(identity).includes("must-not-be-collected"), false);
 }
 
+function testBossIdentityEvidenceReadsOnlyImmediateCandidateWrapperAndUsesTrustedMergeKey() {
+  const api = loadCollectorIdentityApi();
+  const node = (entries = [], parentElement = null, descendants = []) => ({
+    attributes: entries.map(([name, value]) => ({ name, value })),
+    parentElement,
+    querySelectorAll() { return descendants; },
+  });
+  const wrapper = node([["data-geekid", "wrapper-geek-1"]]);
+  const card = node([], wrapper);
+  wrapper.querySelectorAll = () => [card];
+
+  const identity = api.extractBossIdentityEvidence(card, "");
+  assert.strictEqual(identity.platform_uid, "wrapper-geek-1");
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(identity.raw_identity)), {
+    "data-geekid": "wrapper-geek-1",
+  });
+
+  const sharedContainer = node([["data-geekid", "wrong-shared-geek"]]);
+  const identitylessWrapper = node([], sharedContainer);
+  const nestedCard = node([], identitylessWrapper);
+  identitylessWrapper.querySelectorAll = () => [nestedCard];
+  assert.strictEqual(api.extractBossIdentityEvidence(nestedCard, "").platform_uid, "");
+
+  const sharedImmediateWrapper = node([["data-geekid", "wrong-immediate-geek"]]);
+  const firstPeer = node([], sharedImmediateWrapper);
+  const secondPeer = node([], sharedImmediateWrapper);
+  sharedImmediateWrapper.querySelectorAll = () => [firstPeer, secondPeer];
+  assert.strictEqual(api.extractBossIdentityEvidence(firstPeer, "").platform_uid, "");
+
+  const observations = new Map();
+  api.mergeCollectedCard(observations, {
+    raw_card_text: "candidate before active-state update",
+    action_platform_uid: "wrapper-geek-1",
+    raw_identity: { "data-geekid": "wrapper-geek-1" },
+  });
+  api.mergeCollectedCard(observations, {
+    raw_card_text: "candidate after active-state update",
+    action_platform_uid: "wrapper-geek-1",
+    raw_identity: { "data-geekid": "wrapper-geek-1" },
+  });
+  assert.strictEqual(observations.size, 1);
+  assert.strictEqual(
+    Array.from(observations.values())[0].raw_card_text,
+    "candidate after active-state update",
+  );
+}
+
 function loadBossNativeFavoriteAdapter(identityNodes = [], documentOverrides = {}, contextOverrides = {}) {
   let queryCount = 0;
   const document = {
@@ -1601,6 +1648,7 @@ async function main() {
   await testNativeFavoriteWholeTabRestrictionPreflightPreventsFrameWrite();
   await testNativeFavoriteFinalTopContextBarrierPreventsSpaStateWrite();
   testBossIdentityEvidenceKeepsIdentifiersAndDropsSecrets();
+  testBossIdentityEvidenceReadsOnlyImmediateCandidateWrapperAndUsesTrustedMergeKey();
   await testFavoriteManagementVerifierRequiresSelectedFavoriteSubviewObservation();
   await testFavoriteManagementVerifierInspectsSelectedSubviewAndScopedVisibleIdentity();
   await testFavoriteManagementVerifierConfirmsSuccessAfterAttempt();

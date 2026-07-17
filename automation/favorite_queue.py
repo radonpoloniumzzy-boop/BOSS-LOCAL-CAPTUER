@@ -62,16 +62,25 @@ class NativeFavoriteQueuePublisher:
             raise ValueError("Native Favorite is only available for BOSS recommendation pages")
 
         tasks = []
-        for priority, row in enumerate(
-            self.repository.list_native_favorite_queue_candidates(run_id, eligible_ratings)
-        ):
+        queue_candidates = self.repository.list_native_favorite_queue_candidates(
+            run_id, eligible_ratings
+        )
+        trusted_identity_count = 0
+        for priority, row in enumerate(queue_candidates):
             platform_identity = self._platform_identity(row)
+            trusted_identity_count += int(platform_identity is not None)
             tasks.append(
                 {
                     "candidate_id": int(row["candidate_id"]),
                     "platform_identity": platform_identity,
                     "priority": 0 - priority,
                 }
+            )
+        if queue_candidates and trusted_identity_count == 0:
+            raise ValueError(
+                "Eligible candidates were found, but the current Capture Batch "
+                "contains no trusted BOSS Platform Identity. Reload the BOSS "
+                "recommendation page and collect again before creating a favorite batch."
             )
         return self.repository.create_native_favorite_batch(
             capture_batch_id=capture_batch_id,

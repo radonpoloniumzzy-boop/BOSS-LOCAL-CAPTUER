@@ -211,6 +211,77 @@ class NativeFavoriteQueuePublisherTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "completed"):
             NativeFavoriteQueuePublisher(self.repository).publish(run_id)
 
+    def test_eligible_candidates_without_trusted_boss_identity_do_not_publish_an_empty_queue(self) -> None:
+        imported = self.importer.import_cards(
+            {
+                "job_title": "Identity Guard Role",
+                "source_url": "https://www.zhipin.com/web/chat/recommend",
+                "cards": [
+                    {
+                        "platform": "boss",
+                        "raw_card_text": "Alice strong evidence",
+                        "name": "Alice",
+                    }
+                ],
+            }
+        )
+        capture_batch_id = int(imported["batch_id"])
+        profile = self.repository.save_screening_profile(
+            ScreeningProfile(
+                job_title="Identity Guard Role",
+                jd_text="Identity guard",
+                prompt_text="Evaluate",
+                favorite_eligible_ratings=["SSR"],
+            )
+        )
+        snapshot = {
+            "post_screen_action": "screen_and_favorite",
+            "profile_id": int(profile.id),
+            "profile_version": int(profile.version),
+            "favorite_eligible_ratings": ["SSR"],
+            "favorite_interval_seconds": 5,
+            "favorite_max_candidates": 20,
+            "source_page_context": {
+                "capture_batch_id": capture_batch_id,
+                "tab_id": 91,
+                "document_id": "source-doc-91",
+                "platform": "boss",
+                "source_url": "https://www.zhipin.com/web/chat/recommend",
+                "candidate_documents": [
+                    {
+                        "frame_id": 7,
+                        "document_id": "candidate-doc-7",
+                        "frame_url": "https://www.zhipin.com/web/frame/recommend/",
+                    }
+                ],
+            },
+        }
+        screening = ScreeningService(
+            repository=self.repository,
+            prompt_manager=PromptManager(Path(self.temp_dir.name) / "prompts"),
+            provider=QueueRatingProvider(),
+            max_retry_count=0,
+            retry_backoff_base_seconds=0,
+        ).run(
+            profile=profile.to_dict(),
+            candidates=self.repository.list_screening_candidates(batch_id=capture_batch_id),
+            source_job_title=profile.job_title,
+            batch_id=capture_batch_id,
+            provider_name="fake",
+            model="fake-model",
+            origin="automation",
+            automation_snapshot=snapshot,
+        )
+
+        with self.assertRaisesRegex(ValueError, "no trusted BOSS Platform Identity"):
+            NativeFavoriteQueuePublisher(self.repository).publish(int(screening["run_id"]))
+        self.assertEqual(
+            self.repository.db.get_connection()
+            .execute("SELECT count(*) FROM native_favorite_batches")
+            .fetchone()[0],
+            0,
+        )
+
     def test_queue_rejects_non_boss_or_non_recommendation_source_context(self) -> None:
         imported = self.importer.import_cards(
             {
