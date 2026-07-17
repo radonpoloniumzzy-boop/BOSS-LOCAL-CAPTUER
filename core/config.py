@@ -228,6 +228,10 @@ class ConfigService:
                 ),
             ),
         )
+        armed_snapshot = automation_clean.get("armed_launch_snapshot")
+        automation_clean["armed_launch_snapshot"] = (
+            armed_snapshot if isinstance(armed_snapshot, dict) else {}
+        )
         clean["automation_flow"] = AutomationFlowConfig(**automation_clean)
         return AppConfig(**clean)
 

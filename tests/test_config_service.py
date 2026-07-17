@@ -44,6 +44,10 @@ class ConfigServiceTest(unittest.TestCase):
                 post_screen_action="screen_and_favorite",
                 favorite_interval_seconds=5,
                 favorite_max_candidates=20,
+                armed_launch_snapshot={
+                    "profile": {"id": 12, "version": 3},
+                    "flow": {"post_screen_action": "screen_and_favorite"},
+                },
             )
             service.save(config)
 
@@ -56,6 +60,10 @@ class ConfigServiceTest(unittest.TestCase):
             self.assertEqual(loaded.automation_flow.post_screen_action, "screen_and_favorite")
             self.assertEqual(loaded.automation_flow.favorite_interval_seconds, 5)
             self.assertEqual(loaded.automation_flow.favorite_max_candidates, 20)
+            self.assertEqual(
+                loaded.automation_flow.armed_launch_snapshot["profile"]["version"],
+                3,
+            )
             raw = json.loads(service.config_path.read_text(encoding="utf-8"))
             self.assertNotIn("api_key", raw["automation_flow"])
 

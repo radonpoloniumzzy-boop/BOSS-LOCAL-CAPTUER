@@ -79,6 +79,7 @@ class AutomationFlowConfig:
     post_screen_action: str = "screen_only"
     favorite_interval_seconds: int = 5
     favorite_max_candidates: int = 20
+    armed_launch_snapshot: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

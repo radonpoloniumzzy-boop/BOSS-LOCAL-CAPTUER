@@ -24,6 +24,19 @@ class _Repository:
         return [{"id": 1, "batch_id": batch_id}]
 
 
+class _TextInput:
+    def __init__(self) -> None:
+        self.value = ""
+
+    def setText(self, value: str) -> None:
+        self.value = value
+
+
+class _StatusBar:
+    def showMessage(self, _message: str) -> None:
+        pass
+
+
 class AutomationLaunchSnapshotTest(unittest.TestCase):
     def test_launch_snapshot_is_detached_from_later_config_and_profile_edits(self) -> None:
         flow = AutomationFlowConfig(
@@ -61,6 +74,48 @@ class AutomationLaunchSnapshotTest(unittest.TestCase):
         )
 
         self.assertEqual(started, [])
+
+    def test_desktop_arm_entry_persists_the_locked_launch_snapshot(self) -> None:
+        flow = AutomationFlowConfig(
+            enabled=True,
+            profile_id=7,
+            job_title="Role A",
+            source_url="https://www.zhipin.com/web/geek/recommend",
+            provider="openai",
+            model="model-a",
+            post_screen_action="screen_and_favorite",
+        )
+        saved = []
+        waiting = []
+        target = SimpleNamespace(
+            _save_automation_flow=lambda _payload: True,
+            config=SimpleNamespace(automation_flow=flow),
+            repository=SimpleNamespace(
+                get_screening_profile=lambda _profile_id: {
+                    "id": 7,
+                    "version": 3,
+                    "favorite_eligible_ratings": ["SSR"],
+                }
+            ),
+            _build_automation_launch_snapshot=MainWindow._build_automation_launch_snapshot,
+            config_service=SimpleNamespace(save=saved.append),
+            automation_flow_page=SimpleNamespace(set_waiting=waiting.append),
+            dashboard_page=SimpleNamespace(
+                job_title_input=_TextInput(),
+                source_url_input=_TextInput(),
+            ),
+            statusBar=lambda: _StatusBar(),
+        )
+
+        MainWindow._arm_automation_flow(target, {})
+
+        self.assertTrue(target._automation_armed)
+        self.assertEqual(
+            target.config.automation_flow.armed_launch_snapshot["profile"]["version"],
+            3,
+        )
+        self.assertEqual(waiting, [True])
+        self.assertEqual(len(saved), 1)
 
     def test_favorite_mode_screens_the_complete_capture_batch_from_locked_snapshot(self) -> None:
         repository = _Repository()

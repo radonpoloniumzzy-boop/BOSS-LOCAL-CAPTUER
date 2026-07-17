@@ -122,8 +122,11 @@ class MainWindow(QMainWindow):
         self._ai_screening_origin = "manual"
         self._ai_test_running = False
         self._ai_test_context: dict[str, object] = {}
-        self._automation_armed = False
-        self._armed_automation_snapshot: dict[str, object] | None = None
+        persisted_launch_snapshot = self.config.automation_flow.armed_launch_snapshot
+        self._automation_armed = bool(persisted_launch_snapshot)
+        self._armed_automation_snapshot: dict[str, object] | None = (
+            deepcopy(persisted_launch_snapshot) if persisted_launch_snapshot else None
+        )
         self._queued_automation_batches: list[dict[str, object]] = []
         self._automation_config_lock = threading.RLock()
         self._capture_running = False
@@ -890,14 +893,13 @@ class MainWindow(QMainWindow):
             flow.enabled = True
             if not flow.job_title:
                 flow.job_title = str(profile["job_title"])
+            launch_snapshot = self._build_automation_launch_snapshot(flow, dict(profile))
+            flow.armed_launch_snapshot = deepcopy(launch_snapshot)
             config.automation_flow = flow
             self.config_service.save(config)
             self.config = config
             self._automation_armed = True
-            self._armed_automation_snapshot = self._build_automation_launch_snapshot(
-                flow,
-                dict(profile),
-            )
+            self._armed_automation_snapshot = launch_snapshot
             result = self._automation_status_payload()
             result["message"] = "自动化流程已启动，等待插件完成滚动采集。"
             self.logger.info(
@@ -958,6 +960,9 @@ class MainWindow(QMainWindow):
                 50,
                 max(1, int(payload.get("favorite_max_candidates") or 20)),
             ),
+            armed_launch_snapshot=deepcopy(
+                self.config.automation_flow.armed_launch_snapshot
+            ),
         )
         self.config_service.save(self.config)
         self.automation_flow_page.set_status(
@@ -973,14 +978,16 @@ class MainWindow(QMainWindow):
         payload["enabled"] = True
         if not self._save_automation_flow(payload):
             return
+        flow = self.config.automation_flow
         self._automation_armed = True
         profile = self.repository.get_screening_profile(int(flow.profile_id))
         self._armed_automation_snapshot = self._build_automation_launch_snapshot(
             flow,
             dict(profile),
         )
+        flow.armed_launch_snapshot = deepcopy(self._armed_automation_snapshot)
+        self.config_service.save(self.config)
         self.automation_flow_page.set_waiting(True)
-        flow = self.config.automation_flow
         self.dashboard_page.job_title_input.setText(flow.job_title)
         self.dashboard_page.source_url_input.setText(flow.source_url)
         self.statusBar().showMessage("自动化流程已启用，请在 Chrome 扩展中点击 AUTO")
@@ -990,6 +997,7 @@ class MainWindow(QMainWindow):
         self._armed_automation_snapshot = None
         self._queued_automation_batches.clear()
         self.config.automation_flow.enabled = False
+        self.config.automation_flow.armed_launch_snapshot = {}
         self.config_service.save(self.config)
         self.automation_flow_page.enabled_checkbox.setChecked(False)
         self.automation_flow_page.set_waiting(False)
@@ -1322,6 +1330,8 @@ class MainWindow(QMainWindow):
         }
         self._automation_armed = False
         self._armed_automation_snapshot = None
+        self.config.automation_flow.armed_launch_snapshot = {}
+        self.config_service.save(self.config)
         if self._ai_screening_thread is not None:
             queued_ids = {int(item["batch_id"]) for item in self._queued_automation_batches}
             if int(payload["batch_id"]) not in queued_ids:
