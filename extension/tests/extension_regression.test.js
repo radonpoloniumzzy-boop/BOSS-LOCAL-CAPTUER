@@ -363,6 +363,46 @@ async function testNativeFavoriteReadinessDiagnosticReportsRemovedDetailAsChange
   });
 }
 
+async function testNativeFavoriteReportsControlledRestrictionCodeAfterAttempt() {
+  let currentDetail = { querySelector() { return null; } };
+  let restrictionVisible = false;
+  const favoriteControl = { click() { restrictionVisible = true; } };
+  const updatedDetail = {
+    querySelector(selector) {
+      if (selector === ".like-icon.like-icon-active") return null;
+      if (selector.includes(".like-icon-and-text")) return favoriteControl;
+      return null;
+    },
+  };
+  const candidate = bossIdentityNode("data-geekid", "trusted-geek-restricted", () => {
+    currentDetail = updatedDetail;
+  });
+  const restrictionSurface = { textContent: "操作频繁，请稍后再试" };
+  const { adapter } = loadBossNativeFavoriteAdapter([candidate], {
+    querySelector(selector) {
+      return selector === ".resume-item-detail" ? currentDetail : null;
+    },
+    querySelectorAll(selector) {
+      if (selector === "[data-geekid]") return [candidate];
+      if (String(selector).includes("[role='dialog']")) {
+        return restrictionVisible ? [restrictionSurface] : [];
+      }
+      return [];
+    },
+  });
+
+  const result = await adapter.favoriteOne({
+    platform: "boss",
+    platform_identity: { attribute: "data-geekid", value: "trusted-geek-restricted" },
+  });
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(result)), {
+    status: "unknown",
+    attempted: true,
+    reason: "platform_restriction_after_favorite_attempt",
+    restriction_code: "platform_rate_or_risk_restriction",
+  });
+}
+
 async function testNativeFavoriteStopsForDeepTrustedInterveningSelection() {
   let trustedClickListener = null;
   let favoriteClickCount = 0;
@@ -1707,6 +1747,7 @@ async function main() {
   testBossIdentityEvidenceKeepsIdentifiersAndDropsSecrets();
   testBossIdentityEvidenceReadsOnlyImmediateCandidateWrapperAndUsesTrustedMergeKey();
   await testNativeFavoriteReadinessDiagnosticReportsRemovedDetailAsChanged();
+  await testNativeFavoriteReportsControlledRestrictionCodeAfterAttempt();
   await testFavoriteManagementVerifierRequiresSelectedFavoriteSubviewObservation();
   await testFavoriteManagementVerifierInspectsSelectedSubviewAndScopedVisibleIdentity();
   await testFavoriteManagementVerifierConfirmsSuccessAfterAttempt();

@@ -282,6 +282,45 @@ async function testExecutionContractRejectsWrongContextAndAmbiguousFrames() {
     },
   );
   assert.deepStrictEqual(
+    JSON.parse(JSON.stringify(contract.aggregateAdapterExecutions([{
+      result: {
+        status: "unknown",
+        attempted: true,
+        reason: "platform_restriction_after_favorite_attempt",
+        restriction_code: "platform_rate_or_risk_restriction",
+      },
+    }]))),
+    {
+      status: "unknown",
+      attempted: true,
+      reason: "platform_restriction_after_favorite_attempt",
+      stop_batch: false,
+      restriction_code: "platform_rate_or_risk_restriction",
+    },
+  );
+  assert.strictEqual(
+    contract.aggregateAdapterExecutions([{
+      result: {
+        status: "unknown",
+        attempted: true,
+        reason: "platform_restriction_after_favorite_attempt",
+        restriction_code: "untrusted-page-text",
+      },
+    }]).restriction_code,
+    undefined,
+  );
+  assert.strictEqual(
+    contract.aggregateAdapterExecutions([{
+      result: {
+        status: "success",
+        attempted: false,
+        reason: "favorite_management_identity_confirmed",
+        restriction_code: "platform_login_required",
+      },
+    }]).restriction_code,
+    undefined,
+  );
+  assert.deepStrictEqual(
     { ...contract.aggregateManagementClassifications([
       { result: { status: "success", reason: "favorite_management_identity_confirmed" } },
     ], true) },

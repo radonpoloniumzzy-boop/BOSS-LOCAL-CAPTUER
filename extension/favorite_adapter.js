@@ -143,6 +143,7 @@
           status: "unknown",
           attempted: true,
           reason: "platform_restriction_after_favorite_attempt",
+          restriction_code: confirmation.restriction,
         };
       }
       if (!confirmation?.favorited) {

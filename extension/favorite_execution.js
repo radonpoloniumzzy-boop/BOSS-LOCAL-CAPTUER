@@ -19,6 +19,13 @@
     "favorite_control_changed",
     "mutation_observed",
   ]);
+  const PLATFORM_RESTRICTION_CODES = new Set([
+    "platform_captcha_or_security_verification",
+    "platform_login_required",
+    "platform_rate_or_risk_restriction",
+    "platform_permission_denied",
+    "platform_top_context_unavailable",
+  ]);
 
   function validateSourceContext(task, tab, documentId) {
     const context = task?.source_page_context;
@@ -71,12 +78,14 @@
       };
     }
     const readinessDiagnostic = normalizeReadinessDiagnostic(result.readiness_diagnostic);
+    const restrictionCode = normalizePlatformRestrictionCode(result);
     return {
       status: String(result.status || "failed"),
       attempted: result.attempted === true,
       reason: String(result.reason || ""),
       stop_batch: result.status === "failed",
       ...(readinessDiagnostic ? { readiness_diagnostic: readinessDiagnostic } : {}),
+      ...(restrictionCode ? { restriction_code: restrictionCode } : {}),
     };
   }
 
@@ -87,6 +96,18 @@
     return Object.fromEntries(
       READINESS_DIAGNOSTIC_KEYS.map((key) => [key, value[key] === true]),
     );
+  }
+
+  function normalizePlatformRestrictionCode(result) {
+    if (
+      result?.status !== "unknown" ||
+      result?.attempted !== true ||
+      result?.reason !== "platform_restriction_after_favorite_attempt"
+    ) {
+      return "";
+    }
+    const normalized = String(result.restriction_code || "");
+    return PLATFORM_RESTRICTION_CODES.has(normalized) ? normalized : "";
   }
 
   function validateCandidateDocuments(context, inspections) {
