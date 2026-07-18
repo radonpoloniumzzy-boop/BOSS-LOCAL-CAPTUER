@@ -302,8 +302,65 @@ async function testNativeFavoriteDoesNotUseOldControlAfterUnrelatedDetailMutatio
     status: "failed",
     attempted: false,
     reason: "candidate_detail_not_ready",
+    readiness_diagnostic: {
+      candidate_node_connected: false,
+      candidate_node_visible: true,
+      baseline_detail_present: true,
+      baseline_favorite_control_present: true,
+      current_detail_present: true,
+      current_favorite_control_present: true,
+      detail_root_changed: false,
+      favorite_control_changed: false,
+      mutation_observed: true,
+    },
   });
   assert.strictEqual(favoriteClickCount, 0);
+}
+
+async function testNativeFavoriteReadinessDiagnosticReportsRemovedDetailAsChanged() {
+  let observerCallback = null;
+  let now = 0;
+  class FakeMutationObserver {
+    constructor(callback) { observerCallback = callback; }
+    observe() {}
+    disconnect() {}
+  }
+  class FakeDate extends Date {
+    static now() { now += 1000; return now; }
+  }
+  const favoriteControl = {};
+  const baselineDetail = {
+    contains() { return true; },
+    querySelector(selector) {
+      return selector.includes(".like-icon-and-text") ? favoriteControl : null;
+    },
+  };
+  let currentDetail = baselineDetail;
+  const candidate = bossIdentityNode("data-geekid", "trusted-geek-removed", () => {
+    currentDetail = null;
+    observerCallback?.([{ target: baselineDetail }]);
+  });
+  const { adapter } = loadBossNativeFavoriteAdapter(
+    [candidate],
+    { querySelector(selector) { return selector === ".resume-item-detail" ? currentDetail : null; } },
+    { Date: FakeDate, MutationObserver: FakeMutationObserver, setTimeout(resolve) { resolve(); } },
+  );
+
+  const result = await adapter.favoriteOne({
+    platform: "boss",
+    platform_identity: { attribute: "data-geekid", value: "trusted-geek-removed" },
+  });
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(result.readiness_diagnostic)), {
+    candidate_node_connected: false,
+    candidate_node_visible: true,
+    baseline_detail_present: true,
+    baseline_favorite_control_present: true,
+    current_detail_present: false,
+    current_favorite_control_present: false,
+    detail_root_changed: true,
+    favorite_control_changed: true,
+    mutation_observed: true,
+  });
 }
 
 async function testNativeFavoriteStopsForDeepTrustedInterveningSelection() {
@@ -1649,6 +1706,7 @@ async function main() {
   await testNativeFavoriteFinalTopContextBarrierPreventsSpaStateWrite();
   testBossIdentityEvidenceKeepsIdentifiersAndDropsSecrets();
   testBossIdentityEvidenceReadsOnlyImmediateCandidateWrapperAndUsesTrustedMergeKey();
+  await testNativeFavoriteReadinessDiagnosticReportsRemovedDetailAsChanged();
   await testFavoriteManagementVerifierRequiresSelectedFavoriteSubviewObservation();
   await testFavoriteManagementVerifierInspectsSelectedSubviewAndScopedVisibleIdentity();
   await testFavoriteManagementVerifierConfirmsSuccessAfterAttempt();

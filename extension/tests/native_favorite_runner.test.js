@@ -250,6 +250,38 @@ async function testExecutionContractRejectsWrongContextAndAmbiguousFrames() {
     },
   );
   assert.deepStrictEqual(
+    JSON.parse(JSON.stringify(contract.aggregateAdapterExecutions([{
+      result: {
+        status: "failed",
+        attempted: false,
+        reason: "candidate_detail_not_ready",
+        readiness_diagnostic: {
+          candidate_node_connected: true,
+          candidate_node_visible: false,
+          mutation_observed: true,
+          identity_value: "must-not-pass-through",
+        },
+      },
+    }]))),
+    {
+      status: "failed",
+      attempted: false,
+      reason: "candidate_detail_not_ready",
+      stop_batch: true,
+      readiness_diagnostic: {
+        candidate_node_connected: true,
+        candidate_node_visible: false,
+        baseline_detail_present: false,
+        baseline_favorite_control_present: false,
+        current_detail_present: false,
+        current_favorite_control_present: false,
+        detail_root_changed: false,
+        favorite_control_changed: false,
+        mutation_observed: true,
+      },
+    },
+  );
+  assert.deepStrictEqual(
     { ...contract.aggregateManagementClassifications([
       { result: { status: "success", reason: "favorite_management_identity_confirmed" } },
     ], true) },

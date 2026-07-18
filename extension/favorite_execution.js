@@ -8,6 +8,17 @@
     "/web/frame/recommend",
     "/web/geek/recommend",
   ]);
+  const READINESS_DIAGNOSTIC_KEYS = Object.freeze([
+    "candidate_node_connected",
+    "candidate_node_visible",
+    "baseline_detail_present",
+    "baseline_favorite_control_present",
+    "current_detail_present",
+    "current_favorite_control_present",
+    "detail_root_changed",
+    "favorite_control_changed",
+    "mutation_observed",
+  ]);
 
   function validateSourceContext(task, tab, documentId) {
     const context = task?.source_page_context;
@@ -59,12 +70,23 @@
         stop_batch: true,
       };
     }
+    const readinessDiagnostic = normalizeReadinessDiagnostic(result.readiness_diagnostic);
     return {
       status: String(result.status || "failed"),
       attempted: result.attempted === true,
       reason: String(result.reason || ""),
       stop_batch: result.status === "failed",
+      ...(readinessDiagnostic ? { readiness_diagnostic: readinessDiagnostic } : {}),
     };
+  }
+
+  function normalizeReadinessDiagnostic(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return null;
+    }
+    return Object.fromEntries(
+      READINESS_DIAGNOSTIC_KEYS.map((key) => [key, value[key] === true]),
+    );
   }
 
   function validateCandidateDocuments(context, inspections) {

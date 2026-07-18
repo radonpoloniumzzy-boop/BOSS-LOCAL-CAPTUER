@@ -1,5 +1,6 @@
 (function installBossNativeFavoriteAdapter(globalScope) {
-  if (globalScope.__bossNativeFavoriteAdapter) {
+  const ADAPTER_VERSION = "favorite-adapter-readiness-v2";
+  if (globalScope.__bossNativeFavoriteAdapter?.version === ADAPTER_VERSION) {
     return;
   }
 
@@ -96,7 +97,18 @@
         return { status: "failed", attempted: false, reason: ready.restriction };
       }
       if (!ready) {
-        return { status: "failed", attempted: false, reason: "candidate_detail_not_ready" };
+        const currentDetail = document.querySelector(DETAIL_SELECTOR);
+        const currentFavoriteControl = findFavoriteControl(currentDetail);
+        return {
+          status: "failed",
+          attempted: false,
+          reason: "candidate_detail_not_ready",
+          readiness_diagnostic: {
+            candidate_node_connected: matches[0]?.isConnected === true,
+            candidate_node_visible: isVisible(matches[0]),
+            ...detailTracker.diagnostic(currentDetail, currentFavoriteControl),
+          },
+        };
       }
       if (isFavorited(ready.detailRoot)) {
         return {
@@ -237,6 +249,17 @@
         if (currentDetail !== baselineDetail) return true;
         return mutationObserved && currentFavoriteControl !== baselineFavoriteControl;
       },
+      diagnostic(currentDetail, currentFavoriteControl) {
+        return {
+          baseline_detail_present: Boolean(baselineDetail),
+          baseline_favorite_control_present: Boolean(baselineFavoriteControl),
+          current_detail_present: Boolean(currentDetail),
+          current_favorite_control_present: Boolean(currentFavoriteControl),
+          detail_root_changed: currentDetail !== baselineDetail,
+          favorite_control_changed: currentFavoriteControl !== baselineFavoriteControl,
+          mutation_observed: mutationObserved,
+        };
+      },
       dispose() {
         observer?.disconnect?.();
       },
@@ -273,5 +296,9 @@
     return null;
   }
 
-  globalScope.__bossNativeFavoriteAdapter = { favoriteOne, inspectFrame };
+  globalScope.__bossNativeFavoriteAdapter = {
+    version: ADAPTER_VERSION,
+    favoriteOne,
+    inspectFrame,
+  };
 })(globalThis);
