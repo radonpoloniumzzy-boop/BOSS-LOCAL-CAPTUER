@@ -75,9 +75,14 @@ First launch creates:
 3. Click `Load unpacked`.
 4. Select:
 
+Select the `extension` folder under the same project root from which you launched
+`app.py`. For this checkout that is:
+
 ```text
-D:\codex\BOSS-LOCAL-CAPTURE-review\extension
+C:\Users\ZHONG SHIXING\Documents\HR\extension
 ```
+
+Do not reload an older copy of the extension from another checkout.
 
 5. Pin the extension if you want easier access.
 

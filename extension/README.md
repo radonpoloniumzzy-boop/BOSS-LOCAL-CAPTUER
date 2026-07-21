@@ -2,8 +2,11 @@
 
 Load this folder as an unpacked Chrome extension:
 
+Load the `extension` folder from the same checkout as the running desktop app.
+For this checkout:
+
 ```text
-D:\codex\BOSS-LOCAL-CAPTURE-review\extension
+C:\Users\ZHONG SHIXING\Documents\HR\extension
 ```
 
 Steps:
