@@ -43,6 +43,29 @@ class _StatusBar:
 
 
 class AutomationLaunchSnapshotTest(unittest.TestCase):
+    def test_toolbar_export_from_ai_page_pins_the_selected_screening_run(self) -> None:
+        exports = []
+        target = SimpleNamespace(
+            navigation=SimpleNamespace(currentRow=lambda: 3),
+            ai_page=SimpleNamespace(
+                run_combo=SimpleNamespace(currentData=lambda: 31),
+            ),
+            repository=SimpleNamespace(
+                get_screening_run=lambda _run_id: {
+                    "id": 31,
+                    "batch_id": 12,
+                    "source_job_title": "Role A",
+                }
+            ),
+            _start_export=exports.append,
+        )
+
+        MainWindow.handle_export(target, "csv")
+
+        self.assertEqual(exports[0]["screening_run_id"], 31)
+        self.assertEqual(exports[0]["batch_id"], 12)
+        self.assertEqual(exports[0]["job_title"], "Role A")
+
     def test_resuming_automation_run_preserves_origin_and_concurrency_snapshot(self) -> None:
         launched = []
         run = {
@@ -154,6 +177,30 @@ class AutomationLaunchSnapshotTest(unittest.TestCase):
 
         self.assertEqual(started, [])
         self.assertIn("完全相同", statuses[-1])
+
+    def test_import_count_mismatch_reports_the_actual_validation_failure(self) -> None:
+        statuses = []
+        target = SimpleNamespace(
+            _automation_armed=True,
+            _armed_automation_snapshot={"flow": {}, "profile": {}},
+            automation_flow_page=SimpleNamespace(set_status=statuses.append),
+        )
+
+        MainWindow._queue_automation_screening(
+            target,
+            {
+                "batch_id": 12,
+                "automation_allowed": False,
+                "validation_error": "import_count_mismatch",
+                "received_cards": 20,
+                "parsed_cards": 19,
+                "total_batch_items": 19,
+            },
+        )
+
+        self.assertIn("数量校验失败", statuses[-1])
+        self.assertIn("20", statuses[-1])
+        self.assertIn("19", statuses[-1])
 
     def test_screening_does_not_start_when_imported_count_differs_from_batch(self) -> None:
         launched = []

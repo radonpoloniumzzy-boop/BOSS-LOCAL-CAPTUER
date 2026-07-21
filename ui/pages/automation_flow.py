@@ -323,15 +323,23 @@ class AutomationFlowPage(QWidget):
         order = {name: index for index, (name, _label) in enumerate(stages)}
         current_index = order.get(stage, -1)
         completed = stage == "completed"
+        failed_index = order.get(str(payload.get("failed_stage") or ""), -1)
+        stage_completed = str(payload.get("stage_status") or "") == "completed"
         rendered = []
         for index, (_name, label) in enumerate(stages):
-            if stage in {"duplicate", "capture_completed"} and index < 4:
+            if stage == "failed" and index < failed_index:
+                marker = "✓"
+            elif stage == "failed" and index == failed_index:
+                marker = "失败"
+            elif stage == "failed":
+                marker = "○"
+            elif stage in {"duplicate", "capture_completed"} and index < 4:
                 marker = "✓"
             elif stage == "duplicate" and index == 4:
                 marker = "跳过"
             elif stage == "capture_completed" and index == 4:
                 marker = "未请求"
-            elif completed or index < current_index:
+            elif completed or index < current_index or (stage_completed and index == current_index):
                 marker = "✓"
             elif index == current_index:
                 marker = "●"

@@ -87,6 +87,22 @@ class AutomationFlowPageTest(unittest.TestCase):
         self.assertIn("④ 导入批次 ✓", text)
         self.assertIn("⑤ AI 初筛 跳过", text)
 
+    def test_failed_capture_marks_the_real_failed_stage(self) -> None:
+        page = AutomationFlowPage()
+        self.addCleanup(page.deleteLater)
+        page.update_pipeline_status(
+            {
+                "stage": "failed",
+                "failed_stage": "scrolling",
+                "message": "candidate_content_not_stable",
+            }
+        )
+
+        text = page.pipeline_status_label.text()
+        self.assertIn("① 页面确认 ✓", text)
+        self.assertIn("② 滚动采集 失败", text)
+        self.assertIn("③ 内容稳定 ○", text)
+
     def test_load_config_defaults_to_screen_only_without_hidden_policy(self) -> None:
         page = AutomationFlowPage()
         self.addCleanup(page.deleteLater)

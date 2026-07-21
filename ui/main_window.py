@@ -603,11 +603,26 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("已发送停止请求")
 
     def handle_export(self, export_format: str = "csv") -> None:
-        if self.stack.currentWidget() is self.candidates_page:
+        current_page_index = int(self.navigation.currentRow())
+        if current_page_index == 2:
             payload = self.candidates_page.current_filters()
             payload["export_format"] = export_format
             self._export_candidates_view(payload)
             return
+        if current_page_index == 3:
+            run_id = self.ai_page.run_combo.currentData()
+            run = self.repository.get_screening_run(int(run_id)) if run_id is not None else None
+            if run is not None and run["batch_id"] is not None:
+                self._start_export(
+                    {
+                        "mode": "batch",
+                        "batch_id": int(run["batch_id"]),
+                        "job_title": str(run["source_job_title"] or ""),
+                        "screening_run_id": int(run["id"]),
+                        "export_format": export_format,
+                    }
+                )
+                return
         self.handle_export_latest_batch(export_format)
 
     def handle_export_latest_batch(self, export_format: str = "csv") -> None:
@@ -667,6 +682,7 @@ class MainWindow(QMainWindow):
             "match_status": payload.get("match_status", ""),
             "recruitment_status": payload.get("recruitment_status", ""),
             "latest_reason_code": payload.get("latest_reason_code", ""),
+            "screening_run_id": payload.get("screening_run_id"),
             "export_dir": self.config.default_export_dir,
             "columns": list(self.config.csv_columns),
             "filename_template": self.config.export_filename_template,
@@ -1439,6 +1455,13 @@ class MainWindow(QMainWindow):
                 self.automation_flow_page.set_status(
                     f"本次采集与上一批 #{batch_id} 内容完全相同，尚未启动 AI 初筛。"
                     "请等待推荐页面更新后重新点击扩展 AUTO。"
+                )
+            elif capture_result.get("validation_error") == "import_count_mismatch":
+                self.automation_flow_page.set_status(
+                    "采集批次数量校验失败，AI 初筛未启动："
+                    f"上传 {int(capture_result.get('received_cards') or 0)}，"
+                    f"解析 {int(capture_result.get('parsed_cards') or 0)}，"
+                    f"入库 {int(capture_result.get('total_batch_items') or 0)}。"
                 )
             else:
                 self.automation_flow_page.set_status(

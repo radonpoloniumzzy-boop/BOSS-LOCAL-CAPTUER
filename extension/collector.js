@@ -275,10 +275,11 @@ if (
       const previousSnapshot = getScrollSnapshot(platform);
       const scrollResult = await performScroll(platform, settings, () => mergeLoadedCards(false));
       roundsCompleted += Math.max(Number(scrollResult.rounds ?? 1), 0);
-      await waitForContentSettled(platform, settings.scrollWaitMs);
-      if (settings.scrollMode === "hold_end") {
-        mergeLoadedCards(false);
+      const settledThisRound = await waitForContentSettled(platform, settings.scrollWaitMs);
+      if (!settledThisRound && !isScrollPauseRequested()) {
+        throw new Error("candidate_content_not_stable");
       }
+      mergeLoadedCards(false);
       if (isScrollPauseRequested()) {
         stopReason = "paused-by-user";
         break;

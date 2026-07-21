@@ -642,7 +642,7 @@ class CandidateRepository:
             connection.execute(
                 """
                 SELECT * FROM capture_batches
-                ORDER BY start_time DESC
+                ORDER BY start_time DESC, id DESC
                 """
             ).fetchall()
         )
@@ -857,7 +857,7 @@ class CandidateRepository:
         return connection.execute(
             """
             SELECT * FROM capture_batches
-            ORDER BY start_time DESC
+            ORDER BY start_time DESC, id DESC
             LIMIT 1
             """
         ).fetchone()
@@ -3186,6 +3186,82 @@ class CandidateRepository:
                 (run_id,),
             ).fetchall()
         )
+
+    def list_screening_run_export_rows(self, run_id: int) -> list[dict[str, object]]:
+        """Return candidate data joined to one immutable screening run's results."""
+        rows = self.db.get_connection().execute(
+            """
+            SELECT
+                c.id,
+                c.id AS candidate_id,
+                sr.profile_id AS role_id,
+                r.rating AS latest_rating,
+                r.persona,
+                r.confidence AS latest_confidence,
+                r.evidence_json,
+                r.gap_json,
+                r.risk_json,
+                r.recommended_action,
+                COALESCE(m.match_status, r.status) AS match_status,
+                COALESCE(m.recruitment_status, 'collected') AS recruitment_status,
+                r.id AS screening_result_id,
+                COALESCE(m.human_decision, '') AS human_decision,
+                le.changed_at AS latest_status_changed_at,
+                le.from_status AS latest_status_from,
+                le.to_status AS latest_status_to,
+                le.reason_code AS latest_reason_code,
+                le.note AS latest_status_note,
+                le.operator AS latest_status_operator,
+                c.candidate_key,
+                c.platform_uid,
+                c.name,
+                c.job_title,
+                c.source_url,
+                c.capture_time,
+                c.detail_url,
+                c.active_status,
+                c.expected_salary,
+                c.work_experience_text,
+                c.education_text,
+                c.tags_text,
+                c.summary_text,
+                c.raw_card_text,
+                cp.city,
+                cp.years_experience,
+                cp.job_family,
+                cp.job_track,
+                cp.industry_tags_json,
+                cp.skill_tags_json,
+                cp.last_active_at,
+                cp.profile_completeness,
+                p.job_title AS role_title
+            FROM screening_results r
+            JOIN screening_runs sr ON sr.id = r.run_id
+            JOIN screening_profiles p ON p.id = sr.profile_id
+            JOIN candidates c ON c.id = r.candidate_id
+            LEFT JOIN candidate_role_matches m
+              ON m.candidate_id = r.candidate_id AND m.role_id = sr.profile_id
+            LEFT JOIN candidate_profiles cp ON cp.candidate_id = c.id
+            LEFT JOIN candidate_role_status_events le ON le.id = (
+                SELECT e2.id
+                FROM candidate_role_status_events e2
+                WHERE e2.candidate_id = r.candidate_id
+                  AND e2.role_id = sr.profile_id
+                ORDER BY e2.changed_at DESC, e2.id DESC
+                LIMIT 1
+            )
+            WHERE r.run_id = ?
+            ORDER BY
+                CASE r.rating
+                    WHEN 'UR' THEN 1 WHEN 'SSR' THEN 2 WHEN 'SR' THEN 3
+                    WHEN 'R' THEN 4 WHEN 'N' THEN 5 ELSE 6
+                END,
+                c.name COLLATE NOCASE,
+                c.id
+            """,
+            (int(run_id),),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     def list_screening_task_results(
         self,

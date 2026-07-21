@@ -242,6 +242,11 @@ function testCollectionWaitsForCardContentWhenHeightDoesNotChange() {
   const collector = fs.readFileSync(path.join(EXTENSION_DIR, "collector.js"), "utf8");
   assert(collector.includes("candidate_content_not_stable"));
   assert(collector.includes("if (!initialSettled)"));
+  assert(collector.includes("if (!settledThisRound"));
+  const popup = fs.readFileSync(path.join(EXTENSION_DIR, "popup.js"), "utf8");
+  assert(popup.includes("onFrameConfirmed"));
+  assert(popup.includes('stage: "failed"'));
+  assert(popup.includes("failed_stage"));
 }
 
 function testBossIdentityEvidenceReadsOnlyImmediateCandidateWrapperAndUsesTrustedMergeKey() {

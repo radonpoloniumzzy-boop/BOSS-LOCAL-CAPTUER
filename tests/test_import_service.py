@@ -168,6 +168,9 @@ class CardImportServiceTest(unittest.TestCase):
         self.assertEqual(result["parsed_cards"], 1)
         self.assertFalse(result["automation_allowed"])
         self.assertEqual(result["validation_error"], "import_count_mismatch")
+        self.assertEqual(result["status"], "failed")
+        stored = self.repository.get_batch_by_collection_run_id("collect-parse-mismatch")
+        self.assertEqual(stored["status"], "failed")
 
     def test_only_immediately_previous_batch_is_used_for_duplicate_warning(self) -> None:
         def collect(run_id: str, name: str) -> dict[str, object]:

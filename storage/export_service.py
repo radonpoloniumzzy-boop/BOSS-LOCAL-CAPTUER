@@ -44,43 +44,43 @@ class ExportService:
         filename_template: str = "",
         screening_run_id: int | None = None,
     ) -> ExportResult:
-        rows = self.repository.get_export_rows(
-            mode=mode,
-            batch_id=batch_id,
-            keyword=keyword,
-            job_title=job_title,
-            city=city,
-            years_min=years_min,
-            years_max=years_max,
-            profile_tag=profile_tag,
-            last_active_days=last_active_days,
-            match_role_id=match_role_id,
-            minimum_rating=minimum_rating,
-            match_status=match_status,
-            recruitment_status=recruitment_status,
-            latest_reason_code=latest_reason_code,
-        )
         export_format = export_format.lower().strip()
         if export_format not in EXPORT_SUFFIXES:
             raise ValueError(f"Unsupported export format: {export_format}")
 
-        ensure_directory(export_dir)
-        resolved_job_title = job_title or self._infer_job_title(rows)
         screening_run = None
         if screening_run_id is not None:
             candidate_run = self.repository.get_screening_run(int(screening_run_id))
-            if (
-                candidate_run is not None
-                and batch_id is not None
-                and int(candidate_run["batch_id"] or 0) == int(batch_id)
-                and str(candidate_run["status"] or "") == "completed"
-            ):
-                screening_run = candidate_run
-        elif batch_id is not None:
-            screening_run = self.repository.get_latest_completed_screening_run_for_batch(
-                batch_id,
-                profile_id=(int(match_role_id) if match_role_id not in {None, ""} else None),
+            if candidate_run is None or str(candidate_run["status"] or "") != "completed":
+                raise ValueError("Selected screening run is missing or incomplete.")
+            if batch_id is None or int(candidate_run["batch_id"] or 0) != int(batch_id):
+                raise ValueError("Selected screening run does not belong to the export batch.")
+            screening_run = candidate_run
+            rows = self.repository.list_screening_run_export_rows(int(screening_run_id))
+        else:
+            rows = self.repository.get_export_rows(
+                mode=mode,
+                batch_id=batch_id,
+                keyword=keyword,
+                job_title=job_title,
+                city=city,
+                years_min=years_min,
+                years_max=years_max,
+                profile_tag=profile_tag,
+                last_active_days=last_active_days,
+                match_role_id=match_role_id,
+                minimum_rating=minimum_rating,
+                match_status=match_status,
+                recruitment_status=recruitment_status,
+                latest_reason_code=latest_reason_code,
             )
+
+        ensure_directory(export_dir)
+        resolved_job_title = (
+            job_title
+            or (str(screening_run["source_job_title"] or "") if screening_run is not None else "")
+            or self._infer_job_title(rows)
+        )
         resolved_screening_run_id = (
             int(screening_run["id"]) if screening_run is not None else None
         )

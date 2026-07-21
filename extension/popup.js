@@ -426,31 +426,50 @@ async function runCollection(autoScroll, options = {}) {
   );
 
   const collectionRunId = crypto.randomUUID();
-  await reportAutomationProgress(settings, {
-    collection_run_id: collectionRunId,
-    stage: "page_confirmation",
-    message: "已确认当前页面与候选人内容 frame。",
-  });
-  await reportAutomationProgress(settings, {
-    collection_run_id: collectionRunId,
-    stage: "scrolling",
-    message: "页面已确认，正在滚动并累计当前批次候选人。",
-  });
+  let activeStage = "page_confirmation";
+  const onFrameConfirmed = async () => {
+    await reportAutomationProgress(settings, {
+      collection_run_id: collectionRunId,
+      stage: "page_confirmation",
+      stage_status: "completed",
+      message: "已确认当前可见的候选人内容 frame。",
+    });
+    activeStage = "scrolling";
+    await reportAutomationProgress(settings, {
+      collection_run_id: collectionRunId,
+      stage: "scrolling",
+      message: "正在滚动并累计当前批次候选人。",
+    });
+  };
   let frameResults;
   try {
-    frameResults = await collectFromAllFrames(tab.id, autoScroll, settings);
+    frameResults = await collectFromAllFrames(tab.id, autoScroll, settings, onFrameConfirmed);
   } catch (error) {
+    await reportAutomationProgress(settings, {
+      collection_run_id: collectionRunId,
+      stage: "failed",
+      failed_stage: activeStage,
+      message: error.message || String(error),
+    });
     setStatus(`读取页面 DOM 失败。\n${error.message || String(error)}`);
     return;
   }
 
+  activeStage = "settling";
   await reportAutomationProgress(settings, {
     collection_run_id: collectionRunId,
     stage: "settling",
+    stage_status: "completed",
     message: "滚动结束，候选卡数量与内容签名已稳定。",
   });
   const merged = mergeFrameResults(frameResults);
   if (merged.cards.length === 0) {
+    await reportAutomationProgress(settings, {
+      collection_run_id: collectionRunId,
+      stage: "failed",
+      failed_stage: "settling",
+      message: "页面中没有识别到候选人卡片。",
+    });
     setStatus(
       [
         "采集失败。",
@@ -463,6 +482,7 @@ async function runCollection(autoScroll, options = {}) {
     return;
   }
 
+  activeStage = "importing";
   await reportAutomationProgress(settings, {
     collection_run_id: collectionRunId,
     stage: "importing",
@@ -499,6 +519,12 @@ async function runCollection(autoScroll, options = {}) {
       ].join("\n"),
     );
   } catch (error) {
+    await reportAutomationProgress(settings, {
+      collection_run_id: collectionRunId,
+      stage: "failed",
+      failed_stage: activeStage,
+      message: error.message || String(error),
+    });
     setStatus(`导入本地程序失败。\n${error.message || String(error)}`);
   }
 }
@@ -692,7 +718,7 @@ async function resetScrollPause(tabId) {
   }
 }
 
-async function collectFromAllFrames(tabId, autoScroll, settings) {
+async function collectFromAllFrames(tabId, autoScroll, settings, onFrameConfirmed) {
   const expectedVersion = "collection-freshness-v2";
   await chrome.scripting.executeScript({
     target: { tabId, allFrames: true },
@@ -730,8 +756,11 @@ async function collectFromAllFrames(tabId, autoScroll, settings) {
         : "未找到当前可见的候选人推荐页面。",
     );
   }
+  if (typeof onFrameConfirmed === "function") {
+    await onFrameConfirmed(selected);
+  }
 
-  return chrome.scripting.executeScript({
+  const extractionResults = await chrome.scripting.executeScript({
     target: { tabId, frameIds: [selected.frameId] },
     args: [autoScroll, settings],
     func: async (autoScrollArg, settingsArg) => {
@@ -751,6 +780,11 @@ async function collectFromAllFrames(tabId, autoScroll, settings) {
       }
     },
   });
+  const failedExtraction = extractionResults.find((item) => item?.result?.ok === false);
+  if (failedExtraction) {
+    throw new Error(failedExtraction.result.debug || "候选人采集失败。");
+  }
+  return extractionResults;
 }
 
 async function verifyFavoriteManagementAcrossFrames(tabId, platformIdentity, favoriteActionAttempted) {

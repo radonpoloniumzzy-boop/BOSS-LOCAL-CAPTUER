@@ -95,10 +95,27 @@ class CardImportService:
             )
             try:
                 repo_result = self.repository.upsert_batch_candidates(batch.id, parsed_records)
-                message = "已从 Chrome 扩展导入候选人卡片。"
+                inserted_batch_items = int(repo_result["inserted_batch_items"])
+                expected_unique_cards = int(meta.get("unique_cards") or len(cards))
+                count_matches = (
+                    len(cards)
+                    == expected_unique_cards
+                    == len(parsed_records)
+                    == inserted_batch_items
+                )
+                batch_status = "completed" if count_matches else "failed"
+                message = (
+                    "已从 Chrome 扩展导入候选人卡片。"
+                    if count_matches
+                    else (
+                        "采集批次数量校验失败："
+                        f"上传 {len(cards)}，扩展去重 {expected_unique_cards}，"
+                        f"解析 {len(parsed_records)}，入库 {inserted_batch_items}。"
+                    )
+                )
                 result = CaptureRunResult(
                     batch_id=batch.id,
-                    status="completed",
+                    status=batch_status,
                     total_unique=len(parsed_records),
                     total_inserted_candidates=repo_result["inserted_candidates"],
                     total_batch_items=repo_result["inserted_batch_items"],
@@ -107,7 +124,7 @@ class CardImportService:
                 )
                 self.repository.finalize_batch(
                     batch_id=batch.id,
-                    status="completed",
+                    status=batch_status,
                     total_collected=len(parsed_records),
                     total_new=repo_result["inserted_batch_items"],
                     note="; ".join([*note_parts, message]),
@@ -132,14 +149,6 @@ class CardImportService:
                     meta=meta,
                     content_fingerprint=content_fingerprint,
                 )
-            )
-            inserted_batch_items = int(repo_result["inserted_batch_items"])
-            expected_unique_cards = int(meta.get("unique_cards") or len(cards))
-            count_matches = (
-                len(cards)
-                == expected_unique_cards
-                == len(parsed_records)
-                == inserted_batch_items
             )
             response.update(
                 {
