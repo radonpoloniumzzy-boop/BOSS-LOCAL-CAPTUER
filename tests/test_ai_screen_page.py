@@ -103,6 +103,16 @@ class AIScreenPageTest(unittest.TestCase):
         self.assertTrue(page.favorite_rating_checks["SSR"].isChecked())
         self.assertTrue(page.favorite_rating_checks["SR"].isChecked())
 
+    def test_saved_credential_status_explains_that_api_key_can_be_left_blank(self) -> None:
+        page = AIScreenPage(PromptManager(Path("assets/prompts")))
+        self.addCleanup(page.deleteLater)
+
+        page.set_credential_status(True)
+
+        self.assertEqual(page.api_key_input.text(), "")
+        self.assertIn("Windows 凭据管理器", page.credential_status_label.text())
+        self.assertIn("可留空", page.credential_status_label.text())
+
 
 if __name__ == "__main__":
     unittest.main()

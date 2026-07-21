@@ -18,6 +18,7 @@ class LocalApiServer:
         on_error: Callable[[str], None] | None = None,
         get_automation_status: Callable[[], dict[str, object]] | None = None,
         start_automation: Callable[[dict[str, object]], dict[str, object]] | None = None,
+        on_automation_progress: Callable[[dict[str, object]], None] | None = None,
         get_extension_config: Callable[[], dict[str, object]] | None = None,
         claim_favorite_task: Callable[[dict[str, object]], dict[str, object] | None] | None = None,
         report_favorite_result: Callable[[dict[str, object]], dict[str, object]] | None = None,
@@ -37,6 +38,7 @@ class LocalApiServer:
         self.on_error = on_error
         self.get_automation_status = get_automation_status
         self.start_automation = start_automation
+        self.on_automation_progress = on_automation_progress
         self.get_extension_config = get_extension_config
         self.claim_favorite_task = claim_favorite_task
         self.report_favorite_result = report_favorite_result
@@ -114,6 +116,7 @@ class LocalApiServer:
                 if self.path not in {
                     "/api/import/cards",
                     "/api/automation/start",
+                    "/api/automation/progress",
                     "/api/favorites/claim",
                     "/api/favorites/result",
                     "/api/favorites/retry",
@@ -189,6 +192,11 @@ class LocalApiServer:
                             return
                         result = parent.start_automation(payload)
                         self._send_json(200, {"ok": True, "result": result})
+                        return
+                    if self.path == "/api/automation/progress":
+                        if parent.on_automation_progress is not None:
+                            parent.on_automation_progress(payload)
+                        self._send_json(200, {"ok": True})
                         return
                     result = parent.import_service.import_cards(payload)
                     if parent.on_import:

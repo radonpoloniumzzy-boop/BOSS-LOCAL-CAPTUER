@@ -228,6 +228,55 @@ class ExportServiceTest(unittest.TestCase):
         self.assertIn("### 原始卡片文本", content)
         self.assertIn("张三 原始文本", content)
 
+    def test_batch_export_filename_identifies_raw_capture_batch_job_and_time(self) -> None:
+        batch = self._insert_sample_candidate()
+        result = self.export_service.export(
+            export_format="csv",
+            mode="batch",
+            export_dir=Path(self.temp_dir.name) / "exports",
+            columns=["name"],
+            batch_id=batch.id,
+            job_title="Securities Trader",
+        )
+
+        self.assertRegex(
+            Path(result.file_path).name,
+            rf"^采集批次{batch.id}_Securities Trader_原始采集_\d{{8}}-\d{{6}}\.csv$",
+        )
+
+    def test_screened_batch_export_filename_identifies_screening_run(self) -> None:
+        batch = self._insert_sample_candidate()
+        profile = self.repository.save_screening_profile(
+            ScreeningProfile(
+                job_title="Securities Trader",
+                jd_text="Trading execution",
+                prompt_text="Rate candidates",
+            )
+        )
+        run_id = self.repository.create_screening_run(
+            profile_id=int(profile.id),
+            source_job_title="Securities Trader",
+            batch_id=batch.id,
+            provider="fake",
+            model="fake-model",
+            total_candidates=1,
+        )
+        self.repository.finalize_screening_run(run_id, "completed", 1, 0)
+
+        result = self.export_service.export(
+            export_format="csv",
+            mode="batch",
+            export_dir=Path(self.temp_dir.name) / "exports",
+            columns=["name"],
+            batch_id=batch.id,
+            job_title="Securities Trader",
+        )
+
+        self.assertRegex(
+            Path(result.file_path).name,
+            rf"^采集批次{batch.id}_Securities Trader_初筛任务{run_id}_\d{{8}}-\d{{6}}\.csv$",
+        )
+
     def _insert_sample_candidate(self):
         batch = self.repository.create_batch("校招 C++ 工程师", "https://example.com")
         candidate = CandidateRecord(

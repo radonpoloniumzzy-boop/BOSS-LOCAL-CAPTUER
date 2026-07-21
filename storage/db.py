@@ -21,7 +21,7 @@ class DatabaseManager:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         version = self._schema_version(connection)
-        target_version = 16
+        target_version = 17
         if version is not None and version < target_version:
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             backup_path = self.db_path.with_name(

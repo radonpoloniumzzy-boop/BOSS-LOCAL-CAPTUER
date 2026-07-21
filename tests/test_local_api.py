@@ -118,6 +118,35 @@ class LocalApiServerTest(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual(len(self.repository.list_candidates()), 1)
 
+    def test_automation_progress_endpoint_forwards_authenticated_stage(self) -> None:
+        received = []
+        self.server.on_automation_progress = received.append
+        body = json.dumps(
+            {
+                "collection_run_id": "collect-1",
+                "stage": "scrolling",
+                "current": 120,
+                "message": "正在滚动采集",
+            }
+        ).encode("utf-8")
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.port, timeout=5)
+        connection.request(
+            "POST",
+            "/api/automation/progress",
+            body=body,
+            headers={
+                "Content-Type": "application/json",
+                "X-Boss-Local-Token": self.token,
+            },
+        )
+        response = connection.getresponse()
+        payload = json.loads(response.read().decode("utf-8"))
+
+        self.assertEqual(response.status, 200)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(received[0]["stage"], "scrolling")
+        self.assertEqual(received[0]["collection_run_id"], "collect-1")
+
     def test_import_rejects_missing_token(self) -> None:
         body = json.dumps({"cards": [{"raw_card_text": "Mallory"}]}).encode("utf-8")
         connection = http.client.HTTPConnection("127.0.0.1", self.server.port, timeout=5)

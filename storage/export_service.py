@@ -42,6 +42,7 @@ class ExportService:
         recruitment_status: str = "",
         latest_reason_code: str = "",
         filename_template: str = "",
+        screening_run_id: int | None = None,
     ) -> ExportResult:
         rows = self.repository.get_export_rows(
             mode=mode,
@@ -65,8 +66,30 @@ class ExportService:
 
         ensure_directory(export_dir)
         resolved_job_title = job_title or self._infer_job_title(rows)
+        screening_run = None
+        if screening_run_id is not None:
+            candidate_run = self.repository.get_screening_run(int(screening_run_id))
+            if (
+                candidate_run is not None
+                and batch_id is not None
+                and int(candidate_run["batch_id"] or 0) == int(batch_id)
+                and str(candidate_run["status"] or "") == "completed"
+            ):
+                screening_run = candidate_run
+        elif batch_id is not None:
+            screening_run = self.repository.get_latest_completed_screening_run_for_batch(
+                batch_id,
+                profile_id=(int(match_role_id) if match_role_id not in {None, ""} else None),
+            )
+        resolved_screening_run_id = (
+            int(screening_run["id"]) if screening_run is not None else None
+        )
         filename = self._build_filename(
-            resolved_job_title, batch_id, export_format, filename_template=filename_template
+            resolved_job_title,
+            batch_id,
+            export_format,
+            filename_template=filename_template,
+            screening_run_id=resolved_screening_run_id,
         )
         target_path = unique_path(export_dir / filename)
 
@@ -189,6 +212,7 @@ class ExportService:
         export_format: str,
         *,
         filename_template: str = "",
+        screening_run_id: int | None = None,
     ) -> str:
         label, extension = EXPORT_SUFFIXES[export_format]
         timestamp = now_iso()
@@ -201,6 +225,12 @@ class ExportService:
                 "time": timestamp[11:19].replace(":", ""),
                 "format": extension,
                 "type": label,
+                "stage": (
+                    f"初筛任务{screening_run_id}"
+                    if screening_run_id is not None
+                    else "原始采集"
+                ),
+                "screening_run_id": screening_run_id if screening_run_id is not None else "none",
             },
         )
         return f"{stem}.{extension}"

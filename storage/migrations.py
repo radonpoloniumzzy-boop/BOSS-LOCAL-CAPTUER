@@ -40,6 +40,12 @@ CREATE TABLE IF NOT EXISTS capture_batches (
     total_new INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL,
     note TEXT,
+    collection_run_id TEXT NOT NULL DEFAULT '',
+    content_fingerprint TEXT NOT NULL DEFAULT '',
+    source_document_id TEXT NOT NULL DEFAULT '',
+    source_frame_id INTEGER,
+    source_frame_url TEXT NOT NULL DEFAULT '',
+    collection_metadata_json TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -242,6 +248,30 @@ ON candidate_role_status_events(role_id, to_status, changed_at);
 
 def apply_migrations(connection) -> None:
     connection.executescript(V1_SCHEMA_SQL)
+    capture_batch_columns = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(capture_batches)").fetchall()
+    }
+    capture_batch_additions = {
+        "collection_run_id": "TEXT NOT NULL DEFAULT ''",
+        "content_fingerprint": "TEXT NOT NULL DEFAULT ''",
+        "source_document_id": "TEXT NOT NULL DEFAULT ''",
+        "source_frame_id": "INTEGER",
+        "source_frame_url": "TEXT NOT NULL DEFAULT ''",
+        "collection_metadata_json": "TEXT NOT NULL DEFAULT '{}'",
+    }
+    for column, declaration in capture_batch_additions.items():
+        if column not in capture_batch_columns:
+            connection.execute(
+                f"ALTER TABLE capture_batches ADD COLUMN {column} {declaration}"
+            )
+    connection.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_capture_batches_collection_run "
+        "ON capture_batches(collection_run_id) WHERE collection_run_id <> ''"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_capture_batches_content_fingerprint "
+        "ON capture_batches(content_fingerprint, id DESC)"
+    )
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS candidate_platform_identities (
@@ -827,5 +857,5 @@ def apply_migrations(connection) -> None:
         "ON native_favorite_attempts(task_id, attempt_number)"
     )
     connection.execute("DELETE FROM schema_version")
-    connection.execute("INSERT INTO schema_version(version) VALUES (16)")
+    connection.execute("INSERT INTO schema_version(version) VALUES (17)")
     connection.commit()

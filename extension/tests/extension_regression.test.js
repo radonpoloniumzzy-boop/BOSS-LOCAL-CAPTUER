@@ -177,6 +177,73 @@ function testBossIdentityEvidenceKeepsIdentifiersAndDropsSecrets() {
   assert.strictEqual(JSON.stringify(identity).includes("must-not-be-collected"), false);
 }
 
+function loadCollectionContractApi() {
+  const source = fs.readFileSync(path.join(EXTENSION_DIR, "collection_contract.js"), "utf8");
+  const context = { globalThis: {} };
+  context.globalThis = context;
+  vm.runInNewContext(source, context, { filename: "collection_contract.js" });
+  return context.BossLocalCollectionContract;
+}
+
+function testCollectionChoosesOneVisibleAuthoritativeCandidateFrame() {
+  const api = loadCollectionContractApi();
+  const selected = api.selectAuthoritativeFrame([
+    {
+      frameId: 0,
+      documentId: "shell-document",
+      result: { frameUrl: "https://www.zhipin.com/web/geek/recommend", cardCount: 0, visible: true },
+    },
+    {
+      frameId: 4,
+      documentId: "old-hidden-document",
+      result: { frameUrl: "https://www.zhipin.com/web/frame/recommend/", cardCount: 500, visible: false },
+    },
+    {
+      frameId: 7,
+      documentId: "current-document",
+      result: { frameUrl: "https://www.zhipin.com/web/frame/recommend/", cardCount: 20, visible: true },
+    },
+  ]);
+
+  assert.strictEqual(selected.ok, true);
+  assert.strictEqual(selected.frameId, 7);
+  assert.strictEqual(selected.documentId, "current-document");
+  assert.strictEqual(selected.candidateFrameCount, 2);
+}
+
+function testCollectionRefusesAmbiguousVisibleCandidateFrames() {
+  const api = loadCollectionContractApi();
+  const selected = api.selectAuthoritativeFrame([
+    {
+      frameId: 3,
+      documentId: "candidate-a",
+      result: { frameUrl: "https://www.zhipin.com/web/frame/recommend/", cardCount: 20, visible: true },
+    },
+    {
+      frameId: 7,
+      documentId: "candidate-b",
+      result: { frameUrl: "https://www.zhipin.com/web/frame/recommend/", cardCount: 20, visible: true },
+    },
+  ]);
+
+  assert.strictEqual(selected.ok, false);
+  assert.strictEqual(selected.reason, "ambiguous_candidate_frames");
+}
+
+function testCollectionWaitsForCardContentWhenHeightDoesNotChange() {
+  const api = loadCollectionContractApi();
+  const tracker = api.createStabilityTracker(3);
+
+  assert.strictEqual(tracker.observe({ scrollHeight: 1000, contentSignature: "old" }), false);
+  assert.strictEqual(tracker.observe({ scrollHeight: 1000, contentSignature: "new" }), false);
+  assert.strictEqual(tracker.observe({ scrollHeight: 1000, contentSignature: "new" }), false);
+  assert.strictEqual(tracker.observe({ scrollHeight: 1000, contentSignature: "new" }), false);
+  assert.strictEqual(tracker.observe({ scrollHeight: 1000, contentSignature: "new" }), true);
+  const collector = fs.readFileSync(path.join(EXTENSION_DIR, "collector.js"), "utf8");
+  assert(collector.includes("candidate_content_not_stable"));
+  assert(collector.includes("if (!initialSettled)"));
+}
+
 function testBossIdentityEvidenceReadsOnlyImmediateCandidateWrapperAndUsesTrustedMergeKey() {
   const api = loadCollectorIdentityApi();
   const node = (entries = [], parentElement = null, descendants = []) => ({
@@ -1586,7 +1653,7 @@ function testAutomationAutoButtonStartsDesktopWorkflow() {
   assert(html.includes('id="apiToken"'));
   assert(popup.includes("automation_requested"));
   assert(popup.includes("AUTO 采集完成，已提交 AI 初筛"));
-  assert.strictEqual(manifest.version, "0.6.0");
+  assert.strictEqual(manifest.version, "0.7.0");
 }
 
 function testNativeFavoriteBatchHasDedicatedRunnerAndManagementVerification() {
@@ -1615,7 +1682,7 @@ function testNativeFavoriteBatchHasDedicatedRunnerAndManagementVerification() {
   assert(!service.includes("MAX_MANAGEMENT_VERIFICATION_ATTEMPTS"));
   assert(service.includes('files: ["identity_contract.js", "favorite_adapter.js"]'));
   assert(service.includes('files: ["identity_contract.js", "favorite_management_verifier.js"]'));
-  assert.strictEqual(manifest.version, "0.6.0");
+  assert.strictEqual(manifest.version, "0.7.0");
 }
 
 function testChatAutomationIsOptIn() {
@@ -1746,6 +1813,9 @@ async function main() {
   await testNativeFavoriteFinalTopContextBarrierPreventsSpaStateWrite();
   testBossIdentityEvidenceKeepsIdentifiersAndDropsSecrets();
   testBossIdentityEvidenceReadsOnlyImmediateCandidateWrapperAndUsesTrustedMergeKey();
+  testCollectionChoosesOneVisibleAuthoritativeCandidateFrame();
+  testCollectionRefusesAmbiguousVisibleCandidateFrames();
+  testCollectionWaitsForCardContentWhenHeightDoesNotChange();
   await testNativeFavoriteReadinessDiagnosticReportsRemovedDetailAsChanged();
   await testNativeFavoriteReportsControlledRestrictionCodeAfterAttempt();
   await testFavoriteManagementVerifierRequiresSelectedFavoriteSubviewObservation();

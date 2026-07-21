@@ -62,6 +62,7 @@ class _LogBridge(QObject):
 class _ImportBridge(QObject):
     imported = Signal(object)
     error = Signal(str)
+    progress = Signal(object)
 
 
 class MainWindow(QMainWindow):
@@ -121,6 +122,7 @@ class MainWindow(QMainWindow):
         self._latest_page_request: dict[str, int] = {}
         self._ai_screening_thread: tuple[QThread, AIScreeningWorker] | None = None
         self._ai_screening_origin = "manual"
+        self._active_automation_trace: dict[str, object] = {}
         self._ai_test_running = False
         self._ai_test_context: dict[str, object] = {}
         persisted_launch_snapshot = self.config.automation_flow.armed_launch_snapshot
@@ -400,6 +402,9 @@ class MainWindow(QMainWindow):
         self.ai_page.test_connection_requested.connect(self._test_ai_connection)
         self.ai_page.cancel_connection_test_requested.connect(self._cancel_ai_connection_test)
         self.ai_page.delete_credential_requested.connect(self._delete_ai_credential)
+        self.ai_page.credential_context_changed.connect(
+            lambda payload: self._refresh_credential_status("ai", payload)
+        )
         self.ai_page.run_selected.connect(self._load_screening_results)
         self.ai_page.resume_run_requested.connect(self._resume_ai_screening_run)
         self.ai_page.retry_task_requested.connect(self._retry_ai_screening_task)
@@ -412,16 +417,21 @@ class MainWindow(QMainWindow):
             lambda payload: self._test_ai_connection(payload, target="automation")
         )
         self.automation_flow_page.run_selected.connect(self._load_automation_results)
+        self.automation_flow_page.credential_context_changed.connect(
+            lambda payload: self._refresh_credential_status("automation", payload)
+        )
 
         self.settings_page.save_requested.connect(self._save_settings)
         self.import_bridge.imported.connect(self._on_extension_imported)
         self.import_bridge.error.connect(self._on_extension_import_error)
+        self.import_bridge.progress.connect(self._on_automation_progress)
 
     def _load_config_into_pages(self) -> None:
         self.dashboard_page.load_config(self.config)
         self.settings_page.load_config(self.config)
         self.ai_page.load_config(self.config)
         self.automation_flow_page.load_config(self.config)
+        self._refresh_all_credential_statuses()
 
     def _start_local_api_server(self) -> None:
         if self.local_api_server is not None:
@@ -434,6 +444,7 @@ class MainWindow(QMainWindow):
             logger=self.logging_service.get_logger("local_api"),
             on_import=self.import_bridge.imported.emit,
             on_error=self.import_bridge.error.emit,
+            on_automation_progress=self.import_bridge.progress.emit,
             get_automation_status=self._automation_status_payload,
             start_automation=self._start_automation_from_extension,
             get_extension_config=self._extension_config_payload,
@@ -673,12 +684,14 @@ class MainWindow(QMainWindow):
         thread.start()
         self.statusBar().showMessage(f"正在导出 {str(export_payload['export_format']).upper()}...")
 
-    def refresh_candidates(self) -> None:
+    def refresh_candidates(self, selected_batch_id: int | None = None) -> None:
         self.candidates_page.set_filter_options(
             self.repository.list_job_titles(),
             [dict(batch) for batch in self.repository.list_batches()],
             [dict(profile) for profile in self.repository.list_screening_profiles()],
         )
+        if selected_batch_id is not None:
+            self.candidates_page.select_batch(selected_batch_id)
         self._candidate_request_id += 1
         request_id = self._candidate_request_id
         self._page_request_kind[request_id] = "candidates"
@@ -1420,6 +1433,18 @@ class MainWindow(QMainWindow):
     def _queue_automation_screening(self, capture_result: dict[str, object]) -> None:
         if not self._automation_armed or self._armed_automation_snapshot is None:
             return
+        if capture_result.get("automation_allowed") is False:
+            if bool(capture_result.get("duplicate_content")):
+                batch_id = capture_result.get("duplicate_of_batch_id") or capture_result.get("batch_id")
+                self.automation_flow_page.set_status(
+                    f"本次采集与上一批 #{batch_id} 内容完全相同，尚未启动 AI 初筛。"
+                    "请等待推荐页面更新后重新点击扩展 AUTO。"
+                )
+            else:
+                self.automation_flow_page.set_status(
+                    "该采集任务已经导入，重复请求未启动 AI 初筛。"
+                )
+            return
         batch_id = capture_result.get("batch_id")
         total_items = int(
             capture_result.get("total_batch_items")
@@ -1437,6 +1462,9 @@ class MainWindow(QMainWindow):
             "job_title": str(capture_result.get("job_title") or flow_snapshot.get("job_title") or ""),
             "source_url": str(capture_result.get("source_url") or flow_snapshot.get("source_url") or ""),
             "source_page_context": dict(capture_result.get("source_page_context") or {}),
+            "collection_run_id": str(capture_result.get("collection_run_id") or ""),
+            "content_fingerprint": str(capture_result.get("content_fingerprint") or ""),
+            "expected_total_items": total_items,
             "launch_snapshot": launch_snapshot,
         }
         self._automation_armed = False
@@ -1463,15 +1491,35 @@ class MainWindow(QMainWindow):
             self.automation_flow_page.set_status("自动化配置快照无效，未启动本批次筛选。")
             return
         batch_id = int(capture_result["batch_id"])
+        expected_total_items = int(capture_result.get("expected_total_items") or 0)
+        if expected_total_items:
+            actual_total_items = self.repository.count_batch_items(batch_id)
+            if actual_total_items != expected_total_items:
+                self.automation_flow_page.set_status(
+                    f"批次 #{batch_id} 导入校验失败：扩展报告 {expected_total_items} 人，"
+                    f"数据库实际可筛选 {actual_total_items} 人。AI 初筛尚未启动。"
+                )
+                return
         post_screen_action = str(flow_snapshot.get("post_screen_action") or "screen_only")
         screening_limit = (
             0
             if post_screen_action == "screen_and_favorite"
             else int(flow_snapshot.get("max_candidates") or 0)
         )
-        candidates = self.repository.list_screening_candidates(
+        all_candidates = self.repository.list_screening_candidates(
             batch_id=batch_id,
-            limit=screening_limit,
+            limit=0,
+        )
+        if expected_total_items and len(all_candidates) != expected_total_items:
+            self.automation_flow_page.set_status(
+                f"批次 #{batch_id} 可筛选候选人校验失败：应有 {expected_total_items} 人，"
+                f"实际可筛选 {len(all_candidates)} 人。AI 初筛尚未启动。"
+            )
+            return
+        candidates = (
+            all_candidates
+            if screening_limit == 0
+            else all_candidates[:screening_limit]
         )
         if not candidates:
             self.automation_flow_page.set_status(f"批次 #{batch_id} 没有可用于初筛的候选人。")
@@ -1524,11 +1572,29 @@ class MainWindow(QMainWindow):
                 },
             },
         }
+        self._active_automation_trace = {
+            "stage": "screening",
+            "collection_run_id": str(capture_result.get("collection_run_id") or ""),
+            "batch_id": batch_id,
+            "current": 0,
+            "total": len(candidates),
+            "message": "AI 初筛正在读取已校验的采集批次。",
+        }
+        self.automation_flow_page.update_pipeline_status(self._active_automation_trace)
         self._launch_ai_screening(worker_payload, origin="automation")
 
     def _on_ai_screening_progress(self, progress, origin: str) -> None:
         if origin == "automation":
             self.automation_flow_page.update_progress(progress)
+            self._active_automation_trace.update(
+                {
+                    "stage": "screening",
+                    "current": int(progress.current),
+                    "total": int(progress.total),
+                    "message": str(progress.message or "AI 初筛进行中"),
+                }
+            )
+            self.automation_flow_page.update_pipeline_status(self._active_automation_trace)
         else:
             self.ai_page.update_progress(progress)
 
@@ -1552,6 +1618,16 @@ class MainWindow(QMainWindow):
                 status_message += f" 收藏批次 #{result['favorite_batch_id']} 已生成，等待扩展执行。"
             self.automation_flow_page.set_status(status_message)
             self.refresh_automation_flow(selected_run_id=run_id)
+            self._active_automation_trace.update(
+                {
+                    "stage": "completed",
+                    "screening_run_id": run_id,
+                    "current": int(result.get("completed") or 0),
+                    "total": int(result.get("completed") or 0) + int(result.get("failed") or 0),
+                    "message": str(result.get("message") or "采集与 AI 初筛已完成。"),
+                }
+            )
+            self.automation_flow_page.update_pipeline_status(self._active_automation_trace)
         else:
             self.ai_page.set_running(False)
             self.ai_page.set_status(str(result.get("message") or "AI 初筛完成。"))
@@ -1563,6 +1639,8 @@ class MainWindow(QMainWindow):
     def _on_ai_screening_failed(self, message: str) -> None:
         if self._ai_screening_origin == "automation":
             self.automation_flow_page.set_running(False)
+            self._active_automation_trace.update({"stage": "failed", "message": message})
+            self.automation_flow_page.update_pipeline_status(self._active_automation_trace)
             self.automation_flow_page.set_status(f"自动化 AI 初筛失败：{message}")
         else:
             self.ai_page.set_running(False)
@@ -1601,13 +1679,24 @@ class MainWindow(QMainWindow):
         self._ai_test_running = False
         target = str(self._ai_test_context.get("target") or "ai")
         status_page = self.automation_flow_page if target == "automation" else self.ai_page
-        status_page.set_status(f"API 连接成功：{getattr(result, 'persona', '')}")
-        self.statusBar().showMessage("AI API 连接成功")
         typed_key = str(self._ai_test_context.get("typed_key") or "")
         if typed_key:
             self._save_test_credential(
                 dict(self._ai_test_context.get("provider_payload") or {}), typed_key
             )
+        self._refresh_all_credential_statuses()
+        saved = self._credential_exists(
+            dict(self._ai_test_context.get("provider_payload") or {})
+        )
+        key_message = (
+            "Key 已安全保存到 Windows 凭据管理器。"
+            if saved
+            else "本次使用输入框或环境变量中的 Key。"
+        )
+        status_page.set_status(
+            f"API 连接成功：{getattr(result, 'persona', '')} {key_message}"
+        )
+        self.statusBar().showMessage("AI API 连接成功")
 
     def _on_ai_connection_test_error(self, message: str) -> None:
         self._ai_test_running = False
@@ -1629,6 +1718,7 @@ class MainWindow(QMainWindow):
             )
             message = "已删除保存的 API Key。" if deleted else "没有找到已保存的 API Key。"
             self.ai_page.set_status(message)
+            self._refresh_all_credential_statuses()
         except Exception as exc:
             self.ai_page.set_status(f"删除 API Key 失败：{exc}")
 
@@ -1641,6 +1731,30 @@ class MainWindow(QMainWindow):
             )
         except Exception as exc:
             self.logger.warning("Could not save API credential: %s", exc)
+
+    def _credential_exists(self, payload: dict[str, object]) -> bool | None:
+        try:
+            return bool(
+                self.credential_store.read(
+                    str(payload.get("provider") or "openai"),
+                    str(payload.get("api_base") or ""),
+                )
+            )
+        except Exception as exc:
+            self.logger.warning("Could not read API credential status: %s", exc)
+            return None
+
+    def _refresh_credential_status(
+        self, target: str, payload: dict[str, object]
+    ) -> None:
+        page = self.automation_flow_page if target == "automation" else self.ai_page
+        page.set_credential_status(self._credential_exists(dict(payload or {})))
+
+    def _refresh_all_credential_statuses(self) -> None:
+        self._refresh_credential_status("ai", self.ai_page.provider_payload())
+        self._refresh_credential_status(
+            "automation", self.automation_flow_page.provider_payload()
+        )
 
     def _load_screening_results(self, run_id: int) -> None:
         self._candidate_request_id += 1
@@ -1688,7 +1802,30 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "需要手动处理", result.message or "请完成登录或验证后再继续。")
 
     def _on_extension_imported(self, result: dict[str, object]) -> None:
-        self.refresh_candidates()
+        selected_batch_id = int(result["batch_id"]) if result.get("batch_id") is not None else None
+        self.refresh_candidates(selected_batch_id=selected_batch_id)
+        self.refresh_ai_screen()
+        if selected_batch_id is not None:
+            self.ai_page.select_source_batch(selected_batch_id)
+        if bool(result.get("duplicate_content")):
+            pipeline_stage = "duplicate"
+        elif (
+            bool(result.get("automation_requested"))
+            and result.get("automation_allowed") is not False
+        ):
+            pipeline_stage = "screening"
+        else:
+            pipeline_stage = "capture_completed"
+        self.automation_flow_page.update_pipeline_status(
+            {
+                "stage": pipeline_stage,
+                "collection_run_id": str(result.get("collection_run_id") or ""),
+                "batch_id": selected_batch_id,
+                "current": int(result.get("parsed_cards") or 0),
+                "total": int(result.get("total_batch_items") or 0),
+                "message": str(result.get("message") or "采集批次已导入。"),
+            }
+        )
         self.refresh_dashboard_stats()
         self.dashboard_page.update_result(SimpleNamespace(**result))
         self.dashboard_page.set_message(
@@ -1697,6 +1834,9 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"扩展导入完成：批次 #{result.get('batch_id')}")
         if bool(result.get("automation_requested")):
             self._queue_automation_screening(result)
+
+    def _on_automation_progress(self, payload: dict[str, object]) -> None:
+        self.automation_flow_page.update_pipeline_status(dict(payload or {}))
 
     def _on_extension_import_error(self, message: str) -> None:
         self.dashboard_page.set_message(message)

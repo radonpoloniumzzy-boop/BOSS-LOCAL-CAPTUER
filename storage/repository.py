@@ -80,16 +80,36 @@ class CandidateRepository:
         self.logger = logger
         self.profile_builder = profile_builder or StandardProfileBuilder()
 
-    def create_batch(self, job_title: str, source_url: str, note: str = "") -> CaptureBatch:
+    def create_batch(
+        self,
+        job_title: str,
+        source_url: str,
+        note: str = "",
+        *,
+        collection_run_id: str = "",
+        content_fingerprint: str = "",
+        source_document_id: str = "",
+        source_frame_id: int | None = None,
+        source_frame_url: str = "",
+        collection_metadata_json: str = "{}",
+    ) -> CaptureBatch:
         connection = self.db.get_connection()
         timestamp = now_iso()
         cursor = connection.execute(
             """
             INSERT INTO capture_batches(
-                job_title, source_url, start_time, status, note, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                job_title, source_url, start_time, status, note,
+                collection_run_id, content_fingerprint, source_document_id,
+                source_frame_id, source_frame_url, collection_metadata_json,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (job_title, source_url, timestamp, "running", note, timestamp, timestamp),
+            (
+                job_title, source_url, timestamp, "running", note,
+                collection_run_id, content_fingerprint, source_document_id,
+                source_frame_id, source_frame_url, collection_metadata_json,
+                timestamp, timestamp,
+            ),
         )
         connection.commit()
         batch = CaptureBatch(
@@ -104,6 +124,36 @@ class CandidateRepository:
         )
         self._log("info", "Created capture batch %s for job %s", batch.id, job_title)
         return batch
+
+    def get_batch_by_collection_run_id(self, collection_run_id: str) -> sqlite3.Row | None:
+        value = str(collection_run_id or "").strip()
+        if not value:
+            return None
+        return self.db.get_connection().execute(
+            "SELECT * FROM capture_batches WHERE collection_run_id = ? LIMIT 1",
+            (value,),
+        ).fetchone()
+
+    def get_latest_batch_by_fingerprint(self, content_fingerprint: str) -> sqlite3.Row | None:
+        value = str(content_fingerprint or "").strip()
+        if not value:
+            return None
+        return self.db.get_connection().execute(
+            """
+            SELECT * FROM capture_batches
+            WHERE content_fingerprint = ? AND status = 'completed'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (value,),
+        ).fetchone()
+
+    def count_batch_items(self, batch_id: int) -> int:
+        row = self.db.get_connection().execute(
+            "SELECT COUNT(*) AS value FROM capture_batch_items WHERE batch_id = ?",
+            (int(batch_id),),
+        ).fetchone()
+        return int(row["value"] if row is not None else 0)
 
     def finalize_batch(
         self,
@@ -811,6 +861,22 @@ class CandidateRepository:
             LIMIT 1
             """
         ).fetchone()
+
+    def get_latest_completed_screening_run_for_batch(
+        self,
+        batch_id: int,
+        profile_id: int | None = None,
+    ) -> sqlite3.Row | None:
+        query = """
+            SELECT * FROM screening_runs
+            WHERE batch_id = ? AND status = 'completed'
+        """
+        parameters: list[object] = [int(batch_id)]
+        if profile_id is not None:
+            query += " AND profile_id = ?"
+            parameters.append(int(profile_id))
+        query += " ORDER BY id DESC LIMIT 1"
+        return self.db.get_connection().execute(query, parameters).fetchone()
 
     def get_dashboard_stats(self) -> dict[str, int | str]:
         connection = self.db.get_connection()
@@ -1909,6 +1975,7 @@ class CandidateRepository:
             """,
             (favorite_batch_id,),
         ).fetchone()
+
         if row is None:
             raise ValueError(f"Native Favorite batch not found: {favorite_batch_id}")
         counts = connection.execute(

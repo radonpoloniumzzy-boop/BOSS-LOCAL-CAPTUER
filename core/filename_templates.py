@@ -5,7 +5,8 @@ from pathlib import Path
 from typing import Mapping
 
 
-DEFAULT_EXPORT_TEMPLATE = "{job_title}_{date}_{time}_batch{batch_id}_{type}"
+LEGACY_EXPORT_TEMPLATE = "{job_title}_{date}_{time}_batch{batch_id}_{type}"
+DEFAULT_EXPORT_TEMPLATE = "采集批次{batch_id}_{job_title}_{stage}_{date}-{time}"
 DEFAULT_RESUME_TEMPLATE = "{candidate_name}_{job_title}_{date}_{original_name}"
 _VARIABLE_PATTERN = re.compile(r"\{([a-z_][a-z0-9_]*)\}", re.IGNORECASE)
 _ILLEGAL_PATTERN = re.compile(r"[\\/:*?\"<>|\x00-\x1f]+")

@@ -100,7 +100,7 @@ class AppConfig:
     max_scroll_count: int = 60
     no_new_stop_rounds: int = 3
     default_job_title: str = "Boss Recommended Talent"
-    export_filename_template: str = "{job_title}_{date}_{time}_batch{batch_id}_{type}"
+    export_filename_template: str = "采集批次{batch_id}_{job_title}_{stage}_{date}-{time}"
     resume_filename_template: str = "{candidate_name}_{job_title}_{date}_{original_name}"
     log_level: str = "INFO"
     selectors_path: str = ""

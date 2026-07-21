@@ -61,6 +61,7 @@ class AIScreenPage(QWidget):
     run_selected = Signal(int)
     resume_run_requested = Signal(int)
     retry_task_requested = Signal(int)
+    credential_context_changed = Signal(object)
 
     def __init__(self, prompt_manager: PromptManager) -> None:
         super().__init__()
@@ -187,7 +188,9 @@ class AIScreenPage(QWidget):
         self.api_base_input = QLineEdit()
         self.api_key_input = QLineEdit()
         self.api_key_input.setEchoMode(QLineEdit.Password)
-        self.api_key_input.setPlaceholderText("仅保存在当前程序内存，不写入数据库或配置文件")
+        self.api_key_input.setPlaceholderText("留空时自动使用 Windows 凭据管理器中的 Key")
+        self.credential_status_label = QLabel("正在检查已保存的 API Key…")
+        self.credential_status_label.setWordWrap(True)
         self.api_key_env_input = QLineEdit()
         self.max_candidates_input = QSpinBox()
         self.max_candidates_input.setRange(0, 10000)
@@ -200,6 +203,7 @@ class AIScreenPage(QWidget):
         run_form.addRow("模型", self.model_combo)
         run_form.addRow("API Base", self.api_base_input)
         run_form.addRow("API Key", self.api_key_input)
+        run_form.addRow("密钥状态", self.credential_status_label)
         run_form.addRow("Key 环境变量", self.api_key_env_input)
 
         action_row = QHBoxLayout()
@@ -288,6 +292,9 @@ class AIScreenPage(QWidget):
         self.generate_prompt_button.clicked.connect(self.generate_prompt)
         self.prompt_text.textChanged.connect(self._mark_prompt_custom)
         self.provider_combo.currentIndexChanged.connect(self._provider_changed)
+        self.api_base_input.editingFinished.connect(
+            lambda: self.credential_context_changed.emit(self.provider_payload())
+        )
         self.test_button.clicked.connect(lambda: self.test_connection_requested.emit(self.provider_payload()))
         self.cancel_test_button.clicked.connect(self.cancel_connection_test_requested.emit)
         self.delete_credential_button.clicked.connect(
@@ -396,6 +403,13 @@ class AIScreenPage(QWidget):
                 int(batch["id"]),
             )
         self.source_batch_combo.setCurrentIndex(max(0, self.source_batch_combo.findData(current_batch)))
+
+    def select_source_batch(self, batch_id: int) -> bool:
+        index = self.source_batch_combo.findData(int(batch_id))
+        if index < 0:
+            return False
+        self.source_batch_combo.setCurrentIndex(index)
+        return True
 
     def set_runs(self, rows: list[dict[str, object]], selected_run_id: int | None = None) -> None:
         current = selected_run_id or self.run_combo.currentData()
@@ -683,6 +697,18 @@ class AIScreenPage(QWidget):
     def set_status(self, text: str) -> None:
         self.status_label.setText(text)
 
+    def set_credential_status(self, saved: bool | None) -> None:
+        if saved is True:
+            self.credential_status_label.setText(
+                "已安全保存到 Windows 凭据管理器；API Key 输入框可留空。"
+            )
+        elif saved is False:
+            self.credential_status_label.setText(
+                "尚未保存。输入 Key 并通过“测试连接”后会安全保存。"
+            )
+        else:
+            self.credential_status_label.setText("暂时无法读取 Windows 凭据管理器。")
+
     def profile_payload(self) -> dict[str, object]:
         def items(widget: QLineEdit) -> list[str]:
             text = widget.text().replace(";", "；")
@@ -753,6 +779,7 @@ class AIScreenPage(QWidget):
             self.model_combo.setCurrentText(current_model)
         self.api_base_input.setText(defaults["base"])
         self.api_key_env_input.setText(defaults["key_env"])
+        self.credential_context_changed.emit(self.provider_payload())
 
     def _upload_text(self, target: QPlainTextEdit, label: str) -> bool:
         path, _ = QFileDialog.getOpenFileName(

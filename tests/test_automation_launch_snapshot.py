@@ -16,6 +16,9 @@ class _ProviderPage:
     def set_status(self, _message: str) -> None:
         pass
 
+    def update_pipeline_status(self, _payload: dict[str, object]) -> None:
+        pass
+
 
 class _Repository:
     def __init__(self) -> None:
@@ -127,6 +130,82 @@ class AutomationLaunchSnapshotTest(unittest.TestCase):
         )
 
         self.assertEqual(started, [])
+
+    def test_duplicate_collection_cannot_enter_automation_screening_queue(self) -> None:
+        started = []
+        statuses = []
+        target = SimpleNamespace(
+            _automation_armed=True,
+            _armed_automation_snapshot={"flow": {}, "profile": {}},
+            _start_automation_screening=started.append,
+            automation_flow_page=SimpleNamespace(set_status=statuses.append),
+        )
+
+        MainWindow._queue_automation_screening(
+            target,
+            {
+                "batch_id": 12,
+                "total_batch_items": 20,
+                "automation_requested": True,
+                "automation_allowed": False,
+                "duplicate_content": True,
+            },
+        )
+
+        self.assertEqual(started, [])
+        self.assertIn("完全相同", statuses[-1])
+
+    def test_screening_does_not_start_when_imported_count_differs_from_batch(self) -> None:
+        launched = []
+        statuses = []
+        target = SimpleNamespace(
+            repository=SimpleNamespace(count_batch_items=lambda _batch_id: 19),
+            automation_flow_page=SimpleNamespace(set_status=statuses.append),
+            _launch_ai_screening=lambda payload, origin: launched.append((payload, origin)),
+        )
+
+        MainWindow._start_automation_screening(
+            target,
+            {
+                "batch_id": 12,
+                "expected_total_items": 20,
+                "launch_snapshot": {
+                    "profile": {"id": 7},
+                    "flow": {"post_screen_action": "screen_only"},
+                },
+            },
+        )
+
+        self.assertEqual(launched, [])
+        self.assertIn("20", statuses[-1])
+        self.assertIn("19", statuses[-1])
+
+    def test_screening_does_not_start_when_batch_has_fewer_screenable_candidates(self) -> None:
+        launched = []
+        statuses = []
+        target = SimpleNamespace(
+            repository=SimpleNamespace(
+                count_batch_items=lambda _batch_id: 20,
+                list_screening_candidates=lambda **_kwargs: [{"id": value} for value in range(19)],
+            ),
+            automation_flow_page=SimpleNamespace(set_status=statuses.append),
+            _launch_ai_screening=lambda payload, origin: launched.append((payload, origin)),
+        )
+
+        MainWindow._start_automation_screening(
+            target,
+            {
+                "batch_id": 12,
+                "expected_total_items": 20,
+                "launch_snapshot": {
+                    "profile": {"id": 7},
+                    "flow": {"post_screen_action": "screen_only", "max_candidates": 10},
+                },
+            },
+        )
+
+        self.assertEqual(launched, [])
+        self.assertIn("可筛选", statuses[-1])
 
     def test_desktop_arm_entry_persists_the_locked_launch_snapshot(self) -> None:
         flow = AutomationFlowConfig(

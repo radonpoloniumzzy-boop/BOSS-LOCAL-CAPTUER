@@ -425,6 +425,17 @@ async function runCollection(autoScroll, options = {}) {
       : `正在采集当前已加载的${platform.label}候选人卡片...`,
   );
 
+  const collectionRunId = crypto.randomUUID();
+  await reportAutomationProgress(settings, {
+    collection_run_id: collectionRunId,
+    stage: "page_confirmation",
+    message: "已确认当前页面与候选人内容 frame。",
+  });
+  await reportAutomationProgress(settings, {
+    collection_run_id: collectionRunId,
+    stage: "scrolling",
+    message: "页面已确认，正在滚动并累计当前批次候选人。",
+  });
   let frameResults;
   try {
     frameResults = await collectFromAllFrames(tab.id, autoScroll, settings);
@@ -433,6 +444,11 @@ async function runCollection(autoScroll, options = {}) {
     return;
   }
 
+  await reportAutomationProgress(settings, {
+    collection_run_id: collectionRunId,
+    stage: "settling",
+    message: "滚动结束，候选卡数量与内容签名已稳定。",
+  });
   const merged = mergeFrameResults(frameResults);
   if (merged.cards.length === 0) {
     setStatus(
@@ -447,6 +463,14 @@ async function runCollection(autoScroll, options = {}) {
     return;
   }
 
+  await reportAutomationProgress(settings, {
+    collection_run_id: collectionRunId,
+    stage: "importing",
+    current: merged.cards.length,
+    total: merged.cards.length,
+    message: "候选卡内容已稳定，正在导入本地批次。",
+  });
+
   try {
     const imported = await importCards(
       settings,
@@ -454,10 +478,18 @@ async function runCollection(autoScroll, options = {}) {
       merged,
       Boolean(options.automationRequested),
       tab.id,
+      collectionRunId,
     );
+    const completionLabel = imported.duplicate_content
+      ? "本次内容与紧邻上一批相同，已跳过 AI 初筛。"
+      : imported.automation_allowed === false
+        ? "采集已导入，但数量校验未通过，未启动 AI 初筛。"
+        : options.automationRequested
+          ? "AUTO 采集完成，已提交 AI 初筛。"
+          : "采集完成。";
     setStatus(
       [
-        options.automationRequested ? "AUTO 采集完成，已提交 AI 初筛。" : "采集完成。",
+        completionLabel,
         `本地去重卡片: ${merged.cards.length}`,
         `来源平台: ${platform.label}`,
         `命中 frame: ${merged.framesWithCards}/${merged.framesSeen}`,
@@ -661,13 +693,46 @@ async function resetScrollPause(tabId) {
 }
 
 async function collectFromAllFrames(tabId, autoScroll, settings) {
+  const expectedVersion = "collection-freshness-v2";
+  await chrome.scripting.executeScript({
+    target: { tabId, allFrames: true },
+    args: [expectedVersion],
+    func: (version) => {
+      if (globalThis.__bossLocalCollectorVersion === version) return;
+      delete globalThis.__bossLocalExtract;
+      delete globalThis.__bossLocalCollectorTest;
+      delete globalThis.__bossLocalProbe;
+      delete globalThis.__bossLocalCollectorVersion;
+    },
+  });
+  await chrome.scripting.executeScript({
+    target: { tabId, allFrames: true },
+    files: ["collection_contract.js"],
+  });
   await chrome.scripting.executeScript({
     target: { tabId, allFrames: true },
     files: ["identity_contract.js", "favorite_adapter.js", "favorite_management_verifier.js", "collector.js"],
   });
 
-  return chrome.scripting.executeScript({
+  const probes = await chrome.scripting.executeScript({
     target: { tabId, allFrames: true },
+    func: () => globalThis.__bossLocalProbe?.() || {
+      frameUrl: location.href,
+      cardCount: 0,
+      visible: document.visibilityState !== "hidden",
+    },
+  });
+  const selected = globalThis.BossLocalCollectionContract?.selectAuthoritativeFrame(probes);
+  if (!selected?.ok) {
+    throw new Error(
+      selected?.reason === "ambiguous_candidate_frames"
+        ? "检测到多个可见候选人页面，无法确定当前批次。请关闭重复页面后重试。"
+        : "未找到当前可见的候选人推荐页面。",
+    );
+  }
+
+  return chrome.scripting.executeScript({
+    target: { tabId, frameIds: [selected.frameId] },
     args: [autoScroll, settings],
     func: async (autoScrollArg, settingsArg) => {
       if (typeof globalThis.__bossLocalExtract !== "function") {
@@ -772,15 +837,22 @@ function mergeFrameResults(frameResults) {
     framesWithCards,
     roundsCompleted: maxRoundsCompleted,
     platform: platforms.size === 1 ? Array.from(platforms)[0] : "",
-    sourceDocumentId: String(
-      (frameResults || []).find((frameResult) => Number(frameResult?.frameId) === 0)?.documentId || "",
-    ),
+    sourceDocumentId: String(sourceCandidateDocuments[0]?.document_id || ""),
+    sourceFrameId: Number(sourceCandidateDocuments[0]?.frame_id ?? -1),
+    sourceFrameUrl: String(sourceCandidateDocuments[0]?.frame_url || ""),
     sourceCandidateDocuments,
     debugSummary: debugLines.join(" || "),
   };
 }
 
-async function importCards(settings, sourceUrl, merged, automationRequested = false, sourceTabId = null) {
+async function importCards(
+  settings,
+  sourceUrl,
+  merged,
+  automationRequested = false,
+  sourceTabId = null,
+  collectionRunId = "",
+) {
   const apiBase = normalizeLocalApiBase(settings.apiBase);
   let response;
   try {
@@ -801,8 +873,11 @@ async function importCards(settings, sourceUrl, merged, automationRequested = fa
           rounds_completed: merged.roundsCompleted,
           unique_cards: merged.cards.length,
           automation_requested: automationRequested,
+          collection_run_id: collectionRunId,
           source_tab_id: sourceTabId,
           source_document_id: merged.sourceDocumentId || "",
+          source_frame_id: merged.sourceFrameId,
+          source_frame_url: merged.sourceFrameUrl || "",
           source_candidate_documents: merged.sourceCandidateDocuments || [],
           debug: merged.debugSummary,
         },
@@ -816,6 +891,22 @@ async function importCards(settings, sourceUrl, merged, automationRequested = fa
     throw new Error(result.error || `本地接口返回状态码 ${response.status}`);
   }
   return result.result || {};
+}
+
+async function reportAutomationProgress(settings, payload) {
+  const apiBase = normalizeLocalApiBase(settings.apiBase);
+  try {
+    await fetch(`${apiBase}/api/automation/progress`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Boss-Local-Token": settings.apiToken || "",
+      },
+      body: JSON.stringify(payload || {}),
+    });
+  } catch (_error) {
+    // Progress is advisory. Import remains the authoritative completion boundary.
+  }
 }
 
 async function getActiveSupportedTab() {

@@ -1,4 +1,12 @@
-if (typeof globalThis.__bossLocalExtract !== "function") {
+const BOSS_LOCAL_COLLECTOR_VERSION = "collection-freshness-v2";
+if (
+  typeof globalThis.__bossLocalExtract !== "function" ||
+  globalThis.__bossLocalCollectorVersion !== BOSS_LOCAL_COLLECTOR_VERSION
+) {
+  delete globalThis.__bossLocalExtract;
+  delete globalThis.__bossLocalCollectorTest;
+  delete globalThis.__bossLocalProbe;
+  globalThis.__bossLocalCollectorVersion = BOSS_LOCAL_COLLECTOR_VERSION;
   const BOSS_TRUSTED_PLATFORM_UID_ATTRIBUTES =
     globalThis.__bossLocalIdentityContract?.trustedPlatformUidAttributes || [];
   const EDUCATION_REGEX = /(博士|硕士|研究生|本科|大专|中专|高中|MBA|EMBA|统招本科|学历不限)/;
@@ -133,6 +141,21 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
     mergeCollectedCard,
   };
 
+  globalThis.__bossLocalProbe = function bossLocalProbe() {
+    const platform = detectPlatform();
+    const detection = platform ? detectCandidateCardNodes(platform) : { nodes: [] };
+    return {
+      frameUrl: location.href,
+      platform: platform?.id || "",
+      cardCount: detection.nodes.length,
+      visible:
+        document.visibilityState !== "hidden" &&
+        Number(window.innerWidth || document.documentElement?.clientWidth || 0) > 0 &&
+        Number(window.innerHeight || document.documentElement?.clientHeight || 0) > 0,
+      collectorVersion: globalThis.__bossLocalCollectorVersion,
+    };
+  };
+
   globalThis.__bossLocalRequestScrollPause = function bossLocalRequestScrollPause(reason) {
     const control = getScrollControl();
     control.pauseRequested = true;
@@ -219,6 +242,13 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
       return newCount;
     };
 
+    if (autoScroll) {
+      const initialSettled = await waitForContentSettled(platform, settings.scrollWaitMs);
+      if (!initialSettled) {
+        throw new Error("candidate_content_not_stable");
+      }
+    }
+
     while (true) {
       mergeLoadedCards(true);
 
@@ -269,6 +299,14 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
       if (!changed) {
         noNewRounds += 1;
       }
+    }
+
+    if (autoScroll && !isScrollPauseRequested()) {
+      const settledAfterScroll = await waitForContentSettled(platform, settings.scrollWaitMs);
+      if (!settledAfterScroll && !isScrollPauseRequested()) {
+        throw new Error("candidate_content_not_stable");
+      }
+      mergeLoadedCards(false);
     }
 
     return {
@@ -339,32 +377,59 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
       scrollHeight: Number(getScrollHeight(root)),
       scrollTop: Number(getScrollTop(root)),
       textLength: bodyText.length,
+      contentSignature: candidateContentSignature(detection.nodes),
     };
   }
 
+  function candidateContentSignature(nodes) {
+    const source = (nodes || [])
+      .map((node) => normalizeText(node?.innerText || node?.textContent || ""))
+      .filter(Boolean)
+      .sort()
+      .join("\n---\n");
+    let hash = 2166136261;
+    for (let index = 0; index < source.length; index += 1) {
+      hash ^= source.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+    return `${(hash >>> 0).toString(16).padStart(8, "0")}:${source.length}:${nodes?.length || 0}`;
+  }
+
   async function waitForContentSettled(platform, waitMs) {
-    const totalWaitMs = Math.max(Number(waitMs || 0), 600);
+    const totalWaitMs = Math.max(Number(waitMs || 0), 5000);
     const settleStepMs = 250;
-    let lastHeight = getScrollSnapshot(platform).scrollHeight;
+    const tracker = globalThis.BossLocalCollectionContract?.createStabilityTracker?.(3);
+    let lastSnapshot = getScrollSnapshot(platform);
     let stableTicks = 0;
+    tracker?.observe(lastSnapshot);
     const startedAt = Date.now();
+    let settled = false;
 
     while (Date.now() - startedAt < totalWaitMs) {
       if (isScrollPauseRequested()) {
         break;
       }
       await delay(settleStepMs);
-      const nextHeight = getScrollSnapshot(platform).scrollHeight;
-      if (Math.abs(nextHeight - lastHeight) <= 4) {
+      const nextSnapshot = getScrollSnapshot(platform);
+      const contractSettled = tracker?.observe(nextSnapshot);
+      if (contractSettled) {
+        stableTicks = 3;
+      } else if (
+        !tracker &&
+        Math.abs(nextSnapshot.scrollHeight - lastSnapshot.scrollHeight) <= 4 &&
+        nextSnapshot.contentSignature === lastSnapshot.contentSignature
+      ) {
         stableTicks += 1;
       } else {
         stableTicks = 0;
-        lastHeight = nextHeight;
       }
-      if (stableTicks >= 2 && Date.now() - startedAt >= 500) {
+      lastSnapshot = nextSnapshot;
+      if (stableTicks >= 3 && Date.now() - startedAt >= 750) {
+        settled = true;
         break;
       }
     }
+    return settled || isScrollPauseRequested();
   }
 
   async function performScroll(platform, settings, onHoldTick) {

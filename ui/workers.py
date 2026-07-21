@@ -135,6 +135,7 @@ class ExportWorker(QObject):
                 recruitment_status=str(self.payload.get("recruitment_status") or ""),
                 latest_reason_code=str(self.payload.get("latest_reason_code") or ""),
                 filename_template=str(self.payload.get("filename_template") or ""),
+                screening_run_id=self.payload.get("screening_run_id"),
             )
             self.finished.emit(result)
         except Exception as exc:
