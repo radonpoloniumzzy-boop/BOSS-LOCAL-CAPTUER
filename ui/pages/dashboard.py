@@ -61,6 +61,7 @@ class DashboardPage(QWidget):
     start_capture_requested = Signal(object)
     stop_requested = Signal()
     export_requested = Signal(str)
+    open_export_folder_requested = Signal()
     funnel_refresh_requested = Signal()
 
     def __init__(self) -> None:
@@ -96,9 +97,11 @@ class DashboardPage(QWidget):
         self.export_csv_button = QPushButton("导出 CSV")
         self.export_jsonl_button = QPushButton("导出 JSONL")
         self.export_markdown_button = QPushButton("导出 Markdown")
+        self.open_export_folder_button = QPushButton("打开导出文件夹")
         export_layout.addWidget(self.export_csv_button)
         export_layout.addWidget(self.export_jsonl_button)
         export_layout.addWidget(self.export_markdown_button)
+        export_layout.addWidget(self.open_export_folder_button)
         export_layout.addStretch(1)
 
         stats_group = QGroupBox("运行状态")
@@ -248,6 +251,7 @@ class DashboardPage(QWidget):
         self.export_csv_button.clicked.connect(lambda: self.export_requested.emit("csv"))
         self.export_jsonl_button.clicked.connect(lambda: self.export_requested.emit("jsonl"))
         self.export_markdown_button.clicked.connect(lambda: self.export_requested.emit("markdown"))
+        self.open_export_folder_button.clicked.connect(self.open_export_folder_requested.emit)
         self.funnel_refresh_button.clicked.connect(self.funnel_refresh_requested.emit)
         self.funnel_role_combo.currentIndexChanged.connect(self.funnel_refresh_requested.emit)
         self.funnel_rating_combo.currentIndexChanged.connect(self.funnel_refresh_requested.emit)
