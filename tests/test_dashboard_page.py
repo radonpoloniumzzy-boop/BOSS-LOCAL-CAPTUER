@@ -6,6 +6,7 @@ import unittest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
+from PySide6.QtTest import QSignalSpy
 
 from ui.pages.dashboard import DashboardPage
 
@@ -38,6 +39,15 @@ class DashboardPageTest(unittest.TestCase):
         self.assertEqual(page.funnel_detail_table.columnCount(), 9)
         self.assertEqual(page.funnel_detail_table.horizontalHeaderItem(3).text(), "复核结论")
         self.assertEqual(page.funnel_detail_table.item(0, 3).text(), "人工复核通过")
+
+    def test_open_export_folder_button_requests_configured_folder(self) -> None:
+        page = DashboardPage()
+        self.addCleanup(page.deleteLater)
+        spy = QSignalSpy(page.open_export_folder_requested)
+
+        page.open_export_folder_button.click()
+
+        self.assertEqual(spy.count(), 1)
 
 
 if __name__ == "__main__":

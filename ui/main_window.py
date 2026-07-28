@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import threading
 from datetime import datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 
-from PySide6.QtCore import QObject, QSettings, Qt, QThread, Signal
-from PySide6.QtGui import QAction, QCloseEvent
+from PySide6.QtCore import QObject, QSettings, Qt, QThread, QUrl, Signal
+from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices
 from PySide6.QtWidgets import (
     QDockWidget,
     QHBoxLayout,
@@ -50,6 +51,10 @@ from ui.workers import (
     ExportWorker,
     ProfileRefreshWorker,
 )
+
+
+def open_local_folder(path: Path) -> bool:
+    return QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.resolve())))
 
 
 class _LogBridge(QObject):
@@ -372,6 +377,7 @@ class MainWindow(QMainWindow):
         self.dashboard_page.start_capture_requested.connect(self._start_capture_from_dashboard)
         self.dashboard_page.stop_requested.connect(self.handle_stop_capture)
         self.dashboard_page.export_requested.connect(self.handle_export_latest_batch)
+        self.dashboard_page.open_export_folder_requested.connect(self.handle_open_export_folder)
         self.dashboard_page.funnel_refresh_requested.connect(self.refresh_dashboard_stats)
 
         self.candidates_page.refresh_requested.connect(self.refresh_candidates)
@@ -488,6 +494,34 @@ class MainWindow(QMainWindow):
         if result == QMessageBox.Yes:
             self.stop_capture_requested.emit()
             self.statusBar().showMessage("已发送停止请求")
+
+    def handle_open_export_folder(self) -> None:
+        configured_path = str(self.config.default_export_dir or "").strip()
+        export_dir = (
+            Path(configured_path)
+            if configured_path
+            else self.config_service.default_export_dir
+        )
+        try:
+            export_dir.mkdir(parents=True, exist_ok=True)
+            opened = open_local_folder(export_dir)
+        except OSError as exc:
+            self.logger.exception("Failed to prepare export directory %s: %s", export_dir, exc)
+            QMessageBox.warning(
+                self,
+                "无法打开导出文件夹",
+                f"无法创建或访问导出目录：\n{export_dir}\n\n{exc}",
+            )
+            return
+        if not opened:
+            self.logger.warning("System file manager could not open export directory %s", export_dir)
+            QMessageBox.warning(
+                self,
+                "无法打开导出文件夹",
+                f"系统文件管理器无法打开导出目录：\n{export_dir}",
+            )
+            return
+        self.statusBar().showMessage(f"已打开导出文件夹：{export_dir}")
 
     def handle_export(self, export_format: str = "csv") -> None:
         if self.stack.currentWidget() is self.candidates_page:
