@@ -229,6 +229,7 @@ class CandidatesPage(QWidget):
         self.last_active_combo.currentIndexChanged.connect(self._request_first_page)
         self.job_title_combo.currentIndexChanged.connect(self._request_first_page)
         self.batch_combo.currentIndexChanged.connect(self._request_first_page)
+        self.batch_combo.currentIndexChanged.connect(self._update_export_label)
         self.match_role_combo.currentIndexChanged.connect(self._request_first_page)
         self.rating_combo.currentIndexChanged.connect(self._request_first_page)
         self.match_status_combo.currentIndexChanged.connect(self._request_first_page)
@@ -537,6 +538,14 @@ class CandidatesPage(QWidget):
         index = max(0, self.match_role_combo.findData(current_role))
         self.match_role_combo.setCurrentIndex(index)
         self.match_role_combo.blockSignals(False)
+        self._update_export_label()
+
+    def select_batch(self, batch_id: int) -> bool:
+        index = self.batch_combo.findData(int(batch_id))
+        if index < 0:
+            return False
+        self.batch_combo.setCurrentIndex(index)
+        return True
 
     def show_candidate_detail(self, detail: dict[str, object] | None) -> None:
         if not detail:
@@ -634,6 +643,13 @@ class CandidatesPage(QWidget):
         payload = self.current_filters()
         payload["export_format"] = export_format
         self.export_requested.emit(payload)
+
+    def _update_export_label(self, *_args: object) -> None:
+        batch_id = self.batch_combo.currentData()
+        if batch_id is None:
+            self.export_button.setText("导出当前筛选")
+        else:
+            self.export_button.setText(f"导出批次 #{int(batch_id)}")
 
     def _emit_selection(self) -> None:
         candidate_id = self.selected_candidate_id()

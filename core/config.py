@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from core.models import AIProviderConfig, AppConfig, AutomationFlowConfig
+from core.filename_templates import DEFAULT_EXPORT_TEMPLATE, LEGACY_EXPORT_TEMPLATE
 from core.utils import deep_merge, ensure_directory, get_app_root, json_dumps
 
 
@@ -133,6 +134,8 @@ class ConfigService:
             raw = json.loads(self.config_path.read_text(encoding="utf-8"))
             merged = deep_merge(defaults.to_dict(), raw)
             config = self._build_config(merged)
+            if config.export_filename_template == LEGACY_EXPORT_TEMPLATE:
+                config.export_filename_template = DEFAULT_EXPORT_TEMPLATE
             self.ensure_runtime_paths(config)
             legacy_secret = any(
                 isinstance(raw.get(section), dict) and "api_key" in raw[section]
@@ -142,6 +145,7 @@ class ConfigService:
                 not raw.get("local_api_token")
                 or config.csv_columns != raw.get("csv_columns")
                 or legacy_secret
+                or raw.get("export_filename_template") == LEGACY_EXPORT_TEMPLATE
             ):
                 self.save(config)
             return config
@@ -194,6 +198,55 @@ class ConfigService:
         automation_clean["profile_id"] = int(profile_id) if profile_id is not None else None
         automation_clean["max_candidates"] = int(
             automation_clean.get("max_candidates", defaults.automation_flow.max_candidates)
+        )
+        action = str(
+            automation_clean.get(
+                "post_screen_action",
+                defaults.automation_flow.post_screen_action,
+            )
+        )
+        automation_clean["post_screen_action"] = (
+            action if action in {"screen_only", "screen_and_favorite"} else "screen_only"
+        )
+        automation_clean["screening_concurrency"] = min(
+            8,
+            max(
+                1,
+                int(
+                    automation_clean.get(
+                        "screening_concurrency",
+                        defaults.automation_flow.screening_concurrency,
+                    )
+                ),
+            ),
+        )
+        automation_clean["favorite_interval_seconds"] = min(
+            8,
+            max(
+                3,
+                int(
+                    automation_clean.get(
+                        "favorite_interval_seconds",
+                        defaults.automation_flow.favorite_interval_seconds,
+                    )
+                ),
+            ),
+        )
+        automation_clean["favorite_max_candidates"] = min(
+            50,
+            max(
+                1,
+                int(
+                    automation_clean.get(
+                        "favorite_max_candidates",
+                        defaults.automation_flow.favorite_max_candidates,
+                    )
+                ),
+            ),
+        )
+        armed_snapshot = automation_clean.get("armed_launch_snapshot")
+        automation_clean["armed_launch_snapshot"] = (
+            armed_snapshot if isinstance(armed_snapshot, dict) else {}
         )
         clean["automation_flow"] = AutomationFlowConfig(**automation_clean)
         return AppConfig(**clean)

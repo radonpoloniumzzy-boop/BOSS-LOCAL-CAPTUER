@@ -14,7 +14,7 @@ class DatabaseBackupTest(unittest.TestCase):
             path = Path(tmp_dir) / "existing.db"
             connection = sqlite3.connect(path)
             connection.execute("CREATE TABLE schema_version(version INTEGER PRIMARY KEY)")
-            connection.execute("INSERT INTO schema_version(version) VALUES (12)")
+            connection.execute("INSERT INTO schema_version(version) VALUES (13)")
             connection.execute("CREATE TABLE sentinel(value TEXT)")
             connection.execute("INSERT INTO sentinel(value) VALUES ('keep-me')")
             connection.commit()

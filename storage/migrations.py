@@ -40,6 +40,12 @@ CREATE TABLE IF NOT EXISTS capture_batches (
     total_new INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL,
     note TEXT,
+    collection_run_id TEXT NOT NULL DEFAULT '',
+    content_fingerprint TEXT NOT NULL DEFAULT '',
+    source_document_id TEXT NOT NULL DEFAULT '',
+    source_frame_id INTEGER,
+    source_frame_url TEXT NOT NULL DEFAULT '',
+    collection_metadata_json TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -242,6 +248,76 @@ ON candidate_role_status_events(role_id, to_status, changed_at);
 
 def apply_migrations(connection) -> None:
     connection.executescript(V1_SCHEMA_SQL)
+    capture_batch_columns = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(capture_batches)").fetchall()
+    }
+    capture_batch_additions = {
+        "collection_run_id": "TEXT NOT NULL DEFAULT ''",
+        "content_fingerprint": "TEXT NOT NULL DEFAULT ''",
+        "source_document_id": "TEXT NOT NULL DEFAULT ''",
+        "source_frame_id": "INTEGER",
+        "source_frame_url": "TEXT NOT NULL DEFAULT ''",
+        "collection_metadata_json": "TEXT NOT NULL DEFAULT '{}'",
+    }
+    for column, declaration in capture_batch_additions.items():
+        if column not in capture_batch_columns:
+            connection.execute(
+                f"ALTER TABLE capture_batches ADD COLUMN {column} {declaration}"
+            )
+    connection.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_capture_batches_collection_run "
+        "ON capture_batches(collection_run_id) WHERE collection_run_id <> ''"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_capture_batches_content_fingerprint "
+        "ON capture_batches(content_fingerprint, id DESC)"
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS candidate_platform_identities (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            candidate_id INTEGER NOT NULL,
+            platform TEXT NOT NULL,
+            platform_uid TEXT NOT NULL DEFAULT '',
+            detail_url TEXT NOT NULL DEFAULT '',
+            raw_identity_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(candidate_id) REFERENCES candidates(id) ON DELETE CASCADE,
+            UNIQUE(platform, platform_uid)
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_candidate_platform_identity_uid "
+        "ON candidate_platform_identities(platform, platform_uid)"
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS candidate_platform_action_contexts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            candidate_id INTEGER NOT NULL,
+            capture_batch_id INTEGER NOT NULL,
+            platform TEXT NOT NULL,
+            platform_uid TEXT NOT NULL DEFAULT '',
+            friend_id TEXT NOT NULL DEFAULT '',
+            friend_source TEXT NOT NULL DEFAULT '',
+            security_id TEXT NOT NULL DEFAULT '',
+            lid TEXT NOT NULL DEFAULT '',
+            job_context_id TEXT NOT NULL DEFAULT '',
+            detail_url TEXT NOT NULL DEFAULT '',
+            raw_context_json TEXT NOT NULL DEFAULT '{}',
+            observed_at TEXT NOT NULL,
+            FOREIGN KEY(candidate_id) REFERENCES candidates(id) ON DELETE CASCADE,
+            FOREIGN KEY(capture_batch_id) REFERENCES capture_batches(id) ON DELETE CASCADE,
+            UNIQUE(candidate_id, platform, capture_batch_id)
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_candidate_platform_action_context "
+        "ON candidate_platform_action_contexts(candidate_id, platform, capture_batch_id, observed_at DESC)"
+    )
     screening_run_columns = {
         str(row[1]) for row in connection.execute("PRAGMA table_info(screening_runs)").fetchall()
     }
@@ -649,10 +725,18 @@ def apply_migrations(connection) -> None:
         "evidence_policy_json": "TEXT NOT NULL DEFAULT '{}'",
         "version": "INTEGER NOT NULL DEFAULT 1",
         "parent_profile_id": "INTEGER",
+        "favorite_eligible_ratings_json": "TEXT NOT NULL DEFAULT '[]'",
     }
     for column, declaration in structured_columns.items():
         if column not in profile_columns:
             connection.execute(f"ALTER TABLE screening_profiles ADD COLUMN {column} {declaration}")
+    run_columns = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(screening_runs)").fetchall()
+    }
+    if "automation_snapshot_json" not in run_columns:
+        connection.execute(
+            "ALTER TABLE screening_runs ADD COLUMN automation_snapshot_json TEXT NOT NULL DEFAULT '{}'"
+        )
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_candidates_job_updated ON candidates(job_title, updated_at DESC)"
     )
@@ -664,6 +748,114 @@ def apply_migrations(connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_role_matches_role_recruitment_rating_updated "
         "ON candidate_role_matches(role_id, recruitment_status, latest_rating, updated_at DESC)"
     )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS native_favorite_batches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            capture_batch_id INTEGER NOT NULL,
+            screening_run_id INTEGER NOT NULL,
+            role_id INTEGER NOT NULL,
+            platform TEXT NOT NULL DEFAULT 'boss',
+            status TEXT NOT NULL DEFAULT 'pending',
+            source_page_url TEXT NOT NULL,
+            source_page_context_json TEXT NOT NULL DEFAULT '{}',
+            config_snapshot_json TEXT NOT NULL DEFAULT '{}',
+            max_actions INTEGER NOT NULL DEFAULT 20,
+            total_tasks INTEGER NOT NULL DEFAULT 0,
+            completed_tasks INTEGER NOT NULL DEFAULT 0,
+            started_at TEXT,
+            completed_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(capture_batch_id) REFERENCES capture_batches(id) ON DELETE CASCADE,
+            FOREIGN KEY(screening_run_id) REFERENCES screening_runs(id) ON DELETE CASCADE,
+            FOREIGN KEY(role_id) REFERENCES screening_profiles(id) ON DELETE CASCADE,
+            UNIQUE(screening_run_id)
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_native_favorite_batches_status "
+        "ON native_favorite_batches(status, created_at)"
+    )
+    favorite_batch_columns = {
+        str(row[1])
+        for row in connection.execute("PRAGMA table_info(native_favorite_batches)").fetchall()
+    }
+    if "max_actions" not in favorite_batch_columns:
+        connection.execute(
+            "ALTER TABLE native_favorite_batches ADD COLUMN max_actions INTEGER NOT NULL DEFAULT 20"
+        )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS native_favorite_tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            batch_id INTEGER NOT NULL,
+            candidate_id INTEGER NOT NULL,
+            role_id INTEGER NOT NULL,
+            platform TEXT NOT NULL DEFAULT 'boss',
+            status TEXT NOT NULL DEFAULT 'pending',
+            identity_attribute TEXT NOT NULL DEFAULT '',
+            identity_value TEXT NOT NULL DEFAULT '',
+            identity_snapshot_json TEXT NOT NULL DEFAULT '{}',
+            write_policy TEXT NOT NULL DEFAULT 'establish_or_verify',
+            priority INTEGER NOT NULL DEFAULT 0,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            max_attempts INTEGER NOT NULL DEFAULT 2,
+            claim_token TEXT NOT NULL DEFAULT '',
+            locked_at TEXT,
+            locked_by TEXT NOT NULL DEFAULT '',
+            error_reason TEXT NOT NULL DEFAULT '',
+            started_at TEXT,
+            finished_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(batch_id) REFERENCES native_favorite_batches(id) ON DELETE CASCADE,
+            FOREIGN KEY(candidate_id) REFERENCES candidates(id) ON DELETE CASCADE,
+            FOREIGN KEY(role_id) REFERENCES screening_profiles(id) ON DELETE CASCADE,
+            UNIQUE(batch_id, candidate_id)
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_native_favorite_tasks_claim "
+        "ON native_favorite_tasks(batch_id, status, priority, id)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_native_favorite_tasks_identity "
+        "ON native_favorite_tasks(platform, identity_attribute, identity_value, status)"
+    )
+    favorite_task_columns = {
+        str(row[1])
+        for row in connection.execute("PRAGMA table_info(native_favorite_tasks)").fetchall()
+    }
+    if "source_action_attempted" not in favorite_task_columns:
+        connection.execute(
+            "ALTER TABLE native_favorite_tasks ADD COLUMN source_action_attempted INTEGER"
+        )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS native_favorite_attempts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id INTEGER NOT NULL,
+            attempt_number INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            attempted INTEGER,
+            method TEXT NOT NULL DEFAULT '',
+            reason TEXT NOT NULL DEFAULT '',
+            result_json TEXT NOT NULL DEFAULT '{}',
+            started_at TEXT,
+            finished_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(task_id) REFERENCES native_favorite_tasks(id) ON DELETE CASCADE,
+            UNIQUE(task_id, attempt_number)
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_native_favorite_attempts_task "
+        "ON native_favorite_attempts(task_id, attempt_number)"
+    )
     connection.execute("DELETE FROM schema_version")
-    connection.execute("INSERT INTO schema_version(version) VALUES (13)")
+    connection.execute("INSERT INTO schema_version(version) VALUES (17)")
     connection.commit()

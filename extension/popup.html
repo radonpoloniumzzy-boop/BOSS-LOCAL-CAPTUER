@@ -233,7 +233,19 @@
 
     <div id="status" class="status-box">就绪。</div>
 
+    <div id="favoriteSection" class="section">
+      <label for="favoriteBatchId">原生收藏批次 ID</label>
+      <input id="favoriteBatchId" type="number" min="1" step="1" placeholder="桌面端显示的收藏批次编号">
+      <div class="row" style="margin-top: 10px;">
+        <button id="startFavoriteBatch" type="button">执行单批次收藏</button>
+        <button id="stopFavoriteBatch" type="button">停止收藏</button>
+      </div>
+      <div class="hint">启动前请保留当前 BOSS 推荐牛人来源页，并另开一个标签页进入“互动 → 收藏牛人”。执行器只串行处理该批次，不刷新推荐页、不进入下一批。</div>
+      <div id="favoriteStatus" class="status-box">原生收藏：未启动。</div>
+    </div>
+
     <script src="pairing.js"></script>
-    <script src="popup.js"></script>
+  <script src="collection_contract.js"></script>
+  <script src="popup.js"></script>
   </body>
 </html>

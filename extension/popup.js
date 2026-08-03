@@ -13,6 +13,7 @@ const DEFAULTS = {
   batchActionDelaySeconds: 5,
   maxBatchSessions: 50,
   chatAutomationEnabled: false,
+  favoriteBatchId: "",
 };
 
 const OLD_DEFAULT_SCROLL_WAIT_MS = 1500;
@@ -53,6 +54,7 @@ const fields = {
   batchActionDelaySeconds: document.getElementById("batchActionDelaySeconds"),
   maxBatchSessions: document.getElementById("maxBatchSessions"),
   chatAutomationEnabled: document.getElementById("chatAutomationEnabled"),
+  favoriteBatchId: document.getElementById("favoriteBatchId"),
 };
 
 const statusEl = document.getElementById("status");
@@ -61,7 +63,27 @@ const batchLogEl = document.getElementById("batchLog");
 const automationAutoButton = document.getElementById("automationAuto");
 const pairingCodeInput = document.getElementById("pairingCode");
 const applyPairingCodeButton = document.getElementById("applyPairingCode");
+const startFavoriteBatchButton = document.getElementById("startFavoriteBatch");
+const stopFavoriteBatchButton = document.getElementById("stopFavoriteBatch");
+const reconcileFavoriteBatchButton = document.createElement("button");
+reconcileFavoriteBatchButton.id = "reconcileFavoriteBatch";
+reconcileFavoriteBatchButton.type = "button";
+reconcileFavoriteBatchButton.textContent = "恢复中断后剩余待处理项";
+reconcileFavoriteBatchButton.style.cssText = "margin-top:8px;width:100%";
+const verifyFavoriteBatchButton = document.createElement("button");
+verifyFavoriteBatchButton.id = "verifyFavoriteBatch";
+verifyFavoriteBatchButton.type = "button";
+verifyFavoriteBatchButton.textContent = "核验本批收藏";
+verifyFavoriteBatchButton.style.cssText = "margin-top:8px;width:100%";
+const favoriteStatusEl = document.getElementById("favoriteStatus");
+const favoriteSection = document.getElementById("favoriteSection");
+favoriteSection?.insertBefore(reconcileFavoriteBatchButton, favoriteStatusEl);
+favoriteSection?.insertBefore(verifyFavoriteBatchButton, reconcileFavoriteBatchButton);
 let batchStatusTimer = null;
+
+if (favoriteSection) {
+  automationAutoButton.insertAdjacentElement("afterend", favoriteSection);
+}
 
 automationAutoButton.addEventListener("click", () => runAutomation());
 applyPairingCodeButton.addEventListener("click", () => applyPairingCodeAndTest());
@@ -76,6 +98,10 @@ document.getElementById("requestAndDownload").addEventListener("click", () => ru
 document.getElementById("startBatchRequest").addEventListener("click", () => startBatch("request_resume"));
 document.getElementById("startBatchDownload").addEventListener("click", () => startBatch("download_only"));
 document.getElementById("stopBatch").addEventListener("click", () => stopBatch());
+startFavoriteBatchButton.addEventListener("click", () => startNativeFavoriteBatch());
+stopFavoriteBatchButton.addEventListener("click", () => stopNativeFavoriteBatch());
+reconcileFavoriteBatchButton.addEventListener("click", () => reconcileNativeFavoriteBatch());
+verifyFavoriteBatchButton.addEventListener("click", () => startNativeFavoriteVerification());
 
 window.addEventListener("beforeunload", () => {
   if (batchStatusTimer) {
@@ -119,9 +145,151 @@ async function init() {
     }
   }
   await refreshBatchStatus();
+  await refreshNativeFavoriteStatus();
   batchStatusTimer = window.setInterval(() => {
     void refreshBatchStatus();
+    void refreshNativeFavoriteStatus();
   }, 1000);
+}
+
+async function startNativeFavoriteBatch() {
+  const tab = await getActiveBossRecommendationTab();
+  if (!tab) return;
+  const settings = collectSettings();
+  const batchId = Number(settings.favoriteBatchId || 0);
+  if (!Number.isInteger(batchId) || batchId <= 0) {
+    setStatus("请填写桌面端生成的原生收藏批次 ID。");
+    return;
+  }
+  startFavoriteBatchButton.disabled = true;
+  await chrome.storage.local.set({ ...settings, favoriteSourceTabId: tab.id });
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: ["favorite_runner.js"],
+    });
+    setStatus("原生收藏批次已启动。请保持推荐来源页和“收藏牛人”专用页打开。\n关闭弹窗不会停止页面执行器。");
+    setStatus("Source favorite phase started. Keep only this recommendation page open; management verification happens later in the same Boss page after you navigate to Favorite Talent.");
+    const response = await chrome.tabs.sendMessage(tab.id, {
+      type: "boss_native_favorite_command",
+      command: "start",
+      settings: {
+        batchId,
+        apiBase: settings.apiBase,
+        apiToken: settings.apiToken,
+      },
+    });
+    if (!response?.ok) {
+      throw new Error(response?.error || "原生收藏执行器启动失败。");
+    }
+    await refreshNativeFavoriteStatus();
+  } catch (error) {
+    setStatus(`原生收藏启动失败。\n${error?.message || String(error)}`);
+  } finally {
+    startFavoriteBatchButton.disabled = false;
+  }
+}
+
+async function stopNativeFavoriteBatch() {
+  const stored = await chrome.storage.local.get({ favoriteSourceTabId: null });
+  const sourceTabId = Number(stored.favoriteSourceTabId || 0);
+  if (!sourceTabId) {
+    setStatus("没有记录正在执行原生收藏的来源标签页。");
+    return;
+  }
+  const response = await safeTabsSendMessage(sourceTabId, {
+    type: "boss_native_favorite_command",
+    command: "stop",
+  });
+  if (!response?.ok) {
+    setStatus(`停止请求未送达。\n${response?.error || "来源标签页可能已关闭。"}`);
+    return;
+  }
+  setStatus("已请求停止；当前候选人的动作会先得到明确结果，再停止领取下一人。");
+  await refreshNativeFavoriteStatus();
+}
+
+async function startNativeFavoriteVerification() {
+  const tab = await getActiveBossTab();
+  if (!tab) return;
+  const stored = await chrome.storage.local.get({ favoriteSourceTabId: null });
+  const sourceTabId = Number(stored.favoriteSourceTabId || 0);
+  if (!sourceTabId || sourceTabId !== Number(tab.id)) {
+    setStatus("Open Favorite Talent by navigating the same BOSS tab that ran the source favorite phase.");
+    return;
+  }
+  const settings = collectSettings();
+  const batchId = Number(settings.favoriteBatchId || 0);
+  if (!Number.isInteger(batchId) || batchId <= 0) {
+    setStatus("Enter the Native Favorite batch ID before management verification.");
+    return;
+  }
+  verifyFavoriteBatchButton.disabled = true;
+  await chrome.storage.local.set({ ...settings });
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: ["favorite_runner.js"],
+    });
+    const response = await chrome.tabs.sendMessage(tab.id, {
+      type: "boss_native_favorite_command",
+      command: "start_verification",
+      settings: { batchId, apiBase: settings.apiBase, apiToken: settings.apiToken },
+    });
+    if (!response?.ok) throw new Error(response?.error || "Management verification failed to start.");
+    setStatus("Management verification started in the current Boss Favorite Talent page. It is read-only and never repeats the favorite click.");
+    await refreshNativeFavoriteStatus();
+  } catch (error) {
+    setStatus(`Management verification failed.\n${error?.message || String(error)}`);
+  } finally {
+    verifyFavoriteBatchButton.disabled = false;
+  }
+}
+
+async function reconcileNativeFavoriteBatch() {
+  const stored = await chrome.storage.local.get({ favoriteSourceTabId: null });
+  const sourceTabId = Number(stored.favoriteSourceTabId || 0);
+  const settings = collectSettings();
+  const batchId = Number(settings.favoriteBatchId || 0);
+  if (!sourceTabId || !batchId) {
+    setStatus("Enter the Native Favorite batch ID and retain its source recommendation tab.");
+    return;
+  }
+  await chrome.scripting.executeScript({
+    target: { tabId: sourceTabId },
+    files: ["favorite_runner.js"],
+  });
+  const response = await chrome.tabs.sendMessage(sourceTabId, {
+    type: "boss_native_favorite_command",
+    command: "reconcile",
+    settings: { batchId, apiBase: settings.apiBase, apiToken: settings.apiToken },
+  });
+  if (!response?.ok) {
+    setStatus(`Native Favorite reconciliation failed.\n${response?.error || "Unknown error"}`);
+    return;
+  }
+  setStatus(response.status?.requiresManualResolution
+    ? response.status.message
+    : "Interruption checked. The same Source Page Context is still exact, so the batch can continue pending tasks. Unknown tasks are never retried automatically.");
+  await refreshNativeFavoriteStatus();
+}
+
+async function refreshNativeFavoriteStatus() {
+  if (!favoriteStatusEl) return;
+  const stored = await chrome.storage.local.get({ boss_native_favorite_status: null });
+  const status = stored.boss_native_favorite_status;
+  if (!status) {
+    favoriteStatusEl.textContent = "原生收藏：未启动。";
+    return;
+  }
+  favoriteStatusEl.textContent = [
+    `原生收藏批次：${status.batchId || "-"}`,
+    `状态：${status.phase || "idle"}`,
+    `已处理：${status.processed || 0}；成功/已收藏：${status.succeeded || 0}；失败/未知：${status.failed || 0}`,
+    status.currentTaskId ? `当前任务：#${status.currentTaskId}` : "",
+    `待管理页核验：${status.pendingVerification || 0}`,
+    status.message || "",
+  ].filter(Boolean).join("\n");
 }
 
 async function runAutomation() {
@@ -142,7 +310,12 @@ async function runAutomation() {
         `筛选方案: ${automation.profile_job_title || "-"}`,
         `采集岗位: ${fields.jobTitle.value || "-"}`,
         `AI 模型: ${automation.provider || "-"} / ${automation.model || "-"}`,
-      ].join("\n"),
+        `筛选后动作: ${automation.post_screen_action === "screen_and_favorite" ? "筛选并收藏" : "仅采集并筛选"}`,
+        `自动收藏评级: ${(automation.favorite_eligible_ratings || []).join("、") || "未配置"}`,
+        automation.post_screen_action === "screen_and_favorite"
+          ? `收藏节流/上限: ${automation.favorite_interval_seconds || "-"}秒 / ${automation.favorite_max_candidates || "-"}人`
+          : "",
+      ].filter(Boolean).join("\n"),
     );
     await runCollection(true, { automationRequested: true, automation });
   } catch (error) {
@@ -252,16 +425,51 @@ async function runCollection(autoScroll, options = {}) {
       : `正在采集当前已加载的${platform.label}候选人卡片...`,
   );
 
+  const collectionRunId = crypto.randomUUID();
+  let activeStage = "page_confirmation";
+  const onFrameConfirmed = async () => {
+    await reportAutomationProgress(settings, {
+      collection_run_id: collectionRunId,
+      stage: "page_confirmation",
+      stage_status: "completed",
+      message: "已确认当前可见的候选人内容 frame。",
+    });
+    activeStage = "scrolling";
+    await reportAutomationProgress(settings, {
+      collection_run_id: collectionRunId,
+      stage: "scrolling",
+      message: "正在滚动并累计当前批次候选人。",
+    });
+  };
   let frameResults;
   try {
-    frameResults = await collectFromAllFrames(tab.id, autoScroll, settings);
+    frameResults = await collectFromAllFrames(tab.id, autoScroll, settings, onFrameConfirmed);
   } catch (error) {
+    await reportAutomationProgress(settings, {
+      collection_run_id: collectionRunId,
+      stage: "failed",
+      failed_stage: activeStage,
+      message: error.message || String(error),
+    });
     setStatus(`读取页面 DOM 失败。\n${error.message || String(error)}`);
     return;
   }
 
+  activeStage = "settling";
+  await reportAutomationProgress(settings, {
+    collection_run_id: collectionRunId,
+    stage: "settling",
+    stage_status: "completed",
+    message: "滚动结束，候选卡数量与内容签名已稳定。",
+  });
   const merged = mergeFrameResults(frameResults);
   if (merged.cards.length === 0) {
+    await reportAutomationProgress(settings, {
+      collection_run_id: collectionRunId,
+      stage: "failed",
+      failed_stage: "settling",
+      message: "页面中没有识别到候选人卡片。",
+    });
     setStatus(
       [
         "采集失败。",
@@ -274,16 +482,34 @@ async function runCollection(autoScroll, options = {}) {
     return;
   }
 
+  activeStage = "importing";
+  await reportAutomationProgress(settings, {
+    collection_run_id: collectionRunId,
+    stage: "importing",
+    current: merged.cards.length,
+    total: merged.cards.length,
+    message: "候选卡内容已稳定，正在导入本地批次。",
+  });
+
   try {
     const imported = await importCards(
       settings,
       tab.url,
       merged,
       Boolean(options.automationRequested),
+      tab.id,
+      collectionRunId,
     );
+    const completionLabel = imported.duplicate_content
+      ? "本次内容与紧邻上一批相同，已跳过 AI 初筛。"
+      : imported.automation_allowed === false
+        ? "采集已导入，但数量校验未通过，未启动 AI 初筛。"
+        : options.automationRequested
+          ? "AUTO 采集完成，已提交 AI 初筛。"
+          : "采集完成。";
     setStatus(
       [
-        options.automationRequested ? "AUTO 采集完成，已提交 AI 初筛。" : "采集完成。",
+        completionLabel,
         `本地去重卡片: ${merged.cards.length}`,
         `来源平台: ${platform.label}`,
         `命中 frame: ${merged.framesWithCards}/${merged.framesSeen}`,
@@ -293,6 +519,12 @@ async function runCollection(autoScroll, options = {}) {
       ].join("\n"),
     );
   } catch (error) {
+    await reportAutomationProgress(settings, {
+      collection_run_id: collectionRunId,
+      stage: "failed",
+      failed_stage: activeStage,
+      message: error.message || String(error),
+    });
     setStatus(`导入本地程序失败。\n${error.message || String(error)}`);
   }
 }
@@ -486,14 +718,50 @@ async function resetScrollPause(tabId) {
   }
 }
 
-async function collectFromAllFrames(tabId, autoScroll, settings) {
+async function collectFromAllFrames(tabId, autoScroll, settings, onFrameConfirmed) {
+  const expectedVersion = "collection-freshness-v2";
   await chrome.scripting.executeScript({
     target: { tabId, allFrames: true },
-    files: ["collector.js"],
+    args: [expectedVersion],
+    func: (version) => {
+      if (globalThis.__bossLocalCollectorVersion === version) return;
+      delete globalThis.__bossLocalExtract;
+      delete globalThis.__bossLocalCollectorTest;
+      delete globalThis.__bossLocalProbe;
+      delete globalThis.__bossLocalCollectorVersion;
+    },
+  });
+  await chrome.scripting.executeScript({
+    target: { tabId, allFrames: true },
+    files: ["collection_contract.js"],
+  });
+  await chrome.scripting.executeScript({
+    target: { tabId, allFrames: true },
+    files: ["identity_contract.js", "favorite_adapter.js", "favorite_management_verifier.js", "collector.js"],
   });
 
-  return chrome.scripting.executeScript({
+  const probes = await chrome.scripting.executeScript({
     target: { tabId, allFrames: true },
+    func: () => globalThis.__bossLocalProbe?.() || {
+      frameUrl: location.href,
+      cardCount: 0,
+      visible: document.visibilityState !== "hidden",
+    },
+  });
+  const selected = globalThis.BossLocalCollectionContract?.selectAuthoritativeFrame(probes);
+  if (!selected?.ok) {
+    throw new Error(
+      selected?.reason === "ambiguous_candidate_frames"
+        ? "检测到多个可见候选人页面，无法确定当前批次。请关闭重复页面后重试。"
+        : "未找到当前可见的候选人推荐页面。",
+    );
+  }
+  if (typeof onFrameConfirmed === "function") {
+    await onFrameConfirmed(selected);
+  }
+
+  const extractionResults = await chrome.scripting.executeScript({
+    target: { tabId, frameIds: [selected.frameId] },
     args: [autoScroll, settings],
     func: async (autoScrollArg, settingsArg) => {
       if (typeof globalThis.__bossLocalExtract !== "function") {
@@ -512,6 +780,51 @@ async function collectFromAllFrames(tabId, autoScroll, settings) {
       }
     },
   });
+  const failedExtraction = extractionResults.find((item) => item?.result?.ok === false);
+  if (failedExtraction) {
+    throw new Error(failedExtraction.result.debug || "候选人采集失败。");
+  }
+  return extractionResults;
+}
+
+async function verifyFavoriteManagementAcrossFrames(tabId, platformIdentity, favoriteActionAttempted) {
+  const request = {
+    platform: "boss",
+    platform_identity: platformIdentity,
+    favorite_action_attempted: favoriteActionAttempted,
+    inspection_id: crypto.randomUUID(),
+    tab_id: tabId,
+  };
+  await chrome.scripting.executeScript({
+    target: { tabId, allFrames: true },
+    files: ["identity_contract.js", "favorite_management_verifier.js"],
+  });
+  const inspections = await chrome.scripting.executeScript({
+    target: { tabId, allFrames: true },
+    args: [request],
+    func: async (verificationRequest) =>
+      globalThis.__bossFavoriteManagementVerifier?.inspectFrame?.(verificationRequest) || null,
+  });
+  const executionEnvelope = {
+    inspection_id: request.inspection_id,
+    tab_id: tabId,
+    executions: inspections.map((inspection) => ({
+      frame_id: inspection.frameId,
+      document_id: inspection.documentId,
+      observation: inspection.result,
+    })),
+  };
+  const [classification] = await chrome.scripting.executeScript({
+    target: { tabId },
+    args: [request, executionEnvelope],
+    func: async (verificationRequest, envelope) =>
+      globalThis.__bossFavoriteManagementVerifier?.classify?.(verificationRequest, envelope) || null,
+  });
+  return classification?.result || {
+    status: "failed",
+    attempted: favoriteActionAttempted === true,
+    reason: "favorite_management_classifier_unavailable",
+  };
 }
 
 function mergeFrameResults(frameResults) {
@@ -521,6 +834,7 @@ function mergeFrameResults(frameResults) {
   let framesSeen = 0;
   let framesWithCards = 0;
   let maxRoundsCompleted = 0;
+  const sourceCandidateDocuments = [];
 
   for (const frameResult of frameResults || []) {
     const result = frameResult?.result;
@@ -531,6 +845,11 @@ function mergeFrameResults(frameResults) {
     const cards = Array.isArray(result.cards) ? result.cards : [];
     if (cards.length > 0) {
       framesWithCards += 1;
+      sourceCandidateDocuments.push({
+        frame_id: Number(frameResult.frameId),
+        document_id: String(frameResult.documentId || ""),
+        frame_url: String(result.frameUrl || ""),
+      });
     }
     if (result.meta?.platform) {
       platforms.add(String(result.meta.platform));
@@ -552,11 +871,22 @@ function mergeFrameResults(frameResults) {
     framesWithCards,
     roundsCompleted: maxRoundsCompleted,
     platform: platforms.size === 1 ? Array.from(platforms)[0] : "",
+    sourceDocumentId: String(sourceCandidateDocuments[0]?.document_id || ""),
+    sourceFrameId: Number(sourceCandidateDocuments[0]?.frame_id ?? -1),
+    sourceFrameUrl: String(sourceCandidateDocuments[0]?.frame_url || ""),
+    sourceCandidateDocuments,
     debugSummary: debugLines.join(" || "),
   };
 }
 
-async function importCards(settings, sourceUrl, merged, automationRequested = false) {
+async function importCards(
+  settings,
+  sourceUrl,
+  merged,
+  automationRequested = false,
+  sourceTabId = null,
+  collectionRunId = "",
+) {
   const apiBase = normalizeLocalApiBase(settings.apiBase);
   let response;
   try {
@@ -577,6 +907,12 @@ async function importCards(settings, sourceUrl, merged, automationRequested = fa
           rounds_completed: merged.roundsCompleted,
           unique_cards: merged.cards.length,
           automation_requested: automationRequested,
+          collection_run_id: collectionRunId,
+          source_tab_id: sourceTabId,
+          source_document_id: merged.sourceDocumentId || "",
+          source_frame_id: merged.sourceFrameId,
+          source_frame_url: merged.sourceFrameUrl || "",
+          source_candidate_documents: merged.sourceCandidateDocuments || [],
           debug: merged.debugSummary,
         },
       }),
@@ -589,6 +925,22 @@ async function importCards(settings, sourceUrl, merged, automationRequested = fa
     throw new Error(result.error || `本地接口返回状态码 ${response.status}`);
   }
   return result.result || {};
+}
+
+async function reportAutomationProgress(settings, payload) {
+  const apiBase = normalizeLocalApiBase(settings.apiBase);
+  try {
+    await fetch(`${apiBase}/api/automation/progress`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Boss-Local-Token": settings.apiToken || "",
+      },
+      body: JSON.stringify(payload || {}),
+    });
+  } catch (_error) {
+    // Progress is advisory. Import remains the authoritative completion boundary.
+  }
 }
 
 async function getActiveSupportedTab() {
@@ -625,6 +977,30 @@ function detectCollectPlatform(value) {
     return null;
   }
   return COLLECT_PLATFORMS.find((platform) => platform.matches(url)) || null;
+}
+
+async function getActiveBossRecommendationTab() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id) {
+    setStatus("未找到当前活动标签页。");
+    return null;
+  }
+  try {
+    const url = new URL(String(tab.url || ""));
+    const allowedPaths = new Set([
+      "/web/chat/recommend",
+      "/web/frame/recommend",
+      "/web/geek/recommend",
+    ]);
+    if (!isBossUrl(tab.url) || !allowedPaths.has(url.pathname.replace(/\/$/, ""))) {
+      setStatus("请先切回本批次原始的 BOSS 推荐牛人标签页。");
+      return null;
+    }
+  } catch (_error) {
+    setStatus("当前标签页地址无效。");
+    return null;
+  }
+  return tab;
 }
 
 function applyPlatformDefaults(settings, platform) {
@@ -666,6 +1042,7 @@ function collectSettings() {
     batchActionDelayMs: Math.max(Number(fields.batchActionDelaySeconds.value || DEFAULTS.batchActionDelaySeconds), 1) * 1000,
     maxBatchSessions: Math.min(Math.max(Number(fields.maxBatchSessions.value || DEFAULTS.maxBatchSessions), 1), 50),
     chatAutomationEnabled: Boolean(fields.chatAutomationEnabled?.checked),
+    favoriteBatchId: fields.favoriteBatchId?.value.trim() || "",
   };
 }
 
@@ -821,7 +1198,13 @@ function translateBatchPhase(value) {
 }
 
 function buildKey(card) {
-  return card.platform_uid || card.detail_url || card.raw_card_text || JSON.stringify(card);
+  return (
+    card.action_platform_uid ||
+    card.platform_uid ||
+    card.detail_url ||
+    card.raw_card_text ||
+    JSON.stringify(card)
+  );
 }
 
 function trimTrailingSlash(value) {

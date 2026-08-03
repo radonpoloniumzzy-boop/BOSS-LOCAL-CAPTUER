@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import threading
+from copy import deepcopy
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -34,6 +36,7 @@ from core.credentials import CredentialStore
 from core.local_api import LocalApiServer
 from core.logger import LoggingService
 from core.models import AutomationFlowConfig, ScreeningProfile
+from core.platform import is_boss_recommendation_url
 from storage.db import DatabaseManager
 from storage.export_service import ExportService
 from storage.repository import CandidateRepository
@@ -64,6 +67,7 @@ class _LogBridge(QObject):
 class _ImportBridge(QObject):
     imported = Signal(object)
     error = Signal(str)
+    progress = Signal(object)
 
 
 class MainWindow(QMainWindow):
@@ -123,9 +127,16 @@ class MainWindow(QMainWindow):
         self._latest_page_request: dict[str, int] = {}
         self._ai_screening_thread: tuple[QThread, AIScreeningWorker] | None = None
         self._ai_screening_origin = "manual"
+        self._active_automation_trace: dict[str, object] = {}
         self._ai_test_running = False
         self._ai_test_context: dict[str, object] = {}
-        self._automation_armed = False
+        persisted_launch_snapshot = self.config.automation_flow.armed_launch_snapshot
+        self._automation_armed = bool(
+            self.config.automation_flow.enabled and persisted_launch_snapshot
+        )
+        self._armed_automation_snapshot: dict[str, object] | None = (
+            deepcopy(persisted_launch_snapshot) if self._automation_armed else None
+        )
         self._queued_automation_batches: list[dict[str, object]] = []
         self._automation_config_lock = threading.RLock()
         self._capture_running = False
@@ -397,6 +408,9 @@ class MainWindow(QMainWindow):
         self.ai_page.test_connection_requested.connect(self._test_ai_connection)
         self.ai_page.cancel_connection_test_requested.connect(self._cancel_ai_connection_test)
         self.ai_page.delete_credential_requested.connect(self._delete_ai_credential)
+        self.ai_page.credential_context_changed.connect(
+            lambda payload: self._refresh_credential_status("ai", payload)
+        )
         self.ai_page.run_selected.connect(self._load_screening_results)
         self.ai_page.resume_run_requested.connect(self._resume_ai_screening_run)
         self.ai_page.retry_task_requested.connect(self._retry_ai_screening_task)
@@ -409,16 +423,21 @@ class MainWindow(QMainWindow):
             lambda payload: self._test_ai_connection(payload, target="automation")
         )
         self.automation_flow_page.run_selected.connect(self._load_automation_results)
+        self.automation_flow_page.credential_context_changed.connect(
+            lambda payload: self._refresh_credential_status("automation", payload)
+        )
 
         self.settings_page.save_requested.connect(self._save_settings)
         self.import_bridge.imported.connect(self._on_extension_imported)
         self.import_bridge.error.connect(self._on_extension_import_error)
+        self.import_bridge.progress.connect(self._on_automation_progress)
 
     def _load_config_into_pages(self) -> None:
         self.dashboard_page.load_config(self.config)
         self.settings_page.load_config(self.config)
         self.ai_page.load_config(self.config)
         self.automation_flow_page.load_config(self.config)
+        self._refresh_all_credential_statuses()
 
     def _start_local_api_server(self) -> None:
         if self.local_api_server is not None:
@@ -431,9 +450,17 @@ class MainWindow(QMainWindow):
             logger=self.logging_service.get_logger("local_api"),
             on_import=self.import_bridge.imported.emit,
             on_error=self.import_bridge.error.emit,
+            on_automation_progress=self.import_bridge.progress.emit,
             get_automation_status=self._automation_status_payload,
             start_automation=self._start_automation_from_extension,
             get_extension_config=self._extension_config_payload,
+            claim_favorite_task=self._claim_native_favorite_task_from_extension,
+            report_favorite_result=self._report_native_favorite_result_from_extension,
+            retry_favorite_task=self._retry_native_favorite_task_from_extension,
+            reconcile_favorite_batch=self._reconcile_native_favorite_batch_from_extension,
+            claim_favorite_verification=self._claim_native_favorite_verification_from_extension,
+            report_favorite_verification=self._report_native_favorite_verification_from_extension,
+            get_favorite_batch_status=self._get_native_favorite_batch_status_from_extension,
             auth_token=self.config.local_api_token,
         )
         try:
@@ -452,6 +479,92 @@ class MainWindow(QMainWindow):
             "resume_filename_template": self.config.resume_filename_template,
             "job_title": self.config.default_job_title,
         }
+
+    def _claim_native_favorite_task_from_extension(
+        self,
+        payload: dict[str, object],
+    ) -> dict[str, object] | None:
+        batch_id = int(payload.get("batch_id") or 0)
+        if batch_id <= 0:
+            raise ValueError("Native Favorite batch_id is required")
+        return self.repository.claim_next_native_favorite_task(
+            batch_id,
+            worker_id=str(payload.get("worker_id") or "favorite-extension"),
+        )
+
+    def _report_native_favorite_result_from_extension(
+        self,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        task_id = int(payload.get("task_id") or 0)
+        if task_id <= 0:
+            raise ValueError("Native Favorite task_id is required")
+        result = payload.get("result")
+        return self.repository.complete_native_favorite_task(
+            task_id,
+            claim_token=str(payload.get("claim_token") or ""),
+            status=str(payload.get("status") or ""),
+            attempted=payload.get("attempted"),
+            reason=str(payload.get("reason") or ""),
+            method=str(payload.get("method") or ""),
+            result=dict(result) if isinstance(result, dict) else {},
+        )
+
+    def _retry_native_favorite_task_from_extension(
+        self,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        task_id = int(payload.get("task_id") or 0)
+        if task_id <= 0:
+            raise ValueError("Native Favorite task_id is required")
+        return self.repository.retry_native_favorite_task(task_id)
+
+    def _reconcile_native_favorite_batch_from_extension(
+        self,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        batch_id = int(payload.get("batch_id") or 0)
+        if batch_id <= 0:
+            raise ValueError("Native Favorite batch_id is required")
+        return self.repository.reconcile_native_favorite_batch(batch_id)
+
+    def _claim_native_favorite_verification_from_extension(
+        self,
+        payload: dict[str, object],
+    ) -> dict[str, object] | None:
+        batch_id = int(payload.get("batch_id") or 0)
+        if batch_id <= 0:
+            raise ValueError("Native Favorite batch_id is required")
+        return self.repository.claim_next_native_favorite_verification(
+            batch_id,
+            worker_id=str(payload.get("worker_id") or "favorite-management"),
+        )
+
+    def _report_native_favorite_verification_from_extension(
+        self,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        task_id = int(payload.get("task_id") or 0)
+        if task_id <= 0:
+            raise ValueError("Native Favorite task_id is required")
+        result = payload.get("result")
+        return self.repository.complete_native_favorite_verification(
+            task_id,
+            claim_token=str(payload.get("claim_token") or ""),
+            status=str(payload.get("status") or ""),
+            reason=str(payload.get("reason") or ""),
+            method=str(payload.get("method") or "management_identity_verification"),
+            result=dict(result) if isinstance(result, dict) else {},
+        )
+
+    def _get_native_favorite_batch_status_from_extension(
+        self,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        batch_id = int(payload.get("batch_id") or 0)
+        if batch_id <= 0:
+            raise ValueError("Native Favorite batch_id is required")
+        return self.repository.get_native_favorite_batch_status(batch_id)
 
     def handle_open_browser(self) -> None:
         url = self.dashboard_page.source_url_input.text().strip() or self.config.target_url
@@ -524,11 +637,26 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"已打开导出文件夹：{export_dir}")
 
     def handle_export(self, export_format: str = "csv") -> None:
-        if self.stack.currentWidget() is self.candidates_page:
+        current_page_index = int(self.navigation.currentRow())
+        if current_page_index == 2:
             payload = self.candidates_page.current_filters()
             payload["export_format"] = export_format
             self._export_candidates_view(payload)
             return
+        if current_page_index == 3:
+            run_id = self.ai_page.run_combo.currentData()
+            run = self.repository.get_screening_run(int(run_id)) if run_id is not None else None
+            if run is not None and run["batch_id"] is not None:
+                self._start_export(
+                    {
+                        "mode": "batch",
+                        "batch_id": int(run["batch_id"]),
+                        "job_title": str(run["source_job_title"] or ""),
+                        "screening_run_id": int(run["id"]),
+                        "export_format": export_format,
+                    }
+                )
+                return
         self.handle_export_latest_batch(export_format)
 
     def handle_export_latest_batch(self, export_format: str = "csv") -> None:
@@ -588,6 +716,7 @@ class MainWindow(QMainWindow):
             "match_status": payload.get("match_status", ""),
             "recruitment_status": payload.get("recruitment_status", ""),
             "latest_reason_code": payload.get("latest_reason_code", ""),
+            "screening_run_id": payload.get("screening_run_id"),
             "export_dir": self.config.default_export_dir,
             "columns": list(self.config.csv_columns),
             "filename_template": self.config.export_filename_template,
@@ -605,12 +734,14 @@ class MainWindow(QMainWindow):
         thread.start()
         self.statusBar().showMessage(f"正在导出 {str(export_payload['export_format']).upper()}...")
 
-    def refresh_candidates(self) -> None:
+    def refresh_candidates(self, selected_batch_id: int | None = None) -> None:
         self.candidates_page.set_filter_options(
             self.repository.list_job_titles(),
             [dict(batch) for batch in self.repository.list_batches()],
             [dict(profile) for profile in self.repository.list_screening_profiles()],
         )
+        if selected_batch_id is not None:
+            self.candidates_page.select_batch(selected_batch_id)
         self._candidate_request_id += 1
         request_id = self._candidate_request_id
         self._page_request_kind[request_id] = "candidates"
@@ -809,8 +940,63 @@ class MainWindow(QMainWindow):
         else:
             self.automation_flow_page.show_results([])
 
+    @staticmethod
+    def _build_automation_launch_snapshot(
+        flow: AutomationFlowConfig,
+        profile: dict[str, object],
+    ) -> dict[str, object]:
+        return {
+            "profile": deepcopy(profile),
+            "flow": {
+                "profile_id": flow.profile_id,
+                "job_title": flow.job_title,
+                "source_url": flow.source_url,
+                "max_candidates": flow.max_candidates,
+                "provider": flow.provider,
+                "model": flow.model,
+                "api_base": flow.api_base,
+                "api_key_env": flow.api_key_env,
+                "post_screen_action": flow.post_screen_action,
+                "screening_concurrency": flow.screening_concurrency,
+                "favorite_interval_seconds": flow.favorite_interval_seconds,
+                "favorite_max_candidates": flow.favorite_max_candidates,
+            },
+        }
+
     def _automation_status_payload(self) -> dict[str, object]:
         with self._automation_config_lock:
+            if self._automation_armed and self._armed_automation_snapshot:
+                armed_flow = dict(self._armed_automation_snapshot.get("flow") or {})
+                armed_profile = dict(self._armed_automation_snapshot.get("profile") or {})
+                return {
+                    "ready": True,
+                    "enabled": True,
+                    "profile_id": armed_flow.get("profile_id"),
+                    "profile_version": armed_profile.get("version"),
+                    "profile_job_title": str(armed_profile.get("job_title") or ""),
+                    "job_title": str(
+                        armed_flow.get("job_title") or armed_profile.get("job_title") or ""
+                    ),
+                    "source_url": str(armed_flow.get("source_url") or ""),
+                    "provider": str(armed_flow.get("provider") or ""),
+                    "model": str(armed_flow.get("model") or ""),
+                    "max_candidates": int(armed_flow.get("max_candidates") or 0),
+                    "post_screen_action": str(
+                        armed_flow.get("post_screen_action") or "screen_only"
+                    ),
+                    "screening_concurrency": int(
+                        armed_flow.get("screening_concurrency") or 4
+                    ),
+                    "favorite_eligible_ratings": list(
+                        armed_profile.get("favorite_eligible_ratings") or []
+                    ),
+                    "favorite_interval_seconds": int(
+                        armed_flow.get("favorite_interval_seconds") or 0
+                    ),
+                    "favorite_max_candidates": int(
+                        armed_flow.get("favorite_max_candidates") or 0
+                    ),
+                }
             config = self.config_service.load()
             flow = config.automation_flow
             profile = (
@@ -819,6 +1005,9 @@ class MainWindow(QMainWindow):
                 else None
             )
             ready = profile is not None and bool(flow.model and flow.provider)
+            favorite_ratings = list(profile.get("favorite_eligible_ratings") or []) if profile else []
+            if flow.post_screen_action == "screen_and_favorite" and not favorite_ratings:
+                ready = False
             return {
                 "ready": ready,
                 "enabled": bool(flow.enabled),
@@ -829,6 +1018,11 @@ class MainWindow(QMainWindow):
                 "provider": flow.provider,
                 "model": flow.model,
                 "max_candidates": flow.max_candidates,
+                "post_screen_action": flow.post_screen_action,
+                "screening_concurrency": flow.screening_concurrency,
+                "favorite_eligible_ratings": favorite_ratings,
+                "favorite_interval_seconds": flow.favorite_interval_seconds,
+                "favorite_max_candidates": flow.favorite_max_candidates,
             }
 
     def _start_automation_from_extension(self, _payload: dict[str, object]) -> dict[str, object]:
@@ -842,13 +1036,21 @@ class MainWindow(QMainWindow):
                 raise ValueError("自动化筛选方案不存在，请在桌面端重新选择并保存。")
             if not flow.provider or not flow.model:
                 raise ValueError("自动化流程缺少 AI 服务商或模型配置。")
+            if (
+                flow.post_screen_action == "screen_and_favorite"
+                and not list(profile.get("favorite_eligible_ratings") or [])
+            ):
+                raise ValueError("当前岗位未配置自动收藏评级，不能启动“筛选并收藏”。")
             flow.enabled = True
             if not flow.job_title:
                 flow.job_title = str(profile["job_title"])
+            launch_snapshot = self._build_automation_launch_snapshot(flow, dict(profile))
+            flow.armed_launch_snapshot = deepcopy(launch_snapshot)
             config.automation_flow = flow
             self.config_service.save(config)
             self.config = config
             self._automation_armed = True
+            self._armed_automation_snapshot = launch_snapshot
             result = self._automation_status_payload()
             result["message"] = "自动化流程已启动，等待插件完成滚动采集。"
             self.logger.info(
@@ -873,9 +1075,26 @@ class MainWindow(QMainWindow):
         if not source_url:
             self.automation_flow_page.set_status("请填写采集页面。")
             return False
+        post_screen_action = str(payload.get("post_screen_action") or "screen_only")
+        if post_screen_action not in {"screen_only", "screen_and_favorite"}:
+            self.automation_flow_page.set_status("筛选后动作无效。")
+            return False
+        profile = self.repository.get_screening_profile(int(profile_id))
+        if (
+            post_screen_action == "screen_and_favorite"
+            and not list(profile.get("favorite_eligible_ratings") or [])
+        ):
+            self.automation_flow_page.set_status(
+                "当前岗位未配置自动收藏评级，不能保存“筛选并收藏”。"
+            )
+            return False
+        if post_screen_action == "screen_and_favorite" and not is_boss_recommendation_url(source_url):
+            self.automation_flow_page.set_status("筛选并收藏目前只支持 BOSS 推荐牛人页面。")
+            return False
 
+        enabled = bool(payload.get("enabled"))
         self.config.automation_flow = AutomationFlowConfig(
-            enabled=bool(payload.get("enabled")),
+            enabled=enabled,
             profile_id=int(profile_id),
             job_title=str(payload.get("job_title") or "").strip(),
             source_url=source_url,
@@ -884,7 +1103,26 @@ class MainWindow(QMainWindow):
             model=model,
             api_base=str(provider.get("api_base") or "").strip(),
             api_key_env=str(provider.get("api_key_env") or "").strip(),
+            post_screen_action=post_screen_action,
+            screening_concurrency=min(
+                8,
+                max(1, int(payload.get("screening_concurrency") or 4)),
+            ),
+            favorite_interval_seconds=min(
+                8,
+                max(3, int(payload.get("favorite_interval_seconds") or 5)),
+            ),
+            favorite_max_candidates=min(
+                50,
+                max(1, int(payload.get("favorite_max_candidates") or 20)),
+            ),
+            armed_launch_snapshot=deepcopy(
+                self.config.automation_flow.armed_launch_snapshot if enabled else {}
+            ),
         )
+        if not enabled:
+            self._automation_armed = False
+            self._armed_automation_snapshot = None
         self.config_service.save(self.config)
         self.automation_flow_page.set_status(
             "设置已保存，等待下一次采集。"
@@ -899,17 +1137,26 @@ class MainWindow(QMainWindow):
         payload["enabled"] = True
         if not self._save_automation_flow(payload):
             return
-        self._automation_armed = True
-        self.automation_flow_page.set_waiting(True)
         flow = self.config.automation_flow
+        self._automation_armed = True
+        profile = self.repository.get_screening_profile(int(flow.profile_id))
+        self._armed_automation_snapshot = self._build_automation_launch_snapshot(
+            flow,
+            dict(profile),
+        )
+        flow.armed_launch_snapshot = deepcopy(self._armed_automation_snapshot)
+        self.config_service.save(self.config)
+        self.automation_flow_page.set_waiting(True)
         self.dashboard_page.job_title_input.setText(flow.job_title)
         self.dashboard_page.source_url_input.setText(flow.source_url)
         self.statusBar().showMessage("自动化流程已启用，请在 Chrome 扩展中点击 AUTO")
 
     def _cancel_automation_flow(self) -> None:
         self._automation_armed = False
+        self._armed_automation_snapshot = None
         self._queued_automation_batches.clear()
         self.config.automation_flow.enabled = False
+        self.config.automation_flow.armed_launch_snapshot = {}
         self.config_service.save(self.config)
         self.automation_flow_page.enabled_checkbox.setChecked(False)
         self.automation_flow_page.set_waiting(False)
@@ -997,6 +1244,7 @@ class MainWindow(QMainWindow):
                 exclusions=list(payload.get("exclusions") or []),
                 interview_checks=list(payload.get("interview_checks") or []),
                 evidence_policy=evidence_policy,
+                favorite_eligible_ratings=list(payload.get("favorite_eligible_ratings") or []),
             )
             prompt_text = str(payload.get("prompt_text") or "")
             prompt_source = str(payload.get("prompt_source") or "generated")
@@ -1119,6 +1367,19 @@ class MainWindow(QMainWindow):
             "api_key": str(page_provider.get("api_key") or ""),
             "api_key_env": str(page_provider.get("api_key_env") or "OPENAI_API_KEY"),
         }
+        run_origin = str(run["origin"] or "manual")
+        if run_origin not in {"manual", "automation"}:
+            run_origin = "manual"
+        try:
+            automation_snapshot = json.loads(str(run["automation_snapshot_json"] or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            automation_snapshot = {}
+        if not isinstance(automation_snapshot, dict):
+            automation_snapshot = {}
+        screening_concurrency = min(
+            8,
+            max(1, int(automation_snapshot.get("screening_concurrency") or 1)),
+        )
         worker_payload = {
             "run_id": run_id,
             "profile": dict(profile),
@@ -1126,9 +1387,11 @@ class MainWindow(QMainWindow):
             "source_job_title": str(run["source_job_title"] or ""),
             "batch_id": run["batch_id"],
             "candidates": candidates,
-            "origin": "manual",
+            "origin": run_origin,
+            "screening_concurrency": screening_concurrency,
+            "automation_snapshot": automation_snapshot,
         }
-        self._launch_ai_screening(worker_payload, origin="manual")
+        self._launch_ai_screening(worker_payload, origin=run_origin)
 
     def _retry_ai_screening_task(self, task_id: int) -> None:
         if self._ai_screening_thread is not None:
@@ -1218,9 +1481,26 @@ class MainWindow(QMainWindow):
         return payload
 
     def _queue_automation_screening(self, capture_result: dict[str, object]) -> None:
-        with self._automation_config_lock:
-            self.config = self.config_service.load()
-        if not self.config.automation_flow.enabled:
+        if not self._automation_armed or self._armed_automation_snapshot is None:
+            return
+        if capture_result.get("automation_allowed") is False:
+            if bool(capture_result.get("duplicate_content")):
+                batch_id = capture_result.get("duplicate_of_batch_id") or capture_result.get("batch_id")
+                self.automation_flow_page.set_status(
+                    f"本次采集与上一批 #{batch_id} 内容完全相同，尚未启动 AI 初筛。"
+                    "请等待推荐页面更新后重新点击扩展 AUTO。"
+                )
+            elif capture_result.get("validation_error") == "import_count_mismatch":
+                self.automation_flow_page.set_status(
+                    "采集批次数量校验失败，AI 初筛未启动："
+                    f"上传 {int(capture_result.get('received_cards') or 0)}，"
+                    f"解析 {int(capture_result.get('parsed_cards') or 0)}，"
+                    f"入库 {int(capture_result.get('total_batch_items') or 0)}。"
+                )
+            else:
+                self.automation_flow_page.set_status(
+                    "该采集任务已经导入，重复请求未启动 AI 初筛。"
+                )
             return
         batch_id = capture_result.get("batch_id")
         total_items = int(
@@ -1232,11 +1512,22 @@ class MainWindow(QMainWindow):
         if batch_id is None or total_items <= 0:
             self.automation_flow_page.set_status("采集结束，但本批次没有可用于初筛的候选人。")
             return
+        launch_snapshot = deepcopy(self._armed_automation_snapshot)
+        flow_snapshot = dict(launch_snapshot.get("flow") or {})
         payload = {
             "batch_id": int(batch_id),
-            "job_title": str(capture_result.get("job_title") or self.config.automation_flow.job_title),
-            "source_url": str(capture_result.get("source_url") or self.config.automation_flow.source_url),
+            "job_title": str(capture_result.get("job_title") or flow_snapshot.get("job_title") or ""),
+            "source_url": str(capture_result.get("source_url") or flow_snapshot.get("source_url") or ""),
+            "source_page_context": dict(capture_result.get("source_page_context") or {}),
+            "collection_run_id": str(capture_result.get("collection_run_id") or ""),
+            "content_fingerprint": str(capture_result.get("content_fingerprint") or ""),
+            "expected_total_items": total_items,
+            "launch_snapshot": launch_snapshot,
         }
+        self._automation_armed = False
+        self._armed_automation_snapshot = None
+        self.config.automation_flow.armed_launch_snapshot = {}
+        self.config_service.save(self.config)
         if self._ai_screening_thread is not None:
             queued_ids = {int(item["batch_id"]) for item in self._queued_automation_batches}
             if int(payload["batch_id"]) not in queued_ids:
@@ -1248,17 +1539,44 @@ class MainWindow(QMainWindow):
         self._start_automation_screening(payload)
 
     def _start_automation_screening(self, capture_result: dict[str, object]) -> None:
-        flow = self.config.automation_flow
-        if not flow.enabled or flow.profile_id is None:
+        launch_snapshot = capture_result.get("launch_snapshot")
+        if not isinstance(launch_snapshot, dict):
             return
-        profile_row = self.repository.get_screening_profile(int(flow.profile_id))
-        if profile_row is None:
-            self.automation_flow_page.set_status("自动化筛选方案已不存在，请重新选择并保存。")
+        flow_snapshot = launch_snapshot.get("flow")
+        profile_row = launch_snapshot.get("profile")
+        if not isinstance(flow_snapshot, dict) or not isinstance(profile_row, dict):
+            self.automation_flow_page.set_status("自动化配置快照无效，未启动本批次筛选。")
             return
         batch_id = int(capture_result["batch_id"])
-        candidates = self.repository.list_screening_candidates(
+        expected_total_items = int(capture_result.get("expected_total_items") or 0)
+        if expected_total_items:
+            actual_total_items = self.repository.count_batch_items(batch_id)
+            if actual_total_items != expected_total_items:
+                self.automation_flow_page.set_status(
+                    f"批次 #{batch_id} 导入校验失败：扩展报告 {expected_total_items} 人，"
+                    f"数据库实际可筛选 {actual_total_items} 人。AI 初筛尚未启动。"
+                )
+                return
+        post_screen_action = str(flow_snapshot.get("post_screen_action") or "screen_only")
+        screening_limit = (
+            0
+            if post_screen_action == "screen_and_favorite"
+            else int(flow_snapshot.get("max_candidates") or 0)
+        )
+        all_candidates = self.repository.list_screening_candidates(
             batch_id=batch_id,
-            limit=flow.max_candidates,
+            limit=0,
+        )
+        if expected_total_items and len(all_candidates) != expected_total_items:
+            self.automation_flow_page.set_status(
+                f"批次 #{batch_id} 可筛选候选人校验失败：应有 {expected_total_items} 人，"
+                f"实际可筛选 {len(all_candidates)} 人。AI 初筛尚未启动。"
+            )
+            return
+        candidates = (
+            all_candidates
+            if screening_limit == 0
+            else all_candidates[:screening_limit]
         )
         if not candidates:
             self.automation_flow_page.set_status(f"批次 #{batch_id} 没有可用于初筛的候选人。")
@@ -1266,30 +1584,74 @@ class MainWindow(QMainWindow):
         page_provider = self.automation_flow_page.provider_payload()
         api_key = str(page_provider.get("api_key") or "")
         ai_page_provider = self.ai_page.provider_payload()
-        if not api_key and str(ai_page_provider.get("provider") or "") == flow.provider:
+        if not api_key and str(ai_page_provider.get("provider") or "") == str(flow_snapshot.get("provider") or ""):
             api_key = str(ai_page_provider.get("api_key") or "")
         provider = {
-            "provider": flow.provider,
-            "model": flow.model,
-            "api_base": flow.api_base,
+            "provider": str(flow_snapshot.get("provider") or ""),
+            "model": str(flow_snapshot.get("model") or ""),
+            "api_base": str(flow_snapshot.get("api_base") or ""),
             "api_key": api_key,
-            "api_key_env": flow.api_key_env,
+            "api_key_env": str(flow_snapshot.get("api_key_env") or ""),
         }
         worker_payload = {
             "profile": dict(profile_row),
             "provider": provider,
-            "source_job_title": str(capture_result.get("job_title") or flow.job_title),
+            "source_job_title": str(capture_result.get("job_title") or flow_snapshot.get("job_title") or ""),
             "batch_id": batch_id,
-            "limit": flow.max_candidates,
+            "limit": screening_limit,
             "candidates": candidates,
             "origin": "automation",
+            "screening_concurrency": min(
+                8,
+                max(1, int(flow_snapshot.get("screening_concurrency") or 4)),
+            ),
+            "automation_snapshot": {
+                "post_screen_action": post_screen_action,
+                "job_title": str(capture_result.get("job_title") or flow_snapshot.get("job_title") or ""),
+                "profile_id": int(profile_row["id"]),
+                "profile_version": int(profile_row.get("version") or 1),
+                "screening_concurrency": min(
+                    8,
+                    max(1, int(flow_snapshot.get("screening_concurrency") or 4)),
+                ),
+                "screening_profile_snapshot": deepcopy(profile_row),
+                "favorite_eligible_ratings": list(
+                    profile_row.get("favorite_eligible_ratings") or []
+                ),
+                "favorite_interval_seconds": int(flow_snapshot.get("favorite_interval_seconds") or 0),
+                "favorite_max_candidates": int(flow_snapshot.get("favorite_max_candidates") or 0),
+                "source_page_context": {
+                    **dict(capture_result.get("source_page_context") or {}),
+                    "capture_batch_id": batch_id,
+                    "source_url": str(
+                        capture_result.get("source_url") or flow_snapshot.get("source_url") or ""
+                    ),
+                },
+            },
         }
-        self._automation_armed = False
+        self._active_automation_trace = {
+            "stage": "screening",
+            "collection_run_id": str(capture_result.get("collection_run_id") or ""),
+            "batch_id": batch_id,
+            "current": 0,
+            "total": len(candidates),
+            "message": "AI 初筛正在读取已校验的采集批次。",
+        }
+        self.automation_flow_page.update_pipeline_status(self._active_automation_trace)
         self._launch_ai_screening(worker_payload, origin="automation")
 
     def _on_ai_screening_progress(self, progress, origin: str) -> None:
         if origin == "automation":
             self.automation_flow_page.update_progress(progress)
+            self._active_automation_trace.update(
+                {
+                    "stage": "screening",
+                    "current": int(progress.current),
+                    "total": int(progress.total),
+                    "message": str(progress.message or "AI 初筛进行中"),
+                }
+            )
+            self.automation_flow_page.update_pipeline_status(self._active_automation_trace)
         else:
             self.ai_page.update_progress(progress)
 
@@ -1306,8 +1668,23 @@ class MainWindow(QMainWindow):
         run_id = int(result["run_id"])
         if self._ai_screening_origin == "automation":
             self.automation_flow_page.set_running(False)
-            self.automation_flow_page.set_status(str(result.get("message") or "自动化 AI 初筛完成。"))
+            status_message = str(result.get("message") or "自动化 AI 初筛完成。")
+            if result.get("favorite_publish_error"):
+                status_message += f" 收藏队列未生成：{result['favorite_publish_error']}"
+            elif result.get("favorite_batch_id"):
+                status_message += f" 收藏批次 #{result['favorite_batch_id']} 已生成，等待扩展执行。"
+            self.automation_flow_page.set_status(status_message)
             self.refresh_automation_flow(selected_run_id=run_id)
+            self._active_automation_trace.update(
+                {
+                    "stage": "completed",
+                    "screening_run_id": run_id,
+                    "current": int(result.get("completed") or 0),
+                    "total": int(result.get("completed") or 0) + int(result.get("failed") or 0),
+                    "message": str(result.get("message") or "采集与 AI 初筛已完成。"),
+                }
+            )
+            self.automation_flow_page.update_pipeline_status(self._active_automation_trace)
         else:
             self.ai_page.set_running(False)
             self.ai_page.set_status(str(result.get("message") or "AI 初筛完成。"))
@@ -1319,6 +1696,8 @@ class MainWindow(QMainWindow):
     def _on_ai_screening_failed(self, message: str) -> None:
         if self._ai_screening_origin == "automation":
             self.automation_flow_page.set_running(False)
+            self._active_automation_trace.update({"stage": "failed", "message": message})
+            self.automation_flow_page.update_pipeline_status(self._active_automation_trace)
             self.automation_flow_page.set_status(f"自动化 AI 初筛失败：{message}")
         else:
             self.ai_page.set_running(False)
@@ -1357,13 +1736,24 @@ class MainWindow(QMainWindow):
         self._ai_test_running = False
         target = str(self._ai_test_context.get("target") or "ai")
         status_page = self.automation_flow_page if target == "automation" else self.ai_page
-        status_page.set_status(f"API 连接成功：{getattr(result, 'persona', '')}")
-        self.statusBar().showMessage("AI API 连接成功")
         typed_key = str(self._ai_test_context.get("typed_key") or "")
         if typed_key:
             self._save_test_credential(
                 dict(self._ai_test_context.get("provider_payload") or {}), typed_key
             )
+        self._refresh_all_credential_statuses()
+        saved = self._credential_exists(
+            dict(self._ai_test_context.get("provider_payload") or {})
+        )
+        key_message = (
+            "Key 已安全保存到 Windows 凭据管理器。"
+            if saved
+            else "本次使用输入框或环境变量中的 Key。"
+        )
+        status_page.set_status(
+            f"API 连接成功：{getattr(result, 'persona', '')} {key_message}"
+        )
+        self.statusBar().showMessage("AI API 连接成功")
 
     def _on_ai_connection_test_error(self, message: str) -> None:
         self._ai_test_running = False
@@ -1385,6 +1775,7 @@ class MainWindow(QMainWindow):
             )
             message = "已删除保存的 API Key。" if deleted else "没有找到已保存的 API Key。"
             self.ai_page.set_status(message)
+            self._refresh_all_credential_statuses()
         except Exception as exc:
             self.ai_page.set_status(f"删除 API Key 失败：{exc}")
 
@@ -1397,6 +1788,30 @@ class MainWindow(QMainWindow):
             )
         except Exception as exc:
             self.logger.warning("Could not save API credential: %s", exc)
+
+    def _credential_exists(self, payload: dict[str, object]) -> bool | None:
+        try:
+            return bool(
+                self.credential_store.read(
+                    str(payload.get("provider") or "openai"),
+                    str(payload.get("api_base") or ""),
+                )
+            )
+        except Exception as exc:
+            self.logger.warning("Could not read API credential status: %s", exc)
+            return None
+
+    def _refresh_credential_status(
+        self, target: str, payload: dict[str, object]
+    ) -> None:
+        page = self.automation_flow_page if target == "automation" else self.ai_page
+        page.set_credential_status(self._credential_exists(dict(payload or {})))
+
+    def _refresh_all_credential_statuses(self) -> None:
+        self._refresh_credential_status("ai", self.ai_page.provider_payload())
+        self._refresh_credential_status(
+            "automation", self.automation_flow_page.provider_payload()
+        )
 
     def _load_screening_results(self, run_id: int) -> None:
         self._candidate_request_id += 1
@@ -1444,14 +1859,41 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "需要手动处理", result.message or "请完成登录或验证后再继续。")
 
     def _on_extension_imported(self, result: dict[str, object]) -> None:
-        self.refresh_candidates()
+        selected_batch_id = int(result["batch_id"]) if result.get("batch_id") is not None else None
+        self.refresh_candidates(selected_batch_id=selected_batch_id)
+        self.refresh_ai_screen()
+        if selected_batch_id is not None:
+            self.ai_page.select_source_batch(selected_batch_id)
+        if bool(result.get("duplicate_content")):
+            pipeline_stage = "duplicate"
+        elif (
+            bool(result.get("automation_requested"))
+            and result.get("automation_allowed") is not False
+        ):
+            pipeline_stage = "screening"
+        else:
+            pipeline_stage = "capture_completed"
+        self.automation_flow_page.update_pipeline_status(
+            {
+                "stage": pipeline_stage,
+                "collection_run_id": str(result.get("collection_run_id") or ""),
+                "batch_id": selected_batch_id,
+                "current": int(result.get("parsed_cards") or 0),
+                "total": int(result.get("total_batch_items") or 0),
+                "message": str(result.get("message") or "采集批次已导入。"),
+            }
+        )
         self.refresh_dashboard_stats()
         self.dashboard_page.update_result(SimpleNamespace(**result))
         self.dashboard_page.set_message(
             f"扩展已导入 {result.get('parsed_cards', 0)} 张卡片，当前批次 #{result.get('batch_id')}。"
         )
         self.statusBar().showMessage(f"扩展导入完成：批次 #{result.get('batch_id')}")
-        self._queue_automation_screening(result)
+        if bool(result.get("automation_requested")):
+            self._queue_automation_screening(result)
+
+    def _on_automation_progress(self, payload: dict[str, object]) -> None:
+        self.automation_flow_page.update_pipeline_status(dict(payload or {}))
 
     def _on_extension_import_error(self, message: str) -> None:
         self.dashboard_page.set_message(message)

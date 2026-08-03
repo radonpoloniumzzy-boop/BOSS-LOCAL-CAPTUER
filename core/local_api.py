@@ -18,7 +18,15 @@ class LocalApiServer:
         on_error: Callable[[str], None] | None = None,
         get_automation_status: Callable[[], dict[str, object]] | None = None,
         start_automation: Callable[[dict[str, object]], dict[str, object]] | None = None,
+        on_automation_progress: Callable[[dict[str, object]], None] | None = None,
         get_extension_config: Callable[[], dict[str, object]] | None = None,
+        claim_favorite_task: Callable[[dict[str, object]], dict[str, object] | None] | None = None,
+        report_favorite_result: Callable[[dict[str, object]], dict[str, object]] | None = None,
+        retry_favorite_task: Callable[[dict[str, object]], dict[str, object]] | None = None,
+        reconcile_favorite_batch: Callable[[dict[str, object]], dict[str, object]] | None = None,
+        claim_favorite_verification: Callable[[dict[str, object]], dict[str, object] | None] | None = None,
+        report_favorite_verification: Callable[[dict[str, object]], dict[str, object]] | None = None,
+        get_favorite_batch_status: Callable[[dict[str, object]], dict[str, object]] | None = None,
         auth_token: str = "",
         max_body_bytes: int = 25_000_000,
     ) -> None:
@@ -30,7 +38,15 @@ class LocalApiServer:
         self.on_error = on_error
         self.get_automation_status = get_automation_status
         self.start_automation = start_automation
+        self.on_automation_progress = on_automation_progress
         self.get_extension_config = get_extension_config
+        self.claim_favorite_task = claim_favorite_task
+        self.report_favorite_result = report_favorite_result
+        self.retry_favorite_task = retry_favorite_task
+        self.reconcile_favorite_batch = reconcile_favorite_batch
+        self.claim_favorite_verification = claim_favorite_verification
+        self.report_favorite_verification = report_favorite_verification
+        self.get_favorite_batch_status = get_favorite_batch_status
         self.auth_token = str(auth_token or "")
         self.max_body_bytes = max_body_bytes
         self._server: ThreadingHTTPServer | None = None
@@ -97,7 +113,18 @@ class LocalApiServer:
                 self._send_json(404, {"error": "Not found"})
 
             def do_POST(self) -> None:
-                if self.path not in {"/api/import/cards", "/api/automation/start"}:
+                if self.path not in {
+                    "/api/import/cards",
+                    "/api/automation/start",
+                    "/api/automation/progress",
+                    "/api/favorites/claim",
+                    "/api/favorites/result",
+                    "/api/favorites/retry",
+                    "/api/favorites/reconcile",
+                    "/api/favorites/verification/claim",
+                    "/api/favorites/verification/result",
+                    "/api/favorites/status",
+                }:
                     self._send_json(404, {"error": "Not found"})
                     return
                 if not self._is_authorized():
@@ -110,12 +137,66 @@ class LocalApiServer:
                         return
                     body = self.rfile.read(content_length).decode("utf-8")
                     payload = json.loads(body or "{}")
+                    if self.path == "/api/favorites/claim":
+                        if parent.claim_favorite_task is None:
+                            self._send_json(503, {"ok": False, "error": "Native Favorite is unavailable"})
+                            return
+                        result = parent.claim_favorite_task(payload)
+                        self._send_json(200, {"ok": True, "result": result})
+                        return
+                    if self.path == "/api/favorites/result":
+                        if parent.report_favorite_result is None:
+                            self._send_json(503, {"ok": False, "error": "Native Favorite is unavailable"})
+                            return
+                        result = parent.report_favorite_result(payload)
+                        self._send_json(200, {"ok": True, "result": result})
+                        return
+                    if self.path == "/api/favorites/retry":
+                        if parent.retry_favorite_task is None:
+                            self._send_json(503, {"ok": False, "error": "Native Favorite is unavailable"})
+                            return
+                        result = parent.retry_favorite_task(payload)
+                        self._send_json(200, {"ok": True, "result": result})
+                        return
+                    if self.path == "/api/favorites/reconcile":
+                        if parent.reconcile_favorite_batch is None:
+                            self._send_json(503, {"ok": False, "error": "Native Favorite is unavailable"})
+                            return
+                        result = parent.reconcile_favorite_batch(payload)
+                        self._send_json(200, {"ok": True, "result": result})
+                        return
+                    if self.path == "/api/favorites/verification/claim":
+                        if parent.claim_favorite_verification is None:
+                            self._send_json(503, {"ok": False, "error": "Native Favorite verification is unavailable"})
+                            return
+                        result = parent.claim_favorite_verification(payload)
+                        self._send_json(200, {"ok": True, "result": result})
+                        return
+                    if self.path == "/api/favorites/verification/result":
+                        if parent.report_favorite_verification is None:
+                            self._send_json(503, {"ok": False, "error": "Native Favorite verification is unavailable"})
+                            return
+                        result = parent.report_favorite_verification(payload)
+                        self._send_json(200, {"ok": True, "result": result})
+                        return
+                    if self.path == "/api/favorites/status":
+                        if parent.get_favorite_batch_status is None:
+                            self._send_json(503, {"ok": False, "error": "Native Favorite status is unavailable"})
+                            return
+                        result = parent.get_favorite_batch_status(payload)
+                        self._send_json(200, {"ok": True, "result": result})
+                        return
                     if self.path == "/api/automation/start":
                         if parent.start_automation is None:
                             self._send_json(503, {"ok": False, "error": "Automation is unavailable"})
                             return
                         result = parent.start_automation(payload)
                         self._send_json(200, {"ok": True, "result": result})
+                        return
+                    if self.path == "/api/automation/progress":
+                        if parent.on_automation_progress is not None:
+                            parent.on_automation_progress(payload)
+                        self._send_json(200, {"ok": True})
                         return
                     result = parent.import_service.import_cards(payload)
                     if parent.on_import:

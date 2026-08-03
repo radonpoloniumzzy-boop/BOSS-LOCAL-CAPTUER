@@ -5,8 +5,11 @@ __pycache__/
 build/
 dist/
 logs/*.log
+logs/*.log.*
 data/*.db
 data/*.db.bak-*
+data/*.db.bak
+data/*.ini
 data/config.json
 data/browser_profile/
 data/exports/

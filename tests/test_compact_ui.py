@@ -48,6 +48,20 @@ class CompactCandidatesPageTest(unittest.TestCase):
 
         self.assertEqual(exports, ["csv", "jsonl", "markdown"])
 
+    def test_new_capture_batch_can_be_selected_explicitly_after_import(self) -> None:
+        page = CandidatesPage()
+        page.set_filter_options(
+            ["Role A"],
+            [
+                {"id": 12, "job_title": "Role A", "status": "completed"},
+                {"id": 11, "job_title": "Role A", "status": "completed"},
+            ],
+        )
+
+        self.assertTrue(page.select_batch(12))
+        self.assertEqual(page.current_filters()["batch_id"], 12)
+        self.assertEqual(page.export_button.text(), "导出批次 #12")
+
     def test_narrow_page_opens_candidate_detail_on_demand(self) -> None:
         page = CandidatesPage()
         page.resize(780, 600)

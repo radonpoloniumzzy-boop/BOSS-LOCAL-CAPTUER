@@ -60,7 +60,7 @@ class MigrationTest(unittest.TestCase):
             self.assertIn("next_attempt_at", task_columns)
             self.assertIn("failure_category", task_columns)
             self.assertIn("idx_screening_tasks_claim", indexes)
-            self.assertEqual(version, 13)
+            self.assertEqual(version, 17)
             connection.close()
 
     def test_existing_screening_runs_table_gets_origin_column(self) -> None:
@@ -144,7 +144,7 @@ class MigrationTest(unittest.TestCase):
             self.assertIn("industry_tags_json", profile_columns)
             self.assertIn("skill_tags_json", profile_columns)
             self.assertIn("profile_completeness", profile_columns)
-            self.assertEqual(version, 13)
+            self.assertEqual(version, 17)
             connection.close()
 
     def test_existing_screening_results_are_backfilled_as_tasks(self) -> None:
@@ -311,7 +311,72 @@ class MigrationTest(unittest.TestCase):
             self.assertEqual(tuple(event_row), (1, 1, "", "screened", "migration_backfill"))
             self.assertEqual(tuple(profile_row), (1, "Legacy Candidate", "Sales", "", ""))
             self.assertEqual(tuple(result_row), ("", "[]", "[]", "[]", ""))
-            self.assertEqual(version, 13)
+            self.assertEqual(version, 17)
+            connection.close()
+
+    def test_native_favorite_tables_are_added_without_changing_existing_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            connection = sqlite3.connect(str(Path(tmp_dir) / "favorite_migration.db"))
+
+            apply_migrations(connection)
+
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+            task_columns = {
+                row[1]
+                for row in connection.execute(
+                    "PRAGMA table_info(native_favorite_tasks)"
+                ).fetchall()
+            }
+            profile_columns = {
+                row[1]
+                for row in connection.execute(
+                    "PRAGMA table_info(screening_profiles)"
+                ).fetchall()
+            }
+            run_columns = {
+                row[1]
+                for row in connection.execute(
+                    "PRAGMA table_info(screening_runs)"
+                ).fetchall()
+            }
+            favorite_batch_columns = {
+                row[1]
+                for row in connection.execute(
+                    "PRAGMA table_info(native_favorite_batches)"
+                ).fetchall()
+            }
+            capture_batch_columns = {
+                row[1]
+                for row in connection.execute(
+                    "PRAGMA table_info(capture_batches)"
+                ).fetchall()
+            }
+            self.assertIn("native_favorite_batches", tables)
+            self.assertIn("native_favorite_tasks", tables)
+            self.assertIn("native_favorite_attempts", tables)
+            self.assertIn("claim_token", task_columns)
+            self.assertIn("identity_attribute", task_columns)
+            self.assertIn("identity_value", task_columns)
+            self.assertIn("write_policy", task_columns)
+            self.assertIn("source_action_attempted", task_columns)
+            self.assertIn("favorite_eligible_ratings_json", profile_columns)
+            self.assertIn("automation_snapshot_json", run_columns)
+            self.assertIn("max_actions", favorite_batch_columns)
+            self.assertIn("collection_run_id", capture_batch_columns)
+            self.assertIn("content_fingerprint", capture_batch_columns)
+            self.assertIn("source_document_id", capture_batch_columns)
+            self.assertIn("source_frame_id", capture_batch_columns)
+            self.assertIn("source_frame_url", capture_batch_columns)
+            self.assertIn("collection_metadata_json", capture_batch_columns)
+            self.assertEqual(
+                connection.execute("SELECT version FROM schema_version").fetchone()[0],
+                17,
+            )
             connection.close()
 
 

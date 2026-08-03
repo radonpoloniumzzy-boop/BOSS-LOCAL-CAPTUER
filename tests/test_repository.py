@@ -57,6 +57,19 @@ class CandidateRepositoryTest(unittest.TestCase):
         assert detail is not None
         self.assertEqual(len(detail["appearances"]), 2)
 
+    def test_latest_batch_uses_id_as_tie_breaker_for_same_start_time(self) -> None:
+        first = self.repository.create_batch("Role A", "https://example.com/a")
+        second = self.repository.create_batch("Role B", "https://example.com/b")
+        with self.db.get_connection() as connection:
+            connection.execute(
+                "UPDATE capture_batches SET start_time = ? WHERE id IN (?, ?)",
+                ("2026-07-21T10:00:00", int(first.id), int(second.id)),
+            )
+
+        latest = self.repository.get_latest_batch()
+
+        self.assertEqual(int(latest["id"]), int(second.id))
+
     def test_screening_profile_is_upserted_by_job_title(self) -> None:
         first = self.repository.save_screening_profile(
             ScreeningProfile(job_title="招聘实习生", jd_text="本科", prompt_text="第一版")
@@ -321,7 +334,7 @@ class CandidateRepositoryTest(unittest.TestCase):
         self.assertEqual(automation_runs[0]["id"], automation_run_id)
         self.assertEqual(automation_runs[0]["origin"], "automation")
         version = self.db.get_connection().execute("SELECT version FROM schema_version").fetchone()
-        self.assertEqual(version["version"], 13)
+        self.assertEqual(version["version"], 17)
 
     def test_interrupted_screening_tasks_are_recovered(self) -> None:
         batch = self.repository.create_batch("Sales", "https://example.com")

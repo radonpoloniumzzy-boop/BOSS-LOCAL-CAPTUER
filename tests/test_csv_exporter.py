@@ -228,6 +228,103 @@ class ExportServiceTest(unittest.TestCase):
         self.assertIn("### 原始卡片文本", content)
         self.assertIn("张三 原始文本", content)
 
+    def test_batch_export_filename_identifies_raw_capture_batch_job_and_time(self) -> None:
+        batch = self._insert_sample_candidate()
+        result = self.export_service.export(
+            export_format="csv",
+            mode="batch",
+            export_dir=Path(self.temp_dir.name) / "exports",
+            columns=["name"],
+            batch_id=batch.id,
+            job_title="Securities Trader",
+        )
+
+        self.assertRegex(
+            Path(result.file_path).name,
+            rf"^采集批次{batch.id}_Securities Trader_原始采集_\d{{8}}-\d{{6}}\.csv$",
+        )
+
+    def test_screened_batch_export_filename_identifies_screening_run(self) -> None:
+        batch = self._insert_sample_candidate()
+        profile = self.repository.save_screening_profile(
+            ScreeningProfile(
+                job_title="Securities Trader",
+                jd_text="Trading execution",
+                prompt_text="Rate candidates",
+            )
+        )
+        run_id = self.repository.create_screening_run(
+            profile_id=int(profile.id),
+            source_job_title="Securities Trader",
+            batch_id=batch.id,
+            provider="fake",
+            model="fake-model",
+            total_candidates=1,
+        )
+        self.repository.finalize_screening_run(run_id, "completed", 1, 0)
+
+        result = self.export_service.export(
+            export_format="csv",
+            mode="batch",
+            export_dir=Path(self.temp_dir.name) / "exports",
+            columns=["name"],
+            batch_id=batch.id,
+            job_title="Securities Trader",
+            screening_run_id=run_id,
+        )
+
+        self.assertRegex(
+            Path(result.file_path).name,
+            rf"^采集批次{batch.id}_Securities Trader_初筛任务{run_id}_\d{{8}}-\d{{6}}\.csv$",
+        )
+
+    def test_exact_screening_run_export_does_not_use_a_later_rating(self) -> None:
+        batch = self._insert_sample_candidate()
+        candidate = dict(self.repository.list_candidates()[0])
+        profile = self.repository.save_screening_profile(
+            ScreeningProfile(job_title="Trader", jd_text="Trading", prompt_text="Rate")
+        )
+        first_run = self.repository.create_screening_run(
+            profile_id=int(profile.id), source_job_title="Trader", batch_id=batch.id,
+            provider="fake", model="m1", total_candidates=1,
+        )
+        self.repository.save_screening_result(
+            ScreeningResult(
+                run_id=first_run, candidate_id=int(candidate["id"]), rating="SR",
+                persona="first run", confidence="high",
+            )
+        )
+        self.repository.finalize_screening_run(first_run, "completed", 1, 0)
+        second_run = self.repository.create_screening_run(
+            profile_id=int(profile.id), source_job_title="Trader", batch_id=batch.id,
+            provider="fake", model="m2", total_candidates=1,
+        )
+        second_result = self.repository.save_screening_result(
+            ScreeningResult(
+                run_id=second_run, candidate_id=int(candidate["id"]), rating="N",
+                persona="later run", confidence="medium",
+            )
+        )
+        self.repository.finalize_screening_run(second_run, "completed", 1, 0)
+        self.repository.upsert_candidate_role_match(
+            candidate_id=int(candidate["id"]), role_id=int(profile.id),
+            latest_rating="N", latest_confidence="medium", match_status="ai_screened",
+            screening_result_id=second_result,
+        )
+
+        result = self.export_service.export(
+            export_format="csv", mode="batch",
+            export_dir=Path(self.temp_dir.name) / "exports",
+            columns=["name", "latest_rating", "persona"],
+            batch_id=batch.id, job_title="Trader", screening_run_id=first_run,
+        )
+
+        with Path(result.file_path).open("r", encoding="utf-8-sig", newline="") as handle:
+            rows = list(csv.DictReader(handle))
+        self.assertEqual(rows[0]["latest_rating"], "SR")
+        self.assertEqual(rows[0]["persona"], "first run")
+        self.assertIn(f"初筛任务{first_run}", Path(result.file_path).name)
+
     def _insert_sample_candidate(self):
         batch = self.repository.create_batch("校招 C++ 工程师", "https://example.com")
         candidate = CandidateRecord(

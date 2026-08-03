@@ -1,4 +1,14 @@
-if (typeof globalThis.__bossLocalExtract !== "function") {
+const BOSS_LOCAL_COLLECTOR_VERSION = "collection-freshness-v2";
+if (
+  typeof globalThis.__bossLocalExtract !== "function" ||
+  globalThis.__bossLocalCollectorVersion !== BOSS_LOCAL_COLLECTOR_VERSION
+) {
+  delete globalThis.__bossLocalExtract;
+  delete globalThis.__bossLocalCollectorTest;
+  delete globalThis.__bossLocalProbe;
+  globalThis.__bossLocalCollectorVersion = BOSS_LOCAL_COLLECTOR_VERSION;
+  const BOSS_TRUSTED_PLATFORM_UID_ATTRIBUTES =
+    globalThis.__bossLocalIdentityContract?.trustedPlatformUidAttributes || [];
   const EDUCATION_REGEX = /(博士|硕士|研究生|本科|大专|中专|高中|MBA|EMBA|统招本科|学历不限)/;
   const SALARY_REGEX = /(?:\b|￥)?\d{1,3}\s*[Kk]\s*[-~–—至]\s*\d{1,3}\s*[Kk](?:\b|·|\/|年|月)?|\b\d{1,3}\s*[-~–—至]\s*\d{1,3}\s*[Kk](?:\b|·|\/|年|月)?|薪资面议|面议/;
   const ACTIVE_REGEX = /(刚刚活跃|今日活跃|本周活跃|刚刚在线|\d+[天日周月]内活跃|活跃|在线)/;
@@ -126,6 +136,25 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
     id: platform.id,
     label: platform.label,
   }));
+  globalThis.__bossLocalCollectorTest = {
+    extractBossIdentityEvidence,
+    mergeCollectedCard,
+  };
+
+  globalThis.__bossLocalProbe = function bossLocalProbe() {
+    const platform = detectPlatform();
+    const detection = platform ? detectCandidateCardNodes(platform) : { nodes: [] };
+    return {
+      frameUrl: location.href,
+      platform: platform?.id || "",
+      cardCount: detection.nodes.length,
+      visible:
+        document.visibilityState !== "hidden" &&
+        Number(window.innerWidth || document.documentElement?.clientWidth || 0) > 0 &&
+        Number(window.innerHeight || document.documentElement?.clientHeight || 0) > 0,
+      collectorVersion: globalThis.__bossLocalCollectorVersion,
+    };
+  };
 
   globalThis.__bossLocalRequestScrollPause = function bossLocalRequestScrollPause(reason) {
     const control = getScrollControl();
@@ -159,6 +188,9 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
     const result = await collectCards(platform, Boolean(autoScroll), settings || {});
     markScrollControlStopped();
     const lastDebug = result.lastDebug || { strategy: "none", actionCount: 0, nodeCount: 0 };
+    const trustedIdentityCount = result.cards.filter((card) =>
+      Boolean(normalizeText(card?.action_platform_uid || "")),
+    ).length;
     return {
       cards: result.cards,
       debug: [
@@ -171,6 +203,7 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
         `noMore=${result.scrollInfo.noMoreDetected}`,
         `paused=${result.scrollInfo.pauseRequested}`,
         `unique=${result.cards.length}`,
+        `trustedIds=${trustedIdentityCount}`,
       ].join(", "),
       meta: {
         platform: platform.id,
@@ -196,7 +229,7 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
       const extracted = extractLoadedCards(platform);
       lastDebug = extracted.debug;
       for (const card of extracted.cards) {
-        cardsByKey.set(buildCardKey(card), card);
+        mergeCollectedCard(cardsByKey, card);
       }
 
       const newCount = cardsByKey.size - beforeCount;
@@ -208,6 +241,13 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
       noMoreDetected = noMoreDetected || hasNoMoreText(platform);
       return newCount;
     };
+
+    if (autoScroll) {
+      const initialSettled = await waitForContentSettled(platform, settings.scrollWaitMs);
+      if (!initialSettled) {
+        throw new Error("candidate_content_not_stable");
+      }
+    }
 
     while (true) {
       mergeLoadedCards(true);
@@ -235,10 +275,11 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
       const previousSnapshot = getScrollSnapshot(platform);
       const scrollResult = await performScroll(platform, settings, () => mergeLoadedCards(false));
       roundsCompleted += Math.max(Number(scrollResult.rounds ?? 1), 0);
-      await waitForContentSettled(platform, settings.scrollWaitMs);
-      if (settings.scrollMode === "hold_end") {
-        mergeLoadedCards(false);
+      const settledThisRound = await waitForContentSettled(platform, settings.scrollWaitMs);
+      if (!settledThisRound && !isScrollPauseRequested()) {
+        throw new Error("candidate_content_not_stable");
       }
+      mergeLoadedCards(false);
       if (isScrollPauseRequested()) {
         stopReason = "paused-by-user";
         break;
@@ -259,6 +300,14 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
       if (!changed) {
         noNewRounds += 1;
       }
+    }
+
+    if (autoScroll && !isScrollPauseRequested()) {
+      const settledAfterScroll = await waitForContentSettled(platform, settings.scrollWaitMs);
+      if (!settledAfterScroll && !isScrollPauseRequested()) {
+        throw new Error("candidate_content_not_stable");
+      }
+      mergeLoadedCards(false);
     }
 
     return {
@@ -329,32 +378,59 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
       scrollHeight: Number(getScrollHeight(root)),
       scrollTop: Number(getScrollTop(root)),
       textLength: bodyText.length,
+      contentSignature: candidateContentSignature(detection.nodes),
     };
   }
 
+  function candidateContentSignature(nodes) {
+    const source = (nodes || [])
+      .map((node) => normalizeText(node?.innerText || node?.textContent || ""))
+      .filter(Boolean)
+      .sort()
+      .join("\n---\n");
+    let hash = 2166136261;
+    for (let index = 0; index < source.length; index += 1) {
+      hash ^= source.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+    return `${(hash >>> 0).toString(16).padStart(8, "0")}:${source.length}:${nodes?.length || 0}`;
+  }
+
   async function waitForContentSettled(platform, waitMs) {
-    const totalWaitMs = Math.max(Number(waitMs || 0), 600);
+    const totalWaitMs = Math.max(Number(waitMs || 0), 5000);
     const settleStepMs = 250;
-    let lastHeight = getScrollSnapshot(platform).scrollHeight;
+    const tracker = globalThis.BossLocalCollectionContract?.createStabilityTracker?.(3);
+    let lastSnapshot = getScrollSnapshot(platform);
     let stableTicks = 0;
+    tracker?.observe(lastSnapshot);
     const startedAt = Date.now();
+    let settled = false;
 
     while (Date.now() - startedAt < totalWaitMs) {
       if (isScrollPauseRequested()) {
         break;
       }
       await delay(settleStepMs);
-      const nextHeight = getScrollSnapshot(platform).scrollHeight;
-      if (Math.abs(nextHeight - lastHeight) <= 4) {
+      const nextSnapshot = getScrollSnapshot(platform);
+      const contractSettled = tracker?.observe(nextSnapshot);
+      if (contractSettled) {
+        stableTicks = 3;
+      } else if (
+        !tracker &&
+        Math.abs(nextSnapshot.scrollHeight - lastSnapshot.scrollHeight) <= 4 &&
+        nextSnapshot.contentSignature === lastSnapshot.contentSignature
+      ) {
         stableTicks += 1;
       } else {
         stableTicks = 0;
-        lastHeight = nextHeight;
       }
-      if (stableTicks >= 2 && Date.now() - startedAt >= 500) {
+      lastSnapshot = nextSnapshot;
+      if (stableTicks >= 3 && Date.now() - startedAt >= 750) {
+        settled = true;
         break;
       }
     }
+    return settled || isScrollPauseRequested();
   }
 
   async function performScroll(platform, settings, onHoldTick) {
@@ -693,6 +769,18 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
     const tags = allTexts(card, platform.selectors.tags);
     const detailUrl = firstHref(card, platform.selectors.detailLink) || inferred.detail_url;
     const platformUid = normalizePlatformUid(platform, firstAttr(card, platform.selectors.platformUidAttrs) || inferred.platform_uid);
+    const identity = platform.id === "boss"
+      ? extractBossIdentityEvidence(card, detailUrl, platform)
+      : {
+          platform_uid: "",
+          friend_id: "",
+          friend_source: "",
+          security_id: "",
+          lid: "",
+          job_context_id: "",
+          raw_identity: {},
+          raw_action_context: {},
+        };
     return {
       platform: platform.id,
       raw_card_text: rawText,
@@ -705,7 +793,134 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
       summary_text: firstText(card, platform.selectors.summary) || inferred.summary_text,
       detail_url: detailUrl,
       platform_uid: platformUid,
+      action_platform_uid: identity.platform_uid,
+      friend_id: identity.friend_id,
+      friend_source: identity.friend_source,
+      security_id: identity.security_id,
+      lid: identity.lid,
+      job_context_id: identity.job_context_id,
+      raw_identity: identity.raw_identity,
+      raw_action_context: identity.raw_action_context,
     };
+  }
+
+  function extractBossIdentityEvidence(card, detailUrl, platform = null) {
+    const aliases = {
+      ...Object.fromEntries(
+        BOSS_TRUSTED_PLATFORM_UID_ATTRIBUTES.map((name) => [name.replace(/[^a-z0-9]/g, ""), "platform_uid"]),
+      ),
+      datafriendid: "friend_id",
+      datafriendsource: "friend_source",
+      datasecurityid: "security_id",
+      datalid: "lid",
+      dataexpectid: "job_context_id",
+      datajobcontextid: "job_context_id",
+      datajobid: "job_context_id",
+      datapositionid: "job_context_id",
+      datarecruitjobid: "job_context_id",
+    };
+    const identity = {
+      platform_uid: "",
+      friend_id: "",
+      friend_source: "",
+      security_id: "",
+      lid: "",
+      job_context_id: "",
+      raw_identity: {},
+      raw_action_context: {},
+    };
+    const readAttributes = (node) => {
+      for (const attribute of Array.from(node?.attributes || [])) {
+        const name = String(attribute?.name || "").toLowerCase();
+        const canonical = aliases[name.replace(/[^a-z0-9]/g, "")];
+        const value = normalizeText(attribute?.value || "");
+        if (!canonical || !value) {
+          continue;
+        }
+        if (canonical === "platform_uid") {
+          identity.raw_identity[name] = value;
+        } else {
+          identity.raw_action_context[name] = value;
+        }
+        if (!identity[canonical]) {
+          identity[canonical] = value;
+        }
+      }
+    };
+    const nodes = [card, ...querySelectorAllSafe(card, "*")];
+    for (const node of nodes) {
+      readAttributes(node);
+    }
+
+    // Some BOSS recommendation variants put data-geekid on the immediate
+    // wrapper outside the visible card node selected by the collector. Do not
+    // walk beyond that wrapper: a higher ancestor may own multiple candidates.
+    const wrapper = card?.parentElement || null;
+    const bossPlatform = platform || PLATFORM_ADAPTERS.find((item) => item.id === "boss");
+    if (!identity.platform_uid && isSingleCandidateWrapper(wrapper, card, bossPlatform)) {
+      readAttributes(wrapper);
+    }
+
+    try {
+      const url = new URL(detailUrl || location.href, location.href);
+      const queryAliases = {
+        encryptuid: "platform_uid",
+        friendid: "friend_id",
+        friendsource: "friend_source",
+        securityid: "security_id",
+        lid: "lid",
+        expectid: "job_context_id",
+        jobid: "job_context_id",
+      };
+      for (const [key, value] of url.searchParams.entries()) {
+        const canonical = queryAliases[String(key).toLowerCase()];
+        const normalizedValue = normalizeText(value);
+        if (canonical && !identity[canonical] && normalizedValue) {
+          identity[canonical] = normalizedValue;
+          const evidenceKey = `query:${String(key).toLowerCase()}`;
+          if (canonical === "platform_uid") {
+            identity.raw_identity[evidenceKey] = normalizedValue;
+          } else {
+            identity.raw_action_context[evidenceKey] = normalizedValue;
+          }
+        }
+      }
+    } catch (_error) {
+      // A malformed detail URL is not identity evidence.
+    }
+    return identity;
+  }
+
+  function isSingleCandidateWrapper(wrapper, card, platform) {
+    if (!wrapper || !card || !platform?.selectors?.card) {
+      return false;
+    }
+    const candidateDescendants = uniqueElements(
+      platform.selectors.card.flatMap((selector) => querySelectorAllSafe(wrapper, selector)),
+    );
+    return candidateDescendants.length === 1 && candidateDescendants[0] === card;
+  }
+
+  function mergeCollectedCard(cardsByKey, incoming) {
+    const key = buildCardKey(incoming);
+    const previous = cardsByKey.get(key);
+    if (!previous) {
+      cardsByKey.set(key, incoming);
+      return;
+    }
+    const previousIdentity = normalizeText(previous.action_platform_uid || "");
+    const incomingIdentity = normalizeText(incoming.action_platform_uid || "");
+    if (previousIdentity && incomingIdentity && previousIdentity !== incomingIdentity) {
+      // Never combine two candidates that only collided through a legacy key.
+      cardsByKey.set(`${key}:identity-conflict:${incomingIdentity}`, incoming);
+      return;
+    }
+    if (previousIdentity && !incomingIdentity) {
+      // Keep the complete observation as a whole; never graft its identity
+      // onto different candidate content from an incomplete observation.
+      return;
+    }
+    cardsByKey.set(key, incoming);
   }
 
   function findCandidateCardsByAction(platform) {
@@ -907,7 +1122,13 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
   }
 
   function buildCardKey(card) {
-    return card.platform_uid || card.detail_url || card.raw_card_text || JSON.stringify(card);
+    return (
+      card.action_platform_uid ||
+      card.platform_uid ||
+      card.detail_url ||
+      card.raw_card_text ||
+      JSON.stringify(card)
+    );
   }
 
   function firstText(root, selectors) {

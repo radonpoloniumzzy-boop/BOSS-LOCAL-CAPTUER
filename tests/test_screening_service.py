@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -74,6 +76,26 @@ class CountingProvider:
         )
 
 
+class ConcurrentProbeProvider:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.active = 0
+        self.max_active = 0
+
+    def screen(self, _system_prompt: str, _candidate_text: str) -> ScreeningDecision:
+        with self._lock:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+        time.sleep(0.08)
+        with self._lock:
+            self.active -= 1
+        return ScreeningDecision(
+            rating="SR",
+            persona="Concurrent screening result.",
+            raw_response='{"rating":"SR","persona":"concurrent"}',
+        )
+
+
 class ScreeningServiceTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -81,6 +103,7 @@ class ScreeningServiceTest(unittest.TestCase):
         self.db.initialize()
         self.repository = CandidateRepository(self.db)
         batch = self.repository.create_batch("Java Engineer", "https://example.com")
+        self.batch_id = batch.id
         self.repository.upsert_batch_candidates(
             batch.id,
             [
@@ -111,6 +134,47 @@ class ScreeningServiceTest(unittest.TestCase):
                 prompt_source="generated",
             )
         )
+
+    def test_screening_run_processes_candidates_with_bounded_concurrency(self) -> None:
+        self.repository.upsert_batch_candidates(
+            self.batch_id,
+            [
+                CandidateRecord(
+                    candidate_key=f"platform:concurrent-{index}",
+                    raw_text_hash=f"concurrent-hash-{index}",
+                    job_title="Java Engineer",
+                    source_url="https://example.com",
+                    capture_time="2026-07-17T10:00:00",
+                    raw_card_text=f"Candidate {index} 5 years Java Bachelor Spring Cloud",
+                    name=f"Candidate {index}",
+                    work_experience_text="5 years Java development",
+                    education_text="Bachelor",
+                    tags_text="Java | Spring Cloud",
+                )
+                for index in range(7)
+            ],
+        )
+        provider = ConcurrentProbeProvider()
+        service = ScreeningService(
+            repository=self.repository,
+            prompt_manager=self.prompt_manager,
+            provider=provider,
+            retry_backoff_base_seconds=0,
+            max_concurrency=4,
+        )
+
+        result = service.run(
+            profile=self.profile.to_dict(),
+            candidates=self.repository.list_screening_candidates(job_title="Java Engineer"),
+            source_job_title="Java Engineer",
+            batch_id=self.batch_id,
+            provider_name="fake",
+            model="fake-model",
+            origin="automation",
+        )
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(provider.max_active, 4)
 
     def tearDown(self) -> None:
         self.db.close_thread_connection()
@@ -268,6 +332,7 @@ class ScreeningServiceTest(unittest.TestCase):
             prompt_manager=self.prompt_manager,
             provider=first_provider,
             retry_backoff_base_seconds=0,
+            max_concurrency=4,
         )
         first = first_service.run(
             profile=self.profile.to_dict(),
@@ -587,23 +652,25 @@ class ScreeningServiceTest(unittest.TestCase):
         )
         run_id = int(first["run_id"])
         interrupted_counts = self.repository.get_screening_task_counts(run_id)
+        partial_completed = int(first["completed"])
 
         self.assertEqual(first["status"], "stopped")
-        self.assertEqual(first["completed"], stop_after)
-        self.assertEqual(first_provider.calls, stop_after)
-        self.assertEqual(interrupted_counts["success"], stop_after)
-        self.assertEqual(interrupted_counts["pending"], 1000 - stop_after)
+        self.assertGreaterEqual(partial_completed, stop_after)
+        self.assertLessEqual(partial_completed, stop_after + 3)
+        self.assertEqual(first_provider.calls, partial_completed)
+        self.assertEqual(interrupted_counts["success"], partial_completed)
+        self.assertEqual(interrupted_counts["pending"], 1000 - partial_completed)
 
         claimed_before_shutdown = self.repository.claim_next_screening_task(run_id)
         self.assertIsNotNone(claimed_before_shutdown)
         claimed_counts = self.repository.get_screening_task_counts(run_id)
         self.assertEqual(claimed_counts["running"], 1)
-        self.assertEqual(claimed_counts["pending"], 1000 - stop_after - 1)
+        self.assertEqual(claimed_counts["pending"], 1000 - partial_completed - 1)
         recovered = self.repository.recover_interrupted_screening_tasks()
         recovered_counts = self.repository.get_screening_task_counts(run_id)
         self.assertEqual(recovered, 1)
         self.assertEqual(recovered_counts["running"], 0)
-        self.assertEqual(recovered_counts["pending"], 1000 - stop_after)
+        self.assertEqual(recovered_counts["pending"], 1000 - partial_completed)
 
         resumed_candidates = self.repository.list_screening_run_candidates(run_id)
         second_provider = CountingProvider()
@@ -612,6 +679,7 @@ class ScreeningServiceTest(unittest.TestCase):
             prompt_manager=self.prompt_manager,
             provider=second_provider,
             retry_backoff_base_seconds=0,
+            max_concurrency=4,
         )
         resumed = second_service.run(
             profile=self.profile.to_dict(),
@@ -628,7 +696,7 @@ class ScreeningServiceTest(unittest.TestCase):
 
         self.assertEqual(resumed["status"], "completed")
         self.assertEqual(resumed["completed"], 1000)
-        self.assertEqual(second_provider.calls, 1000 - stop_after)
+        self.assertEqual(second_provider.calls, 1000 - partial_completed)
         self.assertEqual(final_counts["success"], 1000)
         self.assertEqual(final_counts["pending"], 0)
         self.assertEqual(len(result_rows), 1000)

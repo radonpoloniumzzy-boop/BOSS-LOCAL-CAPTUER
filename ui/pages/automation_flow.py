@@ -47,10 +47,12 @@ class AutomationFlowPage(QWidget):
     stop_requested = Signal()
     test_connection_requested = Signal(object)
     run_selected = Signal(int)
+    credential_context_changed = Signal(object)
 
     def __init__(self) -> None:
         super().__init__()
         self._result_rows: list[dict[str, object]] = []
+        self._profiles_by_id: dict[int, dict[str, object]] = {}
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -71,6 +73,25 @@ class AutomationFlowPage(QWidget):
         self.max_candidates_input = QSpinBox()
         self.max_candidates_input.setRange(0, 10000)
         self.max_candidates_input.setSpecialValueText("全部")
+        self.screening_concurrency_input = QSpinBox()
+        self.screening_concurrency_input.setRange(1, 8)
+        self.screening_concurrency_input.setValue(4)
+        self.screening_concurrency_input.setToolTip(
+            "同时请求 AI 筛选的候选人数。建议保持 4；遇到限流时可调低。"
+        )
+
+        self.post_screen_action_combo = QComboBox()
+        self.post_screen_action_combo.addItem("仅采集并筛选", "screen_only")
+        self.post_screen_action_combo.addItem("筛选并收藏（单批次）", "screen_and_favorite")
+        self.favorite_interval_input = QSpinBox()
+        self.favorite_interval_input.setRange(3, 8)
+        self.favorite_interval_input.setValue(5)
+        self.favorite_interval_input.setSuffix(" 秒")
+        self.favorite_max_candidates_input = QSpinBox()
+        self.favorite_max_candidates_input.setRange(1, 50)
+        self.favorite_max_candidates_input.setValue(20)
+        self.favorite_policy_label = QLabel("当前岗位未配置自动收藏评级")
+        self.favorite_policy_label.setWordWrap(True)
 
         self.provider_combo = QComboBox()
         self.provider_combo.addItem("OpenAI", "openai")
@@ -81,7 +102,9 @@ class AutomationFlowPage(QWidget):
         self.api_base_input = QLineEdit()
         self.api_key_input = QLineEdit()
         self.api_key_input.setEchoMode(QLineEdit.Password)
-        self.api_key_input.setPlaceholderText("仅保存在当前程序内存，不写入配置文件")
+        self.api_key_input.setPlaceholderText("留空时自动使用 Windows 凭据管理器中的 Key")
+        self.credential_status_label = QLabel("正在检查已保存的 API Key…")
+        self.credential_status_label.setWordWrap(True)
         self.api_key_env_input = QLineEdit()
 
         settings_form.addRow(self.enabled_checkbox)
@@ -89,10 +112,16 @@ class AutomationFlowPage(QWidget):
         settings_form.addRow("采集岗位", self.job_title_input)
         settings_form.addRow("采集页面", self.source_url_input)
         settings_form.addRow("最多筛选人数", self.max_candidates_input)
+        settings_form.addRow("AI 并发数", self.screening_concurrency_input)
+        settings_form.addRow("筛选后动作", self.post_screen_action_combo)
+        settings_form.addRow("收藏动作间隔", self.favorite_interval_input)
+        settings_form.addRow("单批收藏上限", self.favorite_max_candidates_input)
+        settings_form.addRow("岗位收藏评级", self.favorite_policy_label)
         settings_form.addRow("AI 服务商", self.provider_combo)
         settings_form.addRow("模型", self.model_combo)
         settings_form.addRow("API Base", self.api_base_input)
         settings_form.addRow("API Key", self.api_key_input)
+        settings_form.addRow("密钥状态", self.credential_status_label)
         settings_form.addRow("Key 环境变量", self.api_key_env_input)
 
         self.hint_label = QLabel(
@@ -148,11 +177,23 @@ class AutomationFlowPage(QWidget):
         self.result_table.horizontalHeader().setStretchLastSection(True)
         result_layout.addWidget(self.result_table, 1)
 
+        pipeline_group = QGroupBox("本次任务进度")
+        pipeline_layout = QVBoxLayout(pipeline_group)
+        self.pipeline_status_label = QLabel(
+            "① 页面确认  ○  ② 滚动采集  ○  ③ 内容稳定  ○  ④ 导入批次  ○  ⑤ AI 初筛  ○"
+        )
+        self.pipeline_status_label.setWordWrap(True)
+        pipeline_layout.addWidget(self.pipeline_status_label)
+
         root.addWidget(settings_group)
+        root.addWidget(pipeline_group)
         root.addWidget(result_group, 1)
 
         self.profile_combo.currentIndexChanged.connect(self._profile_changed)
         self.provider_combo.currentIndexChanged.connect(self._provider_changed)
+        self.api_base_input.editingFinished.connect(
+            lambda: self.credential_context_changed.emit(self.provider_payload())
+        )
         self.test_button.clicked.connect(
             lambda: self.test_connection_requested.emit(self.provider_payload())
         )
@@ -170,6 +211,7 @@ class AutomationFlowPage(QWidget):
         self.job_title_input.setText(flow.job_title or config.default_job_title)
         self.source_url_input.setText(flow.source_url or config.target_url)
         self.max_candidates_input.setValue(int(flow.max_candidates))
+        self.screening_concurrency_input.setValue(int(flow.screening_concurrency))
         provider_index = self.provider_combo.findData(flow.provider)
         self.provider_combo.setCurrentIndex(max(0, provider_index))
         self._provider_changed()
@@ -179,12 +221,18 @@ class AutomationFlowPage(QWidget):
             self.api_base_input.setText(flow.api_base)
         if flow.api_key_env:
             self.api_key_env_input.setText(flow.api_key_env)
+        action_index = self.post_screen_action_combo.findData(flow.post_screen_action)
+        self.post_screen_action_combo.setCurrentIndex(max(0, action_index))
+        self.favorite_interval_input.setValue(int(flow.favorite_interval_seconds))
+        self.favorite_max_candidates_input.setValue(int(flow.favorite_max_candidates))
         profile_index = self.profile_combo.findData(flow.profile_id)
         if profile_index >= 0:
             self.profile_combo.setCurrentIndex(profile_index)
+        self._profile_changed()
         self.status_label.setText("已启用，等待下一次采集" if flow.enabled else "未启用")
 
     def set_profiles(self, rows: list[dict[str, object]], selected_profile_id: int | None = None) -> None:
+        self._profiles_by_id = {int(row["id"]): dict(row) for row in rows}
         current = selected_profile_id
         if current is None:
             current = self.profile_combo.currentData()
@@ -196,6 +244,7 @@ class AutomationFlowPage(QWidget):
         index = self.profile_combo.findData(current)
         self.profile_combo.setCurrentIndex(max(0, index))
         self.profile_combo.blockSignals(False)
+        self._profile_changed()
 
     def set_runs(self, rows: list[dict[str, object]], selected_run_id: int | None = None) -> None:
         current = selected_run_id or self.run_combo.currentData()
@@ -222,6 +271,10 @@ class AutomationFlowPage(QWidget):
             "job_title": self.job_title_input.text().strip(),
             "source_url": self.source_url_input.text().strip(),
             "limit": self.max_candidates_input.value(),
+            "screening_concurrency": self.screening_concurrency_input.value(),
+            "post_screen_action": str(self.post_screen_action_combo.currentData() or "screen_only"),
+            "favorite_interval_seconds": self.favorite_interval_input.value(),
+            "favorite_max_candidates": self.favorite_max_candidates_input.value(),
             "provider": self.provider_payload(),
         }
 
@@ -258,6 +311,72 @@ class AutomationFlowPage(QWidget):
     def set_status(self, text: str) -> None:
         self.status_label.setText(text)
 
+    def update_pipeline_status(self, payload: dict[str, object]) -> None:
+        stage = str(payload.get("stage") or "waiting")
+        stages = [
+            ("page_confirmation", "① 页面确认"),
+            ("scrolling", "② 滚动采集"),
+            ("settling", "③ 内容稳定"),
+            ("importing", "④ 导入批次"),
+            ("screening", "⑤ AI 初筛"),
+        ]
+        order = {name: index for index, (name, _label) in enumerate(stages)}
+        current_index = order.get(stage, -1)
+        completed = stage == "completed"
+        failed_index = order.get(str(payload.get("failed_stage") or ""), -1)
+        stage_completed = str(payload.get("stage_status") or "") == "completed"
+        rendered = []
+        for index, (_name, label) in enumerate(stages):
+            if stage == "failed" and index < failed_index:
+                marker = "✓"
+            elif stage == "failed" and index == failed_index:
+                marker = "失败"
+            elif stage == "failed":
+                marker = "○"
+            elif stage in {"duplicate", "capture_completed"} and index < 4:
+                marker = "✓"
+            elif stage == "duplicate" and index == 4:
+                marker = "跳过"
+            elif stage == "capture_completed" and index == 4:
+                marker = "未请求"
+            elif completed or index < current_index or (stage_completed and index == current_index):
+                marker = "✓"
+            elif index == current_index:
+                marker = "●"
+            else:
+                marker = "○"
+            rendered.append(f"{label} {marker}")
+
+        details = []
+        collection_run_id = str(payload.get("collection_run_id") or "")
+        if collection_run_id:
+            details.append(f"采集任务 {collection_run_id[:9]}")
+        if payload.get("batch_id") is not None:
+            details.append(f"采集批次 #{payload['batch_id']}")
+        if payload.get("screening_run_id") is not None:
+            details.append(f"初筛任务 #{payload['screening_run_id']}")
+        total = int(payload.get("total") or 0)
+        current = int(payload.get("current") or 0)
+        if total:
+            details.append(f"进度 {current}/{total}")
+        message = str(payload.get("message") or "").strip()
+        if message:
+            details.append(message)
+        suffix = "\n" + "｜".join(details) if details else ""
+        self.pipeline_status_label.setText("  ".join(rendered) + suffix)
+
+    def set_credential_status(self, saved: bool | None) -> None:
+        if saved is True:
+            self.credential_status_label.setText(
+                "已安全保存到 Windows 凭据管理器；API Key 输入框可留空。"
+            )
+        elif saved is False:
+            self.credential_status_label.setText(
+                "尚未保存。输入 Key 并通过“测试 AI 连接”后会安全保存。"
+            )
+        else:
+            self.credential_status_label.setText("暂时无法读取 Windows 凭据管理器。")
+
     def _emit_arm(self) -> None:
         payload = self.workflow_payload()
         if payload["profile_id"] is None:
@@ -270,14 +389,32 @@ class AutomationFlowPage(QWidget):
         if not provider.get("model"):
             self.set_status("请填写 AI 模型名称。")
             return
+        if (
+            payload["post_screen_action"] == "screen_and_favorite"
+            and not self._selected_profile_favorite_ratings()
+        ):
+            self.set_status("当前岗位未配置自动收藏评级，不能启动“筛选并收藏”。")
+            return
         self.enabled_checkbox.setChecked(True)
         payload["enabled"] = True
         self.arm_requested.emit(payload)
 
     def _profile_changed(self) -> None:
         if self.profile_combo.currentData() is None:
+            self.favorite_policy_label.setText("当前岗位未配置自动收藏评级")
             return
         self.job_title_input.setText(self.profile_combo.currentText())
+        ratings = self._selected_profile_favorite_ratings()
+        self.favorite_policy_label.setText(
+            "、".join(ratings) if ratings else "当前岗位未配置自动收藏评级"
+        )
+
+    def _selected_profile_favorite_ratings(self) -> list[str]:
+        profile_id = self.profile_combo.currentData()
+        if profile_id is None:
+            return []
+        profile = self._profiles_by_id.get(int(profile_id), {})
+        return [str(value) for value in profile.get("favorite_eligible_ratings") or []]
 
     def _provider_changed(self) -> None:
         provider = str(self.provider_combo.currentData() or "openai")
@@ -289,6 +426,7 @@ class AutomationFlowPage(QWidget):
             self.model_combo.setCurrentText(current_model)
         self.api_base_input.setText(defaults["base"])
         self.api_key_env_input.setText(defaults["key_env"])
+        self.credential_context_changed.emit(self.provider_payload())
 
     def _emit_run_selected(self) -> None:
         run_id = self.run_combo.currentData()

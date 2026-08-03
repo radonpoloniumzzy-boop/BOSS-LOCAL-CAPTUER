@@ -44,6 +44,15 @@ DEFAULT_CSV_COLUMNS = [
     "candidate_key",
 ]
 
+SCREENING_RATINGS = ("UR", "SSR", "SR", "R", "N")
+BOSS_TRUSTED_PLATFORM_UID_ATTRIBUTES = (
+    "data-candidate-id",
+    "data-encrypt-geek-id",
+    "data-encrypt-uid",
+    "data-geek-id",
+    "data-geekid",
+)
+
 
 @dataclass(slots=True)
 class AIProviderConfig:
@@ -67,6 +76,11 @@ class AutomationFlowConfig:
     model: str = "gpt-5.4-mini"
     api_base: str = "https://api.openai.com/v1"
     api_key_env: str = "OPENAI_API_KEY"
+    post_screen_action: str = "screen_only"
+    screening_concurrency: int = 4
+    favorite_interval_seconds: int = 5
+    favorite_max_candidates: int = 20
+    armed_launch_snapshot: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -86,7 +100,7 @@ class AppConfig:
     max_scroll_count: int = 60
     no_new_stop_rounds: int = 3
     default_job_title: str = "Boss Recommended Talent"
-    export_filename_template: str = "{job_title}_{date}_{time}_batch{batch_id}_{type}"
+    export_filename_template: str = "采集批次{batch_id}_{job_title}_{stage}_{date}-{time}"
     resume_filename_template: str = "{candidate_name}_{job_title}_{date}_{original_name}"
     log_level: str = "INFO"
     selectors_path: str = ""
@@ -126,6 +140,15 @@ class CandidateRecord:
     summary_text: str = ""
     detail_url: str = ""
     platform_uid: str = ""
+    action_platform_uid: str = ""
+    platform: str = ""
+    friend_id: str = ""
+    friend_source: str = ""
+    security_id: str = ""
+    lid: str = ""
+    job_context_id: str = ""
+    raw_identity: dict[str, Any] = field(default_factory=dict)
+    raw_action_context: dict[str, Any] = field(default_factory=dict)
     id: int | None = None
     created_at: str = ""
     updated_at: str = ""
@@ -230,6 +253,7 @@ class ScreeningProfile:
     exclusions: list[str] = field(default_factory=list)
     interview_checks: list[str] = field(default_factory=list)
     evidence_policy: dict[str, Any] = field(default_factory=dict)
+    favorite_eligible_ratings: list[str] = field(default_factory=list)
     version: int = 1
     parent_profile_id: int | None = None
     id: int | None = None

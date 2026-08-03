@@ -75,9 +75,14 @@ First launch creates:
 3. Click `Load unpacked`.
 4. Select:
 
+Select the `extension` folder under the same project root from which you launched
+`app.py`. For this checkout that is:
+
 ```text
-D:\codex\BOSS-LOCAL-CAPTURE-review\extension
+C:\Users\ZHONG SHIXING\Documents\HR\extension
 ```
+
+Do not reload an older copy of the extension from another checkout.
 
 5. Pin the extension if you want easier access.
 
@@ -126,6 +131,19 @@ Automation API keys remain in process memory and are never written to `config.js
 
 API keys entered in the AI page are kept only in process memory. They are not written to SQLite or `config.json`.
 
+## Single-Batch Native Favorite Workflow
+
+1. Configure the role's Favorite Eligibility Policy in `AI Screen`.
+2. In `Automation Flow`, choose `Screen and Favorite`, then run extension `AUTO` collection on the Boss recommendation page.
+   The `AI concurrency` setting controls simultaneous per-candidate model requests. It defaults to 4 and can be reduced to 1-2 if the provider returns rate-limit errors.
+3. Wait for Initial Screening to finish and note the Native Favorite batch ID shown by the desktop app.
+4. On the recommendation page, enter the batch ID and start the source favorite phase. BOSS does not need—and may not allow—a second business page.
+5. When the source phase reports `awaiting_verification`, navigate the same BOSS page to `Interaction -> Favorite Talent`.
+6. Open the extension and click `Verify This Favorite Batch`; this phase is read-only and never repeats a favorite click.
+7. The extension pauses safely on an inconclusive scan, failure, Source Page Context mismatch, or a manual stop request.
+
+Use a fresh batch collected with extension version 0.6.0 or newer. The source phase locks the top Chrome document and candidate-bearing frame, then records an active favorite control as `verification_pending`, not final success. Final success requires a later exact Platform Identity match after navigating the same BOSS page to Favorite Talent. An inconclusive management scan remains pending for later verification and never repeats the source favorite click. This version does not refresh the recommendation page, advance to another Capture Batch, contact candidates, or cancel favorites.
+
 AI ratings are assistive ranking signals and require human review. The app rejects prompts that use age, sex, marriage/childbearing, health/disability, photos, appearance, or image/temperament as automated employment screening criteria.
 
 ## Local API
@@ -137,6 +155,12 @@ The desktop app starts a local HTTP server for the extension:
 - `POST /api/import/cards`
 - `GET /api/automation/status`
 - `POST /api/automation/start`
+- `POST /api/favorites/claim`
+- `POST /api/favorites/result`
+- `POST /api/favorites/retry`
+- `POST /api/favorites/verification/claim`
+- `POST /api/favorites/verification/result`
+- `POST /api/favorites/status`
 
 Default endpoint:
 

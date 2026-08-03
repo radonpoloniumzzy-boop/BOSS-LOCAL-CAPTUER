@@ -2,8 +2,11 @@
 
 Load this folder as an unpacked Chrome extension:
 
+Load the `extension` folder from the same checkout as the running desktop app.
+For this checkout:
+
 ```text
-D:\codex\BOSS-LOCAL-CAPTURE-review\extension
+C:\Users\ZHONG SHIXING\Documents\HR\extension
 ```
 
 Steps:
@@ -33,6 +36,17 @@ One-click automation usage:
 3. Open the Boss or Liepin recommendation page
 4. Click `AUTO: Scroll + Collect + AI Screen` in the extension popup
 5. The extension confirms the desktop workflow, auto-scrolls, imports the cards, and submits that batch for AI screening
+
+Single-batch Native Favorite usage:
+
+1. In the desktop app, configure a role's Favorite Eligibility Policy and choose `Screen and Favorite`
+2. Run extension `AUTO` collection and wait for the desktop status to show a Native Favorite batch ID
+3. Keep the original Boss recommendation page open, enter the batch ID, and run the source favorite phase
+4. The source runner serially clicks exact-identity favorite controls; an active control becomes `verification_pending`, never final success
+5. After the source phase finishes, navigate the same BOSS page to `Interaction -> Favorite Talent`
+6. Open the extension and click `Verify This Favorite Batch`; the read-only management phase finalizes exact matches and never repeats source favorite clicks
+
+Only fresh batches collected with extension version 0.6.0 or newer support the single-page two-phase workflow. The source phase never requires a simultaneous management tab. Closing the popup does not stop the runner; use `Stop Favorite` to stop before the next item. Unknown source writes never auto-retry. Inconclusive read-only management scans return to `verification_pending`, so the user may load or scroll the Favorite Talent list and verify again without another favorite click.
 
 Single chat usage:
 
