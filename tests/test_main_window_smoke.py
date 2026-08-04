@@ -37,6 +37,42 @@ class MainWindowSmokeTest(unittest.TestCase):
                 window.close()
                 QTest.qWait(50)
 
+    def test_product_development_page_is_available_from_navigation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_service = ConfigService(Path(tmp_dir))
+            assets_dir = config_service.app_root / "assets"
+            assets_dir.mkdir(parents=True, exist_ok=True)
+            source_plan = Path(__file__).parents[1] / "assets" / "product_development_plan.json"
+            (assets_dir / "product_development_plan.json").write_text(
+                source_plan.read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            config = config_service.default_config()
+            config.local_api_port = 0
+            config_service.save(config)
+
+            with patch("ui.main_window.ConfigService", return_value=config_service):
+                window = MainWindow()
+                try:
+                    self.assertIn("产品建设", window._navigation_full_labels)
+                    product_index = window._navigation_full_labels.index("产品建设")
+                    window.navigation.setCurrentRow(product_index)
+                    QTest.qWait(20)
+                    self.assertIs(
+                        window._page_scroll_areas[product_index].widget(),
+                        window.product_development_page,
+                    )
+                    self.assertIn("0.3.0-dev", window.product_development_page.version_value.text())
+                    window.product_development_page.feedback_description_input.setPlainText(
+                        "测试环境反馈"
+                    )
+                    window.product_development_page.feedback_submit_button.click()
+                    self.assertTrue((config_service.data_dir / "product_feedback.json").exists())
+                    self.assertEqual(window.product_development_page.feedback_table.rowCount(), 1)
+                finally:
+                    window.close()
+                    QTest.qWait(50)
+
     def test_repeated_api_connection_tests_finish_without_thread_crash(self) -> None:
         class FakeProvider:
             def test_connection(self):

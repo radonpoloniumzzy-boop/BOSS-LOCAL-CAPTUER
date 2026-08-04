@@ -34,6 +34,7 @@ from core.credentials import CredentialStore
 from core.local_api import LocalApiServer
 from core.logger import LoggingService
 from core.models import AutomationFlowConfig, ScreeningProfile
+from core.product_development import ProductDevelopmentRepository
 from storage.db import DatabaseManager
 from storage.export_service import ExportService
 from storage.repository import CandidateRepository
@@ -41,6 +42,7 @@ from ui.pages.ai_screen import AIScreenPage
 from ui.pages.automation_flow import AutomationFlowPage
 from ui.pages.candidates import CandidatesPage
 from ui.pages.dashboard import DashboardPage
+from ui.pages.product_development import ProductDevelopmentPage
 from ui.pages.review import ReviewPage
 from ui.pages.settings import SettingsPage
 from ui.workers import (
@@ -113,6 +115,10 @@ class MainWindow(QMainWindow):
             logger=self.logging_service.get_logger("automation.importer"),
         )
         self.prompt_manager = PromptManager(self.config_service.app_root / "assets" / "prompts")
+        self.product_development_repository = ProductDevelopmentRepository(
+            self.config_service.app_root / "assets" / "product_development_plan.json",
+            self.config_service.data_dir / "product_feedback.json",
+        )
         self._ensure_builtin_screening_profiles()
 
         self.local_api_server: LocalApiServer | None = None
@@ -171,7 +177,15 @@ class MainWindow(QMainWindow):
         self.navigation = QListWidget()
         self.navigation.setFixedWidth(112)
         self.navigation.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        for label in ["仪表盘", "自动化流程", "候选人", "AI 初筛", "人工复核", "设置"]:
+        for label in [
+            "仪表盘",
+            "自动化流程",
+            "候选人",
+            "AI 初筛",
+            "人工复核",
+            "产品建设",
+            "设置",
+        ]:
             QListWidgetItem(label, self.navigation)
         self.navigation.setCurrentRow(0)
 
@@ -183,6 +197,7 @@ class MainWindow(QMainWindow):
         self.candidates_page = CandidatesPage()
         self.ai_page = AIScreenPage(self.prompt_manager)
         self.review_page = ReviewPage()
+        self.product_development_page = ProductDevelopmentPage()
         self.settings_page = SettingsPage()
 
         self._page_scroll_areas: list[QScrollArea] = []
@@ -192,6 +207,7 @@ class MainWindow(QMainWindow):
             self.candidates_page,
             self.ai_page,
             self.review_page,
+            self.product_development_page,
             self.settings_page,
         ]:
             scroll_area = QScrollArea()
@@ -213,7 +229,7 @@ class MainWindow(QMainWindow):
         self._navigation_full_labels = [
             self.navigation.item(index).text() for index in range(self.navigation.count())
         ]
-        self._navigation_compact_labels = ["概", "流", "人", "AI", "核", "设"]
+        self._navigation_compact_labels = ["概", "流", "人", "AI", "核", "建", "设"]
         self.navigation_container = QWidget()
         navigation_layout = QVBoxLayout(self.navigation_container)
         navigation_layout.setContentsMargins(0, 0, 0, 0)
@@ -388,6 +404,10 @@ class MainWindow(QMainWindow):
         self.review_page.refresh_requested.connect(self.refresh_review_queue)
         self.review_page.status_change_requested.connect(self._record_recruitment_status_change)
 
+        self.product_development_page.feedback_submit_requested.connect(
+            self._submit_product_feedback
+        )
+
         self.ai_page.profile_selected.connect(self._load_screening_profile)
         self.ai_page.save_profile_requested.connect(self._save_screening_profile)
         self.ai_page.clone_profile_requested.connect(self._clone_screening_profile)
@@ -419,6 +439,30 @@ class MainWindow(QMainWindow):
         self.settings_page.load_config(self.config)
         self.ai_page.load_config(self.config)
         self.automation_flow_page.load_config(self.config)
+        self.refresh_product_development()
+
+    def refresh_product_development(self) -> None:
+        try:
+            snapshot = self.product_development_repository.load_snapshot()
+        except (OSError, ValueError) as exc:
+            message = f"产品方案读取失败：{exc}"
+            self.product_development_page.show_feedback_error(message)
+            self.logger.error(message)
+            return
+        self.product_development_page.set_snapshot(snapshot)
+
+    def _submit_product_feedback(self, payload: dict[str, object]) -> None:
+        try:
+            saved = self.product_development_repository.submit_feedback(payload)
+            snapshot = self.product_development_repository.load_snapshot()
+        except (OSError, ValueError) as exc:
+            message = f"反馈保存失败：{exc}"
+            self.product_development_page.show_feedback_error(message)
+            self.statusBar().showMessage(message)
+            self.logger.error(message)
+            return
+        self.product_development_page.feedback_saved(snapshot["feedback"])
+        self.statusBar().showMessage(f"反馈已保存：{saved['id']}")
 
     def _start_local_api_server(self) -> None:
         if self.local_api_server is not None:
@@ -1491,6 +1535,8 @@ class MainWindow(QMainWindow):
             self.refresh_ai_screen()
         elif page is self.review_page:
             self.refresh_review_queue()
+        elif page is self.product_development_page:
+            self.refresh_product_development()
 
     def _append_log_line(self, message: str) -> None:
         self.log_view.appendPlainText(message)
