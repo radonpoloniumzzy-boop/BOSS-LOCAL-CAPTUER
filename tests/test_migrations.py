@@ -60,7 +60,7 @@ class MigrationTest(unittest.TestCase):
             self.assertIn("next_attempt_at", task_columns)
             self.assertIn("failure_category", task_columns)
             self.assertIn("idx_screening_tasks_claim", indexes)
-            self.assertEqual(version, 14)
+            self.assertEqual(version, 15)
             connection.close()
 
     def test_existing_screening_runs_table_gets_origin_column(self) -> None:
@@ -152,7 +152,7 @@ class MigrationTest(unittest.TestCase):
             self.assertIn("target_hires", job_columns)
             self.assertIn("status", job_columns)
             self.assertIn("profile_version", columns)
-            self.assertEqual(version, 14)
+            self.assertEqual(version, 15)
             connection.close()
 
     def test_existing_screening_results_are_backfilled_as_tasks(self) -> None:
@@ -331,7 +331,7 @@ class MigrationTest(unittest.TestCase):
             self.assertEqual(tuple(job_row), ("active", 1))
             self.assertEqual(tuple(version_row), (1, 1))
             self.assertEqual(run_version, 0)
-            self.assertEqual(version, 14)
+            self.assertEqual(version, 15)
             connection.close()
 
 

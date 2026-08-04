@@ -6,7 +6,14 @@ import sqlite3
 from collections.abc import Iterable
 from datetime import datetime, timedelta
 
-from core.models import CandidateRecord, CaptureBatch, CaptureBatchItem, ScreeningProfile, ScreeningResult
+from core.models import (
+    CandidateRecord,
+    CaptureBatch,
+    CaptureBatchItem,
+    RecruitmentTask,
+    ScreeningProfile,
+    ScreeningResult,
+)
 from core.utils import now_iso
 from storage.db import DatabaseManager
 from talent.profile_builder import StandardProfileBuilder
@@ -57,6 +64,16 @@ JOB_PROFILE_STATUS_TRANSITIONS = {
     "closed": set(),
 }
 
+RECRUITMENT_TASK_STATUS_TRANSITIONS = {
+    "ready": {"running", "paused", "cancelled"},
+    "running": {"waiting_user", "paused", "completed", "failed", "cancelled"},
+    "waiting_user": {"running", "paused", "cancelled"},
+    "paused": {"running", "cancelled"},
+    "failed": {"running", "cancelled"},
+    "completed": set(),
+    "cancelled": set(),
+}
+
 
 class CandidateRepository:
     def __init__(self, db: DatabaseManager, logger=None, profile_builder=None) -> None:
@@ -70,6 +87,7 @@ class CandidateRepository:
         source_url: str,
         note: str = "",
         role_id: int | None = None,
+        task_id: int | None = None,
     ) -> CaptureBatch:
         connection = self.db.get_connection()
         if role_id is not None:
@@ -78,14 +96,22 @@ class CandidateRepository:
                 raise ValueError("岗位档案不存在")
             if str(profile.get("status") or "") != "active":
                 raise ValueError("所选岗位档案不是招聘中状态，不能创建采集批次")
+        if task_id is not None:
+            task = self.get_recruitment_task(int(task_id))
+            if task is None:
+                raise ValueError("招聘任务不存在")
+            if int(task["role_id"]) != int(role_id or 0):
+                raise ValueError("招聘任务与采集岗位不一致")
+            if str(task["status"]) != "running":
+                raise ValueError("招聘任务不是执行中状态，不能创建采集批次")
         timestamp = now_iso()
         cursor = connection.execute(
             """
             INSERT INTO capture_batches(
-                job_title, source_url, start_time, status, note, role_id, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                job_title, source_url, start_time, status, note, role_id, task_id, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (job_title, source_url, timestamp, "running", note, role_id, timestamp, timestamp),
+            (job_title, source_url, timestamp, "running", note, role_id, task_id, timestamp, timestamp),
         )
         connection.commit()
         batch = CaptureBatch(
@@ -96,11 +122,253 @@ class CandidateRepository:
             status="running",
             note=note,
             role_id=role_id,
+            task_id=task_id,
             created_at=timestamp,
             updated_at=timestamp,
         )
         self._log("info", "Created capture batch %s for job %s", batch.id, job_title)
         return batch
+
+    def save_recruitment_task(self, task: RecruitmentTask) -> RecruitmentTask:
+        connection = self.db.get_connection()
+        task.name = task.name.strip()
+        if not task.name:
+            raise ValueError("招聘任务名称不能为空")
+        if task.platform not in {"boss", "liepin"}:
+            raise ValueError("招聘平台无效")
+        if not task.source_url.strip():
+            raise ValueError("招聘任务必须填写来源页面")
+        if task.target_candidates > 0 and task.target_ssr > task.target_candidates:
+            raise ValueError("SSR 目标不能超过候选人目标")
+        profile = self.get_job_profile(int(task.role_id))
+        if profile is None:
+            raise ValueError("岗位档案不存在")
+        if str(profile.get("status") or "") != "active":
+            raise ValueError("只有招聘中的岗位才能创建或编辑招聘任务")
+        if task.id is None and task.status != "ready":
+            raise ValueError("新招聘任务必须从待启动状态开始")
+        if self.get_job_profile_version(int(task.role_id), int(profile.get("version") or 1)) is None:
+            raise ValueError("当前岗位版本快照不存在，不能创建招聘任务")
+        timestamp = now_iso()
+        if task.id is None:
+            task.profile_version = int(profile.get("version") or 1)
+            cursor = connection.execute(
+                """
+                INSERT INTO recruitment_tasks(
+                    name, role_id, profile_version, platform, source_url,
+                    target_candidates, target_ssr, minimum_rating, view_quota,
+                    greeting_quota, status, current_step, latest_message,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    task.name.strip(), task.role_id, task.profile_version, task.platform,
+                    task.source_url, max(0, task.target_candidates), max(0, task.target_ssr),
+                    task.minimum_rating, max(0, task.view_quota), max(0, task.greeting_quota),
+                    task.status, task.current_step, task.latest_message, timestamp, timestamp,
+                ),
+            )
+            task.id = int(cursor.lastrowid)
+            task.created_at = timestamp
+        else:
+            existing = self.get_recruitment_task(int(task.id))
+            if existing is None:
+                raise ValueError("招聘任务不存在")
+            task.role_id = int(existing["role_id"])
+            task.profile_version = int(existing["profile_version"])
+            connection.execute(
+                """
+                UPDATE recruitment_tasks
+                SET name = ?, platform = ?, source_url = ?, target_candidates = ?,
+                    target_ssr = ?, minimum_rating = ?, view_quota = ?, greeting_quota = ?,
+                    current_step = ?, latest_message = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    task.name.strip(), task.platform, task.source_url,
+                    max(0, task.target_candidates), max(0, task.target_ssr), task.minimum_rating,
+                    max(0, task.view_quota), max(0, task.greeting_quota), task.current_step,
+                    task.latest_message, timestamp, task.id,
+                ),
+            )
+            task.status = str(existing["status"])
+            task.created_at = str(existing["created_at"])
+        connection.commit()
+        task.updated_at = timestamp
+        return task
+
+    def list_recruitment_tasks(self, *, role_id: int | None = None) -> list[dict[str, object]]:
+        sql = """
+            SELECT t.*, p.job_title AS role_title
+            FROM recruitment_tasks t
+            JOIN screening_profiles p ON p.id = t.role_id
+        """
+        params: tuple[object, ...] = ()
+        if role_id is not None:
+            sql += " WHERE t.role_id = ?"
+            params = (role_id,)
+        sql += " ORDER BY t.updated_at DESC, t.id DESC"
+        return [dict(row) for row in self.db.get_connection().execute(sql, params).fetchall()]
+
+    def get_recruitment_task(self, task_id: int) -> dict[str, object] | None:
+        row = self.db.get_connection().execute(
+            """
+            SELECT t.*, p.job_title AS role_title
+            FROM recruitment_tasks t
+            JOIN screening_profiles p ON p.id = t.role_id
+            WHERE t.id = ?
+            """,
+            (task_id,),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def set_recruitment_task_status(
+        self,
+        task_id: int,
+        status: str,
+        *,
+        message: str = "",
+    ) -> RecruitmentTask:
+        row = self.get_recruitment_task(task_id)
+        if row is None:
+            raise ValueError("招聘任务不存在")
+        current = str(row["status"])
+        if status != current and status not in RECRUITMENT_TASK_STATUS_TRANSITIONS.get(current, set()):
+            if current in {"completed", "cancelled"}:
+                raise ValueError("已进入终态的招聘任务不能重新开启")
+            raise ValueError(f"招聘任务状态不能从 {current} 变更为 {status}")
+        if status == "running":
+            profile = self.get_job_profile(int(row["role_id"]))
+            if profile is None or profile.get("status") != "active":
+                raise ValueError("关联岗位不是招聘中状态，不能启动招聘任务")
+            if self.get_job_profile_version(int(row["role_id"]), int(row["profile_version"])) is None:
+                raise ValueError("招聘任务固定的岗位版本不存在")
+        step = {
+            "ready": "待启动", "running": "采集与筛选", "waiting_user": "等待人工处理",
+            "paused": "已暂停", "completed": "已完成", "failed": "执行失败",
+            "cancelled": "已取消",
+        }[status]
+        timestamp = now_iso()
+        self.db.get_connection().execute(
+            """
+            UPDATE recruitment_tasks
+            SET status = ?, current_step = ?, latest_message = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (status, step, message, timestamp, task_id),
+        )
+        self.db.get_connection().commit()
+        updated = self.get_recruitment_task(task_id)
+        return RecruitmentTask(
+            **{key: updated[key] for key in RecruitmentTask.__dataclass_fields__ if key in updated}
+        )
+
+    def get_recruitment_task_summary(self, task_id: int) -> dict[str, object]:
+        task = self.get_recruitment_task(task_id)
+        if task is None:
+            raise ValueError("招聘任务不存在")
+        connection = self.db.get_connection()
+        counts = connection.execute(
+            """
+            SELECT COUNT(DISTINCT b.id) AS batch_count,
+                   COUNT(DISTINCT bi.candidate_id) AS candidate_count
+            FROM capture_batches b
+            LEFT JOIN capture_batch_items bi ON bi.batch_id = b.id
+            WHERE b.task_id = ?
+            """,
+            (task_id,),
+        ).fetchone()
+        runs = connection.execute(
+            "SELECT COUNT(*) AS run_count FROM screening_runs WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+        exports = connection.execute(
+            "SELECT COUNT(*) AS export_count FROM export_records WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+        return {
+            **task,
+            "batch_count": int(counts["batch_count"] or 0),
+            "candidate_count": int(counts["candidate_count"] or 0),
+            "run_count": int(runs["run_count"] or 0),
+            "export_count": int(exports["export_count"] or 0),
+        }
+
+    def update_recruitment_task_progress(
+        self,
+        task_id: int,
+        *,
+        current_step: str,
+        message: str = "",
+    ) -> None:
+        self.db.get_connection().execute(
+            """
+            UPDATE recruitment_tasks
+            SET current_step = ?, latest_message = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (current_step, message, now_iso(), task_id),
+        )
+        self.db.get_connection().commit()
+
+    def pause_active_recruitment_tasks_for_role(self, role_id: int, message: str) -> list[int]:
+        rows = self.db.get_connection().execute(
+            """
+            SELECT id FROM recruitment_tasks
+            WHERE role_id = ? AND status IN ('ready', 'running', 'waiting_user')
+            """,
+            (role_id,),
+        ).fetchall()
+        task_ids = [int(row["id"]) for row in rows]
+        if task_ids:
+            placeholders = ",".join("?" for _ in task_ids)
+            self.db.get_connection().execute(
+                f"""
+                UPDATE recruitment_tasks
+                SET status = 'paused', current_step = '已暂停', latest_message = ?, updated_at = ?
+                WHERE id IN ({placeholders})
+                """,
+                (message, now_iso(), *task_ids),
+            )
+            self.db.get_connection().commit()
+        return task_ids
+
+    def record_export(
+        self,
+        *,
+        file_path: str,
+        export_format: str,
+        row_count: int,
+        batch_id: int | None,
+        role_id: int | None,
+    ) -> int | None:
+        task_id = None
+        if batch_id is not None:
+            row = self.db.get_connection().execute(
+                "SELECT task_id, role_id FROM capture_batches WHERE id = ?", (batch_id,)
+            ).fetchone()
+            if row is not None:
+                task_id = row["task_id"]
+                role_id = role_id or row["role_id"]
+        cursor = self.db.get_connection().execute(
+            """
+            INSERT INTO export_records(task_id, role_id, batch_id, file_path, export_format, row_count, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (task_id, role_id, batch_id, file_path, export_format, row_count, now_iso()),
+        )
+        self.db.get_connection().commit()
+        return int(task_id) if task_id is not None else None
+
+    def list_export_records(self, *, task_id: int | None = None, limit: int = 50) -> list[dict[str, object]]:
+        sql = "SELECT * FROM export_records"
+        params: list[object] = []
+        if task_id is not None:
+            sql += " WHERE task_id = ?"
+            params.append(task_id)
+        sql += " ORDER BY created_at DESC, id DESC LIMIT ?"
+        params.append(max(1, limit))
+        return [dict(row) for row in self.db.get_connection().execute(sql, params).fetchall()]
 
     def find_job_profile_by_title(
         self,
@@ -983,6 +1251,7 @@ class CandidateRepository:
         model: str,
         total_candidates: int,
         origin: str = "manual",
+        task_id: int | None = None,
     ) -> int:
         connection = self.db.get_connection()
         profile = self.get_job_profile(profile_id)
@@ -990,21 +1259,33 @@ class CandidateRepository:
             raise ValueError("岗位档案不存在")
         if str(profile.get("status") or "") != "active":
             raise ValueError("所选岗位档案不是招聘中状态，不能创建筛选任务")
+        if task_id is not None:
+            task = self.get_recruitment_task(task_id)
+            if task is None or int(task["role_id"]) != profile_id:
+                raise ValueError("招聘任务与筛选岗位不一致")
+            if str(task["status"]) != "running":
+                raise ValueError("招聘任务不是执行中状态，不能创建筛选任务")
+        effective_profile_version = (
+            int(task["profile_version"])
+            if task_id is not None
+            else int(profile.get("version") or 1)
+        )
         cursor = connection.execute(
             """
             INSERT INTO screening_runs(
-                profile_id, profile_version, source_job_title, batch_id, provider, model, origin, status,
+                profile_id, profile_version, source_job_title, batch_id, provider, model, origin, task_id, status,
                 total_candidates, completed_candidates, failed_candidates, started_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, 0, 0, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, 0, 0, ?)
             """,
             (
                 profile_id,
-                int(profile.get("version") or 1),
+                effective_profile_version,
                 source_job_title,
                 batch_id,
                 provider,
                 model,
                 origin,
+                task_id,
                 total_candidates,
                 now_iso(),
             ),

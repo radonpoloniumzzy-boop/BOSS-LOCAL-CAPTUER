@@ -53,6 +53,11 @@ class CardImportService:
             source_url,
             note="; ".join(note_parts),
             role_id=(int(job_profile["id"]) if job_profile is not None else None),
+            task_id=(
+                int(payload["recruitment_task_id"])
+                if payload.get("recruitment_task_id") not in (None, "")
+                else None
+            ),
         )
         seen_keys: set[str] = set()
         parsed_records = []
@@ -98,6 +103,7 @@ class CardImportService:
                     "source": "chrome_extension",
                     "job_title": job_title,
                     "job_profile_id": int(job_profile["id"]) if job_profile is not None else None,
+                    "recruitment_task_id": batch.task_id,
                     "source_url": source_url,
                     "automation_requested": bool(meta.get("automation_requested")),
                 }

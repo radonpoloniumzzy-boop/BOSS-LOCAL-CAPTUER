@@ -768,6 +768,72 @@ def apply_migrations(connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_role_matches_role_recruitment_rating_updated "
         "ON candidate_role_matches(role_id, recruitment_status, latest_rating, updated_at DESC)"
     )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS recruitment_tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            role_id INTEGER NOT NULL,
+            profile_version INTEGER NOT NULL,
+            platform TEXT NOT NULL DEFAULT 'boss',
+            source_url TEXT NOT NULL DEFAULT '',
+            target_candidates INTEGER NOT NULL DEFAULT 0,
+            target_ssr INTEGER NOT NULL DEFAULT 0,
+            minimum_rating TEXT NOT NULL DEFAULT 'SR',
+            view_quota INTEGER NOT NULL DEFAULT 0,
+            greeting_quota INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'ready',
+            current_step TEXT NOT NULL DEFAULT '待启动',
+            latest_message TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(role_id) REFERENCES screening_profiles(id) ON DELETE RESTRICT
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_recruitment_tasks_role_status_updated "
+        "ON recruitment_tasks(role_id, status, updated_at DESC)"
+    )
+    batch_columns = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(capture_batches)").fetchall()
+    }
+    if "task_id" not in batch_columns:
+        connection.execute("ALTER TABLE capture_batches ADD COLUMN task_id INTEGER")
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_capture_batches_task_start "
+        "ON capture_batches(task_id, start_time DESC)"
+    )
+    run_columns = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(screening_runs)").fetchall()
+    }
+    if "task_id" not in run_columns:
+        connection.execute("ALTER TABLE screening_runs ADD COLUMN task_id INTEGER")
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_screening_runs_task_started "
+        "ON screening_runs(task_id, started_at DESC)"
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS export_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id INTEGER,
+            role_id INTEGER,
+            batch_id INTEGER,
+            file_path TEXT NOT NULL,
+            export_format TEXT NOT NULL,
+            row_count INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(task_id) REFERENCES recruitment_tasks(id) ON DELETE SET NULL,
+            FOREIGN KEY(role_id) REFERENCES screening_profiles(id) ON DELETE SET NULL,
+            FOREIGN KEY(batch_id) REFERENCES capture_batches(id) ON DELETE SET NULL
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_export_records_task_created "
+        "ON export_records(task_id, created_at DESC)"
+    )
     connection.execute("DELETE FROM schema_version")
-    connection.execute("INSERT INTO schema_version(version) VALUES (14)")
+    connection.execute("INSERT INTO schema_version(version) VALUES (15)")
     connection.commit()

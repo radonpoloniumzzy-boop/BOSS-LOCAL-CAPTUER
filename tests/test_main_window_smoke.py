@@ -62,7 +62,7 @@ class MainWindowSmokeTest(unittest.TestCase):
                         window._page_scroll_areas[product_index].widget(),
                         window.product_development_page,
                     )
-                    self.assertIn("0.4.0-dev", window.product_development_page.version_value.text())
+                    self.assertIn("0.5.0-dev", window.product_development_page.version_value.text())
                     version_statuses = {
                         window.product_development_page.version_table.item(row, 2).text()
                         for row in range(window.product_development_page.version_table.rowCount())
@@ -118,6 +118,15 @@ class MainWindowSmokeTest(unittest.TestCase):
                         for index in range(window.dashboard_page.job_profile_combo.count())
                     }
                     self.assertIn("数据分析师", dashboard_titles)
+                    self.assertIn("招聘任务", window._navigation_full_labels)
+                    window.refresh_recruitment_tasks()
+                    window.recruitment_tasks_page.name_input.setText("数据分析师首轮 Mapping")
+                    window.recruitment_tasks_page.target_candidates_input.setValue(30)
+                    window.recruitment_tasks_page.save_button.click()
+                    self.assertIn(
+                        "数据分析师首轮 Mapping",
+                        {row["name"] for row in window.repository.list_recruitment_tasks()},
+                    )
                 finally:
                     window.close()
                     QTest.qWait(50)

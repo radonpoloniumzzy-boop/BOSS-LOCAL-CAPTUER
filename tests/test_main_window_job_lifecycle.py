@@ -20,6 +20,7 @@ class MainWindowJobLifecycleTest(unittest.TestCase):
         worker = Mock()
         stop_capture = _SignalSpy()
         window = SimpleNamespace(
+            repository=SimpleNamespace(pause_active_recruitment_tasks_for_role=Mock(return_value=[11])),
             config=SimpleNamespace(automation_flow=SimpleNamespace(profile_id=7, enabled=True)),
             config_service=SimpleNamespace(save=Mock()),
             _automation_armed=True,
@@ -44,9 +45,13 @@ class MainWindowJobLifecycleTest(unittest.TestCase):
         window.automation_worker.request_stop.assert_called_once_with()
         self.assertEqual(stop_capture.calls, 0)
         window.config_service.save.assert_called_once_with(window.config)
+        window.repository.pause_active_recruitment_tasks_for_role.assert_called_once_with(
+            7, "岗位已暂停或结束，关联招聘任务自动暂停。"
+        )
 
     def test_pausing_unrelated_job_does_not_clear_active_automation_queue(self) -> None:
         window = SimpleNamespace(
+            repository=SimpleNamespace(pause_active_recruitment_tasks_for_role=Mock(return_value=[])),
             config=SimpleNamespace(automation_flow=SimpleNamespace(profile_id=8, enabled=True)),
             config_service=SimpleNamespace(save=Mock()),
             _automation_armed=True,

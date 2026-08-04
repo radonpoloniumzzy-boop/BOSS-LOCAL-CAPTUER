@@ -85,11 +85,19 @@ class ExportService:
                 mode,
                 export_format,
             )
+        task_id = self.repository.record_export(
+            file_path=str(target_path),
+            export_format=export_format,
+            row_count=len(rows),
+            batch_id=batch_id,
+            role_id=int(match_role_id) if match_role_id not in (None, "") else None,
+        )
         return ExportResult(
             file_path=str(target_path),
             row_count=len(rows),
             mode=mode,
             export_format=export_format,
+            task_id=task_id,
         )
 
     def _export_csv(self, target_path: Path, rows: list[dict[str, object]], columns: list[str]) -> None:

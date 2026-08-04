@@ -3095,6 +3095,9 @@ if (!globalThis.__bossLocalChatBatchRunner) {
       jobProfileId: settings.jobProfileId === null || settings.jobProfileId === undefined
         ? null
         : Number(settings.jobProfileId),
+      recruitmentTaskId: settings.recruitmentTaskId === null || settings.recruitmentTaskId === undefined
+        ? null
+        : Number(settings.recruitmentTaskId),
       jobTitle: String(settings.jobTitle || "").trim(),
     };
   }
@@ -3115,6 +3118,9 @@ if (!globalThis.__bossLocalChatBatchRunner) {
           jobProfileId: payload.result?.job_profile_id === null || payload.result?.job_profile_id === undefined
             ? settings.jobProfileId
             : Number(payload.result.job_profile_id),
+          recruitmentTaskId: payload.result?.recruitment_task_id === null || payload.result?.recruitment_task_id === undefined
+            ? settings.recruitmentTaskId
+            : Number(payload.result.recruitment_task_id),
           jobTitle: String(payload.result?.job_title || settings.jobTitle),
         };
       }

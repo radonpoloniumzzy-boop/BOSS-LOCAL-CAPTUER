@@ -284,6 +284,7 @@ class AIScreeningWorker(QObject):
                 origin=str(self.payload.get("origin") or "manual"),
                 progress_callback=self.progress.emit,
                 run_id=self.payload.get("run_id"),
+                task_id=self.payload.get("task_id"),
             )
             self.finished.emit(result)
         except Exception as exc:

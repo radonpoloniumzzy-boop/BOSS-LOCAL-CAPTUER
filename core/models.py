@@ -59,6 +59,7 @@ class AIProviderConfig:
 @dataclass(slots=True)
 class AutomationFlowConfig:
     enabled: bool = False
+    task_id: int | None = None
     profile_id: int | None = None
     job_title: str = ""
     source_url: str = "https://www.zhipin.com/web/geek/recommend"
@@ -108,6 +109,7 @@ class CollectOptions:
     note: str = ""
     auto_export: bool = False
     role_id: int | None = None
+    task_id: int | None = None
 
 
 @dataclass(slots=True)
@@ -143,6 +145,7 @@ class CaptureBatch:
     status: str
     note: str = ""
     role_id: int | None = None
+    task_id: int | None = None
     id: int | None = None
     end_time: str = ""
     total_collected: int = 0
@@ -215,6 +218,7 @@ class ExportResult:
     row_count: int
     mode: str
     export_format: str = "csv"
+    task_id: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -254,6 +258,29 @@ class ScreeningProfile:
 
 # The existing type name remains as a compatibility alias for older integrations.
 JobProfile = ScreeningProfile
+
+
+@dataclass(slots=True)
+class RecruitmentTask:
+    name: str
+    role_id: int
+    platform: str = "boss"
+    source_url: str = ""
+    profile_version: int = 0
+    target_candidates: int = 0
+    target_ssr: int = 0
+    minimum_rating: str = "SR"
+    view_quota: int = 0
+    greeting_quota: int = 0
+    status: str = "ready"
+    current_step: str = "待启动"
+    latest_message: str = ""
+    id: int | None = None
+    created_at: str = ""
+    updated_at: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 @dataclass(slots=True)

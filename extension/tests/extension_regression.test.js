@@ -465,6 +465,9 @@ function testCollectionCarriesCanonicalJobProfileId() {
   assert(popup.includes("/api/extension/config"));
   assert(content.includes("job_profile_id: settings.jobProfileId"));
   assert(chatRunner.includes("jobProfileId: payload.result?.job_profile_id"));
+  assert(popup.includes("recruitment_task_id: settings.recruitmentTaskId"));
+  assert(content.includes("recruitment_task_id: settings.recruitmentTaskId"));
+  assert(popup.includes("window.setTimeout(() => window.close(), 1200)"));
 }
 
 function testFilenameTemplatesMatchDesktopFixtures() {

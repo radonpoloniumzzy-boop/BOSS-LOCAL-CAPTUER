@@ -1,6 +1,7 @@
 const DEFAULTS = {
   jobTitle: "Boss 推荐牛人",
   jobProfileId: null,
+  recruitmentTaskId: null,
   apiBase: "http://127.0.0.1:17863",
   apiToken: "",
   scrollMode: "hold_end",
@@ -64,6 +65,7 @@ const pairingCodeInput = document.getElementById("pairingCode");
 const applyPairingCodeButton = document.getElementById("applyPairingCode");
 let batchStatusTimer = null;
 let activeJobProfileId = null;
+let activeRecruitmentTaskId = null;
 
 automationAutoButton.addEventListener("click", () => runAutomation());
 applyPairingCodeButton.addEventListener("click", () => applyPairingCodeAndTest());
@@ -94,6 +96,7 @@ async function init() {
     scrollModeDefaultVersion: null,
   });
   activeJobProfileId = stored.jobProfileId === null ? null : Number(stored.jobProfileId);
+  activeRecruitmentTaskId = stored.recruitmentTaskId === null ? null : Number(stored.recruitmentTaskId);
   if (stored.scrollWaitDefaultVersion === null && Number(stored.scrollWaitMs) === OLD_DEFAULT_SCROLL_WAIT_MS) {
     stored.scrollWaitMs = DEFAULTS.scrollWaitMs;
     await chrome.storage.local.set({
@@ -139,10 +142,12 @@ async function runAutomation() {
     const automation = await startDesktopAutomation(settings, tab.url);
     fields.jobTitle.value = automation.job_title || automation.profile_job_title || settings.jobTitle;
     activeJobProfileId = automation.profile_id === null ? null : Number(automation.profile_id);
+    activeRecruitmentTaskId = automation.task_id === null ? null : Number(automation.task_id);
     await chrome.storage.local.set({
       ...collectSettings(),
       jobTitle: fields.jobTitle.value,
       jobProfileId: activeJobProfileId,
+      recruitmentTaskId: activeRecruitmentTaskId,
     });
     setStatus(
       [
@@ -153,6 +158,7 @@ async function runAutomation() {
       ].join("\n"),
     );
     await runCollection(true, { automationRequested: true, automation });
+    window.setTimeout(() => window.close(), 1200);
   } catch (error) {
     setStatus(`AUTO 启动失败。\n${error.message || String(error)}`);
   } finally {
@@ -332,10 +338,14 @@ async function loadDesktopJobProfile(settings) {
     throw new Error("请先在桌面端仪表盘选择招聘中的岗位档案。")
   }
   activeJobProfileId = Number(profileId);
+  activeRecruitmentTaskId = payload.result?.recruitment_task_id === null || payload.result?.recruitment_task_id === undefined
+    ? null
+    : Number(payload.result.recruitment_task_id);
   fields.jobTitle.value = String(payload.result?.job_title || settings.jobTitle);
   const synced = {
     ...settings,
     jobProfileId: activeJobProfileId,
+    recruitmentTaskId: activeRecruitmentTaskId,
     jobTitle: fields.jobTitle.value,
   };
   await chrome.storage.local.set(synced);
@@ -613,6 +623,7 @@ async function importCards(settings, sourceUrl, merged, automationRequested = fa
       },
       body: JSON.stringify({
         job_profile_id: settings.jobProfileId,
+        recruitment_task_id: settings.recruitmentTaskId,
         job_title: settings.jobTitle,
         source_url: sourceUrl,
         cards: merged.cards,
@@ -699,6 +710,7 @@ function collectSettings() {
   fields.apiBase.value = apiBase;
   return {
     jobProfileId: activeJobProfileId,
+    recruitmentTaskId: activeRecruitmentTaskId,
     jobTitle: fields.jobTitle.value.trim() || DEFAULTS.jobTitle,
     apiBase,
     apiToken: fields.apiToken.value.trim(),

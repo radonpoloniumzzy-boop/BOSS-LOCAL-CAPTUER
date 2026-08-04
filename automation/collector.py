@@ -184,6 +184,7 @@ class CaptureService:
             options.source_url,
             options.note,
             role_id=options.role_id,
+            task_id=options.task_id,
         )
         seen_keys: set[str] = set()
         total_inserted_candidates = 0

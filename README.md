@@ -95,6 +95,8 @@ The extension popup lets you set:
 ## UI Pages
 
 - `Dashboard`: open browser, show status, show local API endpoint, export latest batch
+- `Job Center`: maintain one versioned source of truth for each hiring role
+- `Recruitment Tasks`: lock a job version, set platform targets and quotas, start the two-window workflow, and open recent exports
 - `Automation Flow`: choose a saved screening profile and automatically screen each newly collected batch
 - `Candidates`: search, filter, inspect details, export current result set
 - `Settings`: browser path, export path, selectors path, local API port, logging, scroll config
@@ -102,6 +104,8 @@ The extension popup lets you set:
 - `Review`: V3 placeholder
 
 ## Automated Collection And Screening
+
+Recommended workflow: create a job in `Job Center`, create and start a task in `Recruitment Tasks`, then click `AUTO` once in the recruiting platform. The app links capture batches, AI runs, and exports to that task. The extension popup closes after the AUTO run finishes, exports can be opened inside the task page, and AI screening uses the configured API instead of a separate AI website.
 
 1. Create and save the target role in `AI Screen`, including its JD and screening prompt.
 2. Open `Automation Flow` and select that saved screening profile.

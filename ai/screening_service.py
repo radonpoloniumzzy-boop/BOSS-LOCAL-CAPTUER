@@ -75,6 +75,7 @@ class ScreeningService:
         origin: str = "manual",
         progress_callback: Callable[[ScreeningProgress], None] | None = None,
         run_id: int | None = None,
+        task_id: int | None = None,
     ) -> dict[str, object]:
         if self._stop_requested:
             raise RuntimeError("AI 筛选任务在启动前已停止")
@@ -114,6 +115,7 @@ class ScreeningService:
                 model=model,
                 total_candidates=len(candidates),
                 origin=origin,
+                task_id=task_id,
             )
         self.repository.create_screening_tasks(
             run_id=run_id,
