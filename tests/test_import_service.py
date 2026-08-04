@@ -25,8 +25,17 @@ class CardImportServiceTest(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def test_import_cards_creates_batch_and_candidates(self) -> None:
+        profile = self.repository.save_job_profile(
+            JobProfile(
+                job_title="Recruiting Intern",
+                jd_text="Recruiting support",
+                prompt_text="Screen recruiting experience",
+                status="active",
+            )
+        )
         result = self.service.import_cards(
             {
+                "job_profile_id": profile.id,
                 "job_title": "Recruiting Intern",
                 "source_url": "https://www.zhipin.com/web/geek/recommend",
                 "cards": [
@@ -62,8 +71,17 @@ class CardImportServiceTest(unittest.TestCase):
         self.assertEqual(len(self.repository.list_candidates()), 1)
 
     def test_import_liepin_cards_reuses_existing_candidate_model(self) -> None:
+        profile = self.repository.save_job_profile(
+            JobProfile(
+                job_title="猎聘推荐人才",
+                jd_text="猎聘人才采集",
+                prompt_text="筛选人才",
+                status="active",
+            )
+        )
         result = self.service.import_cards(
             {
+                "job_profile_id": profile.id,
                 "job_title": "猎聘推荐人才",
                 "source_url": "https://lpt.liepin.com/recommend",
                 "cards": [
@@ -122,6 +140,52 @@ class CardImportServiceTest(unittest.TestCase):
         )
 
         self.assertEqual(batch["role_id"], profile.id)
+
+    def test_explicit_job_profile_id_survives_renamed_source_title(self) -> None:
+        profile = self.repository.save_job_profile(
+            JobProfile(job_title="当前统一名称", jd_text="", prompt_text="", status="active")
+        )
+
+        result = self.service.import_cards(
+            {
+                "job_profile_id": profile.id,
+                "job_title": "插件缓存的旧名称",
+                "source_url": "https://www.zhipin.com/web/geek/recommend",
+                "cards": [{"raw_card_text": "王五 五年招聘经验", "name": "王五"}],
+            }
+        )
+        batch = next(
+            row for row in self.repository.list_batches() if int(row["id"]) == int(result["batch_id"])
+        )
+
+        self.assertEqual(batch["role_id"], profile.id)
+        self.assertEqual(result["job_profile_id"], profile.id)
+        self.assertEqual(batch["job_title"], "插件缓存的旧名称")
+
+    def test_import_rejects_inactive_explicit_job_profile(self) -> None:
+        profile = self.repository.save_job_profile(
+            JobProfile(job_title="暂停岗位", jd_text="", prompt_text="", status="active")
+        )
+        self.repository.set_job_profile_status(int(profile.id), "paused")
+
+        with self.assertRaisesRegex(ValueError, "不是招聘中"):
+            self.service.import_cards(
+                {
+                    "job_profile_id": profile.id,
+                    "job_title": "暂停岗位",
+                    "source_url": "https://www.zhipin.com/web/geek/recommend",
+                    "cards": [{"raw_card_text": "赵六 招聘经验", "name": "赵六"}],
+                }
+            )
+
+        with self.assertRaisesRegex(ValueError, "不是招聘中"):
+            self.service.import_cards(
+                {
+                    "job_title": "暂停岗位",
+                    "source_url": "https://www.zhipin.com/web/geek/recommend",
+                    "cards": [{"raw_card_text": "钱七 招聘经验", "name": "钱七"}],
+                }
+            )
 
 
 if __name__ == "__main__":

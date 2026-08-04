@@ -9,6 +9,7 @@ from pathlib import Path
 from automation.importer import CardImportService
 from automation.parser import CandidateParser
 from core.local_api import LocalApiServer
+from core.models import JobProfile
 from storage.db import DatabaseManager
 from storage.repository import CandidateRepository
 
@@ -88,8 +89,17 @@ class LocalApiServerTest(unittest.TestCase):
         self.assertEqual(payload["result"]["job_title"], "证券交易员")
 
     def test_import_endpoint(self) -> None:
+        profile = self.repository.save_job_profile(
+            JobProfile(
+                job_title="Recruiting Intern",
+                jd_text="Recruiting support",
+                prompt_text="Screen recruiting experience",
+                status="active",
+            )
+        )
         body = json.dumps(
             {
+                "job_profile_id": profile.id,
                 "job_title": "Recruiting Intern",
                 "source_url": "https://www.zhipin.com/web/geek/recommend",
                 "cards": [

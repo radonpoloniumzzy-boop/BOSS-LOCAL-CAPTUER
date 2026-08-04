@@ -454,6 +454,19 @@ function testPopupSupportsPairingAndAuthenticatedConnectionCheck() {
   assert(popup.includes("Token 不正确"));
 }
 
+function testCollectionCarriesCanonicalJobProfileId() {
+  const popup = fs.readFileSync(path.join(EXTENSION_DIR, "popup.js"), "utf8");
+  const content = fs.readFileSync(path.join(EXTENSION_DIR, "content_script.js"), "utf8");
+  const chatRunner = fs.readFileSync(path.join(EXTENSION_DIR, "chat_batch_runner.js"), "utf8");
+  assert(popup.includes("jobProfileId: activeJobProfileId"));
+  assert(popup.includes("job_profile_id: settings.jobProfileId"));
+  assert(popup.includes("if (!options.automationRequested)"));
+  assert(popup.includes("baseSettings = await loadDesktopJobProfile(baseSettings)"));
+  assert(popup.includes("/api/extension/config"));
+  assert(content.includes("job_profile_id: settings.jobProfileId"));
+  assert(chatRunner.includes("jobProfileId: payload.result?.job_profile_id"));
+}
+
 function testFilenameTemplatesMatchDesktopFixtures() {
   const source = fs.readFileSync(path.join(EXTENSION_DIR, "chat_batch_runner.js"), "utf8");
   const start = source.indexOf("function renderFilenameTemplate(");
@@ -499,6 +512,7 @@ async function main() {
   testRuntimeFingerprintAndVersionAwareRunnerInjection();
   testPairingCodeParsesAndRejectsInvalidInput();
   testPopupSupportsPairingAndAuthenticatedConnectionCheck();
+  testCollectionCarriesCanonicalJobProfileId();
   testFilenameTemplatesMatchDesktopFixtures();
   console.log("extension regression tests passed");
 }

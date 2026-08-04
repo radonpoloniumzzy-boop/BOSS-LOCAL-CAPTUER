@@ -50,6 +50,13 @@ SYSTEM_REASON_CODES = {
 
 REASON_CODES = USER_REASON_CODES | SYSTEM_REASON_CODES
 
+JOB_PROFILE_STATUS_TRANSITIONS = {
+    "draft": {"active", "closed"},
+    "active": {"paused", "closed"},
+    "paused": {"active", "closed"},
+    "closed": set(),
+}
+
 
 class CandidateRepository:
     def __init__(self, db: DatabaseManager, logger=None, profile_builder=None) -> None:
@@ -65,6 +72,12 @@ class CandidateRepository:
         role_id: int | None = None,
     ) -> CaptureBatch:
         connection = self.db.get_connection()
+        if role_id is not None:
+            profile = self.get_job_profile(int(role_id))
+            if profile is None:
+                raise ValueError("岗位档案不存在")
+            if str(profile.get("status") or "") != "active":
+                raise ValueError("所选岗位档案不是招聘中状态，不能创建采集批次")
         timestamp = now_iso()
         cursor = connection.execute(
             """
@@ -89,9 +102,15 @@ class CandidateRepository:
         self._log("info", "Created capture batch %s for job %s", batch.id, job_title)
         return batch
 
-    def find_job_profile_by_title(self, job_title: str) -> dict[str, object] | None:
+    def find_job_profile_by_title(
+        self,
+        job_title: str,
+        *,
+        active_only: bool = False,
+    ) -> dict[str, object] | None:
+        status_sql = " AND status = 'active'" if active_only else ""
         row = self.db.get_connection().execute(
-            "SELECT * FROM screening_profiles WHERE job_title = ?",
+            f"SELECT * FROM screening_profiles WHERE job_title = ?{status_sql}",
             (str(job_title or "").strip(),),
         ).fetchone()
         return self._decode_screening_profile(row) if row is not None else None
@@ -685,20 +704,41 @@ class CandidateRepository:
             "latest_batch_status": str(latest_batch["status"]) if latest_batch else "idle",
         }
 
-    def save_job_profile(self, profile: ScreeningProfile) -> ScreeningProfile:
+    def save_job_profile(
+        self,
+        profile: ScreeningProfile,
+        *,
+        allow_title_upsert: bool = False,
+    ) -> ScreeningProfile:
         connection = self.db.get_connection()
         timestamp = now_iso()
         existing = None
         if profile.id is not None:
             existing = connection.execute(
-                "SELECT id, created_at, version FROM screening_profiles WHERE id = ?",
+                "SELECT id, created_at, version, status FROM screening_profiles WHERE id = ?",
                 (profile.id,),
             ).fetchone()
         if existing is None:
-            existing = connection.execute(
-                "SELECT id, created_at, version FROM screening_profiles WHERE job_title = ?",
+            title_match = connection.execute(
+                "SELECT id, created_at, version, status FROM screening_profiles WHERE job_title = ?",
                 (profile.job_title,),
             ).fetchone()
+            if title_match is not None and not allow_title_upsert:
+                raise ValueError("同名岗位档案已存在")
+            existing = title_match
+
+        if profile.id is not None:
+            duplicate = connection.execute(
+                "SELECT id FROM screening_profiles WHERE job_title = ? AND id <> ?",
+                (profile.job_title, int(profile.id)),
+            ).fetchone()
+            if duplicate is not None:
+                raise ValueError("同名岗位档案已存在")
+        if existing is not None:
+            self._validate_job_profile_status_transition(
+                str(existing["status"] or "draft"),
+                profile.status,
+            )
 
         values = (
             profile.job_title,
@@ -775,7 +815,9 @@ class CandidateRepository:
         return profile
 
     def save_screening_profile(self, profile: ScreeningProfile) -> ScreeningProfile:
-        return self.save_job_profile(profile)
+        if profile.status == "draft":
+            profile.status = "active"
+        return self.save_job_profile(profile, allow_title_upsert=True)
 
     def list_job_profiles(self, *, active_only: bool = False) -> list[dict[str, object]]:
         connection = self.db.get_connection()
@@ -825,6 +867,23 @@ class CandidateRepository:
                 }
             )
         return result
+
+    def get_job_profile_version(self, profile_id: int, version: int) -> dict[str, object] | None:
+        row = self.db.get_connection().execute(
+            """
+            SELECT snapshot_json
+            FROM job_profile_versions
+            WHERE profile_id = ? AND version = ?
+            """,
+            (profile_id, version),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            snapshot = json.loads(str(row["snapshot_json"] or "{}"))
+        except (TypeError, json.JSONDecodeError):
+            return None
+        return snapshot if isinstance(snapshot, dict) else None
 
     @staticmethod
     def _decode_screening_profile(row: sqlite3.Row) -> dict[str, object]:
@@ -900,6 +959,17 @@ class CandidateRepository:
         profile.status = status
         return self.save_job_profile(profile)
 
+    @staticmethod
+    def _validate_job_profile_status_transition(current: str, target: str) -> None:
+        if target not in JOB_PROFILE_STATUS_TRANSITIONS:
+            raise ValueError("岗位状态无效")
+        if target == current:
+            return
+        if target not in JOB_PROFILE_STATUS_TRANSITIONS.get(current, set()):
+            if current == "closed":
+                raise ValueError("已结束的岗位档案不能重新开启")
+            raise ValueError(f"岗位状态不能从 {current} 变更为 {target}")
+
     def delete_screening_profile(self, profile_id: int) -> None:
         self.set_job_profile_status(profile_id, "closed")
 
@@ -918,6 +988,8 @@ class CandidateRepository:
         profile = self.get_job_profile(profile_id)
         if profile is None:
             raise ValueError("岗位档案不存在")
+        if str(profile.get("status") or "") != "active":
+            raise ValueError("所选岗位档案不是招聘中状态，不能创建筛选任务")
         cursor = connection.execute(
             """
             INSERT INTO screening_runs(
@@ -954,6 +1026,11 @@ class CandidateRepository:
         candidate_texts: dict[int, str] | None = None,
         max_retry_count: int = 2,
     ) -> int:
+        profile = self.get_job_profile(role_id)
+        if profile is None:
+            raise ValueError("岗位档案不存在")
+        if str(profile.get("status") or "") != "active":
+            raise ValueError("所选岗位档案不是招聘中状态，不能创建筛选任务")
         connection = self.db.get_connection()
         timestamp = now_iso()
         inserted = 0

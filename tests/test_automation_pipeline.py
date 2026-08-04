@@ -31,8 +31,19 @@ class AutomationPipelineTest(unittest.TestCase):
             db.initialize()
             repository = CandidateRepository(db)
             importer = CardImportService(repository, CandidateParser())
+            prompt_manager = PromptManager(Path(tmp_dir) / "prompts")
+            prompt = prompt_manager.build_from_jd("Java工程师", "熟悉 Java 和 Spring Cloud")
+            profile = repository.save_screening_profile(
+                ScreeningProfile(
+                    job_title="Java工程师",
+                    jd_text="熟悉 Java 和 Spring Cloud",
+                    prompt_text=prompt,
+                    prompt_source="generated",
+                )
+            )
             import_result = importer.import_cards(
                 {
+                    "job_profile_id": profile.id,
                     "job_title": "Java工程师",
                     "source_url": "https://www.zhipin.com/web/geek/recommend",
                     "cards": [
@@ -48,16 +59,6 @@ class AutomationPipelineTest(unittest.TestCase):
                         },
                     ],
                 }
-            )
-            prompt_manager = PromptManager(Path(tmp_dir) / "prompts")
-            prompt = prompt_manager.build_from_jd("Java工程师", "熟悉 Java 和 Spring Cloud")
-            profile = repository.save_screening_profile(
-                ScreeningProfile(
-                    job_title="Java工程师",
-                    jd_text="熟悉 Java 和 Spring Cloud",
-                    prompt_text=prompt,
-                    prompt_source="generated",
-                )
             )
             candidates = repository.list_screening_candidates(
                 batch_id=int(import_result["batch_id"])

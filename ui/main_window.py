@@ -136,6 +136,8 @@ class MainWindow(QMainWindow):
         self._queued_automation_batches: list[dict[str, object]] = []
         self._automation_config_lock = threading.RLock()
         self._capture_running = False
+        self._active_capture_profile_id: int | None = None
+        self._active_screening_profile_id: int | None = None
 
         self._build_ui()
         self._setup_logging_panel()
@@ -524,6 +526,10 @@ class MainWindow(QMainWindow):
         if collect_options.role_id is None:
             QMessageBox.warning(self, "请选择岗位", "请先在岗位中心建立并启用岗位档案。")
             return
+        selected_profile = self.repository.get_job_profile(int(collect_options.role_id))
+        if selected_profile is None or selected_profile.get("status") != "active":
+            QMessageBox.warning(self, "岗位不可用", "所选岗位不是招聘中状态，请刷新后重新选择。")
+            return
         if "zhipin.com" in (collect_options.source_url or "").lower():
             endpoint = f"http://127.0.0.1:{self.config.local_api_port}"
             message = (
@@ -544,6 +550,8 @@ class MainWindow(QMainWindow):
             return
 
         self._capture_running = True
+        self._active_capture_profile_id = int(collect_options.role_id)
+        self.automation_worker.capture_service.reset_stop()
         self.dashboard_page.set_running(True)
         self.dashboard_page.set_status("running")
         self.statusBar().showMessage("正在开始采集...")
@@ -1125,6 +1133,8 @@ class MainWindow(QMainWindow):
             if errors:
                 raise ValueError("筛选条件包含不能用于自动招聘评级的条件：" + "、".join(errors))
             saved = self.repository.save_job_profile(profile)
+            if existing and saved.status != "active":
+                self._stop_work_for_job_profile(int(saved.id))
             self.refresh_job_profiles(int(saved.id))
             self.refresh_ai_screen()
             self.refresh_automation_flow()
@@ -1148,9 +1158,8 @@ class MainWindow(QMainWindow):
     def _change_job_profile_status(self, profile_id: int, status: str) -> None:
         try:
             profile = self.repository.set_job_profile_status(profile_id, status)
-            if status != "active" and self.config.automation_flow.profile_id == profile_id:
-                self.config.automation_flow.enabled = False
-                self.config_service.save(self.config)
+            if status != "active":
+                self._stop_work_for_job_profile(profile_id)
             self.refresh_job_profiles(profile_id)
             self.refresh_ai_screen()
             self.refresh_automation_flow()
@@ -1159,6 +1168,24 @@ class MainWindow(QMainWindow):
             )
         except Exception as exc:
             QMessageBox.warning(self, "无法更新岗位状态", str(exc))
+
+    def _stop_work_for_job_profile(self, profile_id: int) -> None:
+        if self.config.automation_flow.profile_id == profile_id:
+            self.config.automation_flow.enabled = False
+            self.config_service.save(self.config)
+            self._automation_armed = False
+            self._queued_automation_batches.clear()
+            self.automation_flow_page.set_waiting(False)
+        if (
+            self._ai_screening_thread is not None
+            and self._active_screening_profile_id == profile_id
+        ):
+            self._ai_screening_thread[1].request_stop()
+            self.automation_flow_page.set_status("岗位已暂停或结束，正在停止关联的 AI 筛选任务。")
+            self.ai_page.set_status("岗位已暂停或结束，正在停止关联的 AI 筛选任务。")
+        if self._capture_running and self._active_capture_profile_id == profile_id:
+            self.automation_worker.request_stop()
+            self.dashboard_page.set_message("岗位已暂停或结束，正在停止关联的采集任务。")
 
     def _ensure_builtin_screening_profiles(self) -> None:
         if any(str(row.get("job_title") or "") == "证券交易员" for row in self.repository.list_screening_profiles()):
@@ -1189,6 +1216,7 @@ class MainWindow(QMainWindow):
 
     def _delete_screening_profile(self, profile_id: int) -> None:
         self.repository.delete_screening_profile(profile_id)
+        self._stop_work_for_job_profile(profile_id)
         if self.config.automation_flow.profile_id == profile_id:
             self.config.automation_flow.enabled = False
             self.config.automation_flow.profile_id = None
@@ -1237,10 +1265,21 @@ class MainWindow(QMainWindow):
         if run is None:
             QMessageBox.warning(self, "Run not found", f"Screening run #{run_id} was not found.")
             return
-        profile = self.repository.get_screening_profile(int(run["profile_id"]))
-        if profile is None:
+        current_profile = self.repository.get_job_profile(int(run["profile_id"]))
+        if current_profile is None:
             QMessageBox.warning(self, "Profile missing", "The screening profile for this run no longer exists.")
             return
+        run_version = int(run["profile_version"] or 0)
+        profile = (
+            self.repository.get_job_profile_version(int(run["profile_id"]), run_version)
+            if run_version > 0
+            else None
+        )
+        if profile is None:
+            if run_version > 0:
+                QMessageBox.warning(self, "Version missing", "This run's saved job profile version is missing.")
+                return
+            profile = current_profile
         candidates = self.repository.list_screening_run_candidates(run_id)
         if not candidates:
             QMessageBox.information(self, "No tasks", "This run has no persisted screening tasks to resume.")
@@ -1291,6 +1330,23 @@ class MainWindow(QMainWindow):
         self._resume_ai_screening_run(run_id, reset_failed=False)
 
     def _launch_ai_screening(self, worker_payload: dict[str, object], origin: str) -> None:
+        profile_payload = dict(worker_payload.get("profile") or {})
+        profile_id = profile_payload.get("id")
+        current_profile = (
+            self.repository.get_job_profile(int(profile_id))
+            if profile_id is not None
+            else None
+        )
+        if current_profile is None or current_profile.get("status") != "active":
+            message = "所选岗位已暂停或结束，不能启动新的 AI 筛选任务。"
+            if origin == "automation":
+                self.automation_flow_page.set_running(False)
+                self.automation_flow_page.set_status(message)
+            else:
+                self.ai_page.set_running(False)
+                self.ai_page.set_status(message)
+                QMessageBox.warning(self, "岗位不可用", message)
+            return
         worker_payload["provider"] = self._prepare_provider_payload(
             dict(worker_payload.get("provider") or {})
         )
@@ -1325,6 +1381,7 @@ class MainWindow(QMainWindow):
         thread.finished.connect(thread.deleteLater)
         thread.finished.connect(self._clear_ai_screening_thread)
         self._ai_screening_thread = (thread, worker)
+        self._active_screening_profile_id = int(dict(worker_payload["profile"])["id"])
         self._ai_screening_origin = origin
         if origin == "automation":
             self.automation_flow_page.set_waiting(False)
@@ -1399,9 +1456,19 @@ class MainWindow(QMainWindow):
         flow = self.config.automation_flow
         if not flow.enabled or flow.profile_id is None:
             return
+        imported_profile_id = capture_result.get("job_profile_id")
+        if imported_profile_id is not None and int(imported_profile_id) != int(flow.profile_id):
+            self._automation_armed = False
+            self.automation_flow_page.set_status("采集批次与当前岗位档案不一致，已停止自动筛选。")
+            return
         profile_row = self.repository.get_screening_profile(int(flow.profile_id))
         if profile_row is None:
             self.automation_flow_page.set_status("自动化筛选方案已不存在，请重新选择并保存。")
+            return
+        if str(profile_row.get("status") or "") != "active":
+            self._automation_armed = False
+            self._queued_automation_batches.clear()
+            self.automation_flow_page.set_status("所选岗位已暂停或结束，自动化筛选已停止。")
             return
         batch_id = int(capture_result["batch_id"])
         candidates = self.repository.list_screening_candidates(
@@ -1476,6 +1543,7 @@ class MainWindow(QMainWindow):
 
     def _clear_ai_screening_thread(self) -> None:
         self._ai_screening_thread = None
+        self._active_screening_profile_id = None
         self._ai_screening_origin = "manual"
         if self._queued_automation_batches:
             queued = self._queued_automation_batches.pop(0)
@@ -1581,6 +1649,7 @@ class MainWindow(QMainWindow):
 
     def _on_capture_finished(self, result) -> None:
         self._capture_running = False
+        self._active_capture_profile_id = None
         self.dashboard_page.set_running(False)
         self.dashboard_page.update_result(result)
         self.refresh_candidates()
@@ -1609,6 +1678,7 @@ class MainWindow(QMainWindow):
 
     def _on_worker_error(self, message: str) -> None:
         self._capture_running = False
+        self._active_capture_profile_id = None
         self.dashboard_page.set_running(False)
         self.dashboard_page.set_message(message)
         if self._automation_armed:

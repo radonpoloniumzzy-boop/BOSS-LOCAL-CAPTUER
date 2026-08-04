@@ -31,7 +31,23 @@ class CardImportService:
             if meta.get("automation_requested"):
                 note_parts.append("automation_requested=true")
 
-        job_profile = self.repository.find_job_profile_by_title(job_title)
+        profile_id_value = payload.get("job_profile_id")
+        if profile_id_value not in (None, ""):
+            try:
+                job_profile = self.repository.get_job_profile(int(profile_id_value))
+            except (TypeError, ValueError) as exc:
+                raise ValueError("岗位档案 ID 无效") from exc
+            if job_profile is None:
+                raise ValueError("岗位档案不存在")
+            if str(job_profile.get("status") or "") != "active":
+                raise ValueError("所选岗位档案不是招聘中状态，已停止导入")
+        else:
+            job_profile = self.repository.find_job_profile_by_title(job_title, active_only=True)
+            if job_profile is None:
+                known_profile = self.repository.find_job_profile_by_title(job_title)
+                if known_profile is not None:
+                    raise ValueError("同名岗位档案不是招聘中状态，已停止导入")
+                raise ValueError("未找到招聘中的岗位档案，请先在岗位中心创建并启用岗位")
         batch = self.repository.create_batch(
             job_title,
             source_url,
@@ -81,6 +97,7 @@ class CardImportService:
                     "parsed_cards": len(parsed_records),
                     "source": "chrome_extension",
                     "job_title": job_title,
+                    "job_profile_id": int(job_profile["id"]) if job_profile is not None else None,
                     "source_url": source_url,
                     "automation_requested": bool(meta.get("automation_requested")),
                 }

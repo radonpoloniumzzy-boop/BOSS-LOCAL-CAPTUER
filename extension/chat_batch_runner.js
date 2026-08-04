@@ -3092,6 +3092,9 @@ if (!globalThis.__bossLocalChatBatchRunner) {
       apiBase: String(settings.apiBase || "http://127.0.0.1:17863").replace(/\/+$/, ""),
       apiToken: String(settings.apiToken || "").trim(),
       resumeFilenameTemplate: String(settings.resumeFilenameTemplate || "{candidate_name}_{job_title}_{date}_{original_name}"),
+      jobProfileId: settings.jobProfileId === null || settings.jobProfileId === undefined
+        ? null
+        : Number(settings.jobProfileId),
       jobTitle: String(settings.jobTitle || "").trim(),
     };
   }
@@ -3109,6 +3112,9 @@ if (!globalThis.__bossLocalChatBatchRunner) {
         return {
           ...settings,
           resumeFilenameTemplate: String(payload.result?.resume_filename_template || settings.resumeFilenameTemplate),
+          jobProfileId: payload.result?.job_profile_id === null || payload.result?.job_profile_id === undefined
+            ? settings.jobProfileId
+            : Number(payload.result.job_profile_id),
           jobTitle: String(payload.result?.job_title || settings.jobTitle),
         };
       }

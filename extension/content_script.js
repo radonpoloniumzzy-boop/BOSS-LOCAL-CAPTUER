@@ -79,6 +79,7 @@ if (!globalThis.__bossLocalCaptureInjected) {
     }
 
     const payload = {
+      job_profile_id: settings.jobProfileId,
       job_title: settings.jobTitle,
       source_url: location.href,
       cards: Array.from(cardsByKey.values()),

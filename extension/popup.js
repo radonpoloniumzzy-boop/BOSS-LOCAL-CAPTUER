@@ -1,5 +1,6 @@
 const DEFAULTS = {
   jobTitle: "Boss 推荐牛人",
+  jobProfileId: null,
   apiBase: "http://127.0.0.1:17863",
   apiToken: "",
   scrollMode: "hold_end",
@@ -62,6 +63,7 @@ const automationAutoButton = document.getElementById("automationAuto");
 const pairingCodeInput = document.getElementById("pairingCode");
 const applyPairingCodeButton = document.getElementById("applyPairingCode");
 let batchStatusTimer = null;
+let activeJobProfileId = null;
 
 automationAutoButton.addEventListener("click", () => runAutomation());
 applyPairingCodeButton.addEventListener("click", () => applyPairingCodeAndTest());
@@ -91,6 +93,7 @@ async function init() {
     scrollWaitDefaultVersion: null,
     scrollModeDefaultVersion: null,
   });
+  activeJobProfileId = stored.jobProfileId === null ? null : Number(stored.jobProfileId);
   if (stored.scrollWaitDefaultVersion === null && Number(stored.scrollWaitMs) === OLD_DEFAULT_SCROLL_WAIT_MS) {
     stored.scrollWaitMs = DEFAULTS.scrollWaitMs;
     await chrome.storage.local.set({
@@ -135,7 +138,12 @@ async function runAutomation() {
   try {
     const automation = await startDesktopAutomation(settings, tab.url);
     fields.jobTitle.value = automation.job_title || automation.profile_job_title || settings.jobTitle;
-    await chrome.storage.local.set({ ...collectSettings(), jobTitle: fields.jobTitle.value });
+    activeJobProfileId = automation.profile_id === null ? null : Number(automation.profile_id);
+    await chrome.storage.local.set({
+      ...collectSettings(),
+      jobTitle: fields.jobTitle.value,
+      jobProfileId: activeJobProfileId,
+    });
     setStatus(
       [
         "自动化方案已确认，准备滚动采集...",
@@ -235,7 +243,15 @@ async function adjustScrollWait(deltaMs) {
 }
 
 async function runCollection(autoScroll, options = {}) {
-  const baseSettings = collectSettings();
+  let baseSettings = collectSettings();
+  if (!options.automationRequested) {
+    try {
+      baseSettings = await loadDesktopJobProfile(baseSettings);
+    } catch (error) {
+      setStatus(`无法读取当前岗位档案。\n${error.message || String(error)}`);
+      return;
+    }
+  }
   await chrome.storage.local.set(baseSettings);
 
   const tab = await getActiveSupportedTab();
@@ -295,6 +311,35 @@ async function runCollection(autoScroll, options = {}) {
   } catch (error) {
     setStatus(`导入本地程序失败。\n${error.message || String(error)}`);
   }
+}
+
+async function loadDesktopJobProfile(settings) {
+  const apiBase = normalizeLocalApiBase(settings.apiBase);
+  let response;
+  try {
+    response = await fetch(`${apiBase}/api/extension/config`, {
+      headers: localApiHeaders(settings),
+    });
+  } catch (error) {
+    throw new Error(formatLocalApiFetchError(apiBase, error));
+  }
+  const payload = await response.json();
+  if (!response.ok || !payload?.ok) {
+    throw new Error(payload?.error || `桌面端返回状态码 ${response.status}`);
+  }
+  const profileId = payload.result?.job_profile_id;
+  if (profileId === null || profileId === undefined) {
+    throw new Error("请先在桌面端仪表盘选择招聘中的岗位档案。")
+  }
+  activeJobProfileId = Number(profileId);
+  fields.jobTitle.value = String(payload.result?.job_title || settings.jobTitle);
+  const synced = {
+    ...settings,
+    jobProfileId: activeJobProfileId,
+    jobTitle: fields.jobTitle.value,
+  };
+  await chrome.storage.local.set(synced);
+  return synced;
 }
 
 async function requestScrollPause() {
@@ -567,6 +612,7 @@ async function importCards(settings, sourceUrl, merged, automationRequested = fa
         "X-Boss-Local-Token": settings.apiToken || "",
       },
       body: JSON.stringify({
+        job_profile_id: settings.jobProfileId,
         job_title: settings.jobTitle,
         source_url: sourceUrl,
         cards: merged.cards,
@@ -652,6 +698,7 @@ function collectSettings() {
   const apiBase = normalizeLocalApiBase(fields.apiBase.value.trim() || DEFAULTS.apiBase);
   fields.apiBase.value = apiBase;
   return {
+    jobProfileId: activeJobProfileId,
     jobTitle: fields.jobTitle.value.trim() || DEFAULTS.jobTitle,
     apiBase,
     apiToken: fields.apiToken.value.trim(),

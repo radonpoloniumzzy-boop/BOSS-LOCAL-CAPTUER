@@ -76,7 +76,8 @@ class ScreeningService:
         progress_callback: Callable[[ScreeningProgress], None] | None = None,
         run_id: int | None = None,
     ) -> dict[str, object]:
-        self._stop_requested = False
+        if self._stop_requested:
+            raise RuntimeError("AI 筛选任务在启动前已停止")
         prompt_text = self.prompt_manager.finalize_prompt(
             str(profile.get("prompt_text") or ""),
             str(profile.get("prompt_source") or "generated"),

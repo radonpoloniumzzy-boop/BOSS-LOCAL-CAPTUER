@@ -32,6 +32,13 @@ JOB_STATUS_LABELS = {
     "closed": "已结束",
 }
 
+JOB_STATUS_CHOICES = {
+    "draft": ("draft", "active", "closed"),
+    "active": ("active", "paused", "closed"),
+    "paused": ("paused", "active", "closed"),
+    "closed": ("closed",),
+}
+
 PRIORITY_LABELS = {"high": "高", "normal": "普通", "low": "低"}
 
 
@@ -276,9 +283,7 @@ class JobProfilesPage(QWidget):
         self.priority_combo.setCurrentIndex(
             max(0, self.priority_combo.findData(str(profile.get("priority") or "normal")))
         )
-        self.status_combo.setCurrentIndex(
-            max(0, self.status_combo.findData(str(profile.get("status") or "draft")))
-        )
+        self._set_status_choices(str(profile.get("status") or "draft"))
         self.jd_input.setPlainText(str(profile.get("jd_text") or ""))
         self.must_have_input.setText(self._join(profile.get("must_have")))
         self.nice_to_have_input.setText(self._join(profile.get("nice_to_have")))
@@ -316,6 +321,9 @@ class JobProfilesPage(QWidget):
             widget.clear()
         self.target_hires_input.setValue(1)
         self.priority_combo.setCurrentIndex(max(0, self.priority_combo.findData("normal")))
+        self.status_combo.clear()
+        for status in ("draft", "active"):
+            self.status_combo.addItem(JOB_STATUS_LABELS[status], status)
         self.status_combo.setCurrentIndex(max(0, self.status_combo.findData("draft")))
         self.jd_input.clear()
         self.prompt_input.clear()
@@ -434,6 +442,14 @@ class JobProfilesPage(QWidget):
                 self.current_profile_id,
                 str(self.status_combo.currentData() or "draft"),
             )
+
+    def _set_status_choices(self, current: str) -> None:
+        self.status_combo.blockSignals(True)
+        self.status_combo.clear()
+        for status in JOB_STATUS_CHOICES.get(current, (current,)):
+            self.status_combo.addItem(JOB_STATUS_LABELS.get(status, status), status)
+        self.status_combo.setCurrentIndex(max(0, self.status_combo.findData(current)))
+        self.status_combo.blockSignals(False)
 
     @staticmethod
     def _items(text: str) -> list[str]:
