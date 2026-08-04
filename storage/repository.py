@@ -174,6 +174,8 @@ class CandidateRepository:
             existing = self.get_recruitment_task(int(task.id))
             if existing is None:
                 raise ValueError("招聘任务不存在")
+            if str(existing["status"]) != "ready":
+                raise ValueError("招聘任务启动后不能修改目标、平台或额度；请复制或新建任务")
             task.role_id = int(existing["role_id"])
             task.profile_version = int(existing["profile_version"])
             connection.execute(

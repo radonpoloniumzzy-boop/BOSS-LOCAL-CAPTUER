@@ -49,6 +49,9 @@ class RecruitmentTaskRepositoryTest(unittest.TestCase):
         self.assertEqual(self.repository.get_recruitment_task(int(task.id))["profile_version"], 1)
 
         running = self.repository.set_recruitment_task_status(int(task.id), "running")
+        task.target_candidates = 999
+        with self.assertRaisesRegex(ValueError, "启动后不能修改"):
+            self.repository.save_recruitment_task(task)
         batch = self.repository.create_batch(
             "高级招聘顾问",
             task.source_url,

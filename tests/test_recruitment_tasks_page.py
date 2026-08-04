@@ -31,6 +31,35 @@ class RecruitmentTasksPageTest(unittest.TestCase):
         self.assertTrue(page.open_platform_button.text().startswith("打开招聘平台"))
         self.assertTrue(page.open_export_button.text().startswith("打开选中导出"))
 
+        cancelled: list[tuple[int, str]] = []
+        page.status_requested.connect(lambda task_id, status: cancelled.append((task_id, status)))
+        page.show_task(
+            {
+                **emitted[0],
+                "id": 11,
+                "profile_version": 3,
+                "status": "ready",
+            },
+            {},
+            [],
+        )
+        page.cancel_button.click()
+        self.assertEqual(cancelled, [(11, "cancelled")])
+
+    def test_historical_task_keeps_its_inactive_job_visible(self) -> None:
+        page = RecruitmentTasksPage()
+        page.set_job_profiles([
+            {"id": 7, "job_title": "已暂停岗位", "version": 2, "status": "paused"},
+            {"id": 8, "job_title": "其他岗位", "version": 1, "status": "active"},
+        ])
+        row = {
+            "id": 11, "name": "历史任务", "role_id": 7, "profile_version": 2,
+            "platform": "boss", "source_url": "https://example.com", "status": "paused",
+        }
+        page.show_task(row, {}, [])
+
+        self.assertEqual(page.profile_combo.currentData(), 7)
+
 
 if __name__ == "__main__":
     unittest.main()

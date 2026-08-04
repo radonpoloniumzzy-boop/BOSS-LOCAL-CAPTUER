@@ -16,6 +16,33 @@ class _SignalSpy:
 
 
 class MainWindowJobLifecycleTest(unittest.TestCase):
+    def test_ai_completion_updates_run_task_not_current_config_task(self) -> None:
+        repository = SimpleNamespace(
+            get_screening_run=Mock(return_value={"task_id": 7}),
+            get_recruitment_task=Mock(return_value={"id": 7, "status": "running"}),
+            set_recruitment_task_status=Mock(),
+        )
+        window = SimpleNamespace(
+            repository=repository,
+            _ai_screening_origin="automation",
+            automation_flow_page=SimpleNamespace(set_running=Mock(), set_status=Mock()),
+            ai_page=SimpleNamespace(set_running=Mock(), set_status=Mock()),
+            refresh_automation_flow=Mock(),
+            refresh_ai_screen=Mock(),
+            refresh_recruitment_tasks=Mock(),
+            statusBar=lambda: SimpleNamespace(showMessage=Mock()),
+            config=SimpleNamespace(automation_flow=SimpleNamespace(task_id=99)),
+        )
+
+        MainWindow._on_ai_screening_finished(
+            window, {"run_id": 31, "completed": 4, "failed": 0, "message": "完成"}
+        )
+
+        repository.set_recruitment_task_status.assert_called_once_with(
+            7, "waiting_user", message="完成"
+        )
+        window.refresh_recruitment_tasks.assert_called_once_with(7)
+
     def test_pausing_job_stops_and_clears_linked_work(self) -> None:
         worker = Mock()
         stop_capture = _SignalSpy()

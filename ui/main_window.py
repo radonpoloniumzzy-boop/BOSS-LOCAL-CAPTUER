@@ -140,6 +140,8 @@ class MainWindow(QMainWindow):
         self._active_capture_profile_id: int | None = None
         self._active_screening_profile_id: int | None = None
         self._active_recruitment_task_id: int | None = None
+        self._selected_recruitment_task_id: int | None = None
+        self._active_ai_recruitment_task_id: int | None = None
 
         self._build_ui()
         self._setup_logging_panel()
@@ -892,7 +894,7 @@ class MainWindow(QMainWindow):
         self.logger.info("Settings updated")
 
     def refresh_automation_flow(self, selected_run_id: int | None = None) -> None:
-        profiles = [dict(row) for row in self.repository.list_job_profiles(active_only=True)]
+        profiles = [dict(row) for row in self.repository.list_job_profiles()]
         runs = [dict(row) for row in self.repository.list_screening_runs(origin="automation")]
         self.automation_flow_page.set_profiles(
             profiles,
@@ -1103,7 +1105,7 @@ class MainWindow(QMainWindow):
         task = self.repository.get_recruitment_task(task_id)
         if task is None:
             return
-        self._active_recruitment_task_id = task_id
+        self._selected_recruitment_task_id = task_id
         self.recruitment_tasks_page.show_task(
             task,
             self.repository.get_recruitment_task_summary(task_id),
@@ -1137,6 +1139,14 @@ class MainWindow(QMainWindow):
 
     def _start_recruitment_task(self, task_id: int) -> None:
         try:
+            conflicting = [
+                row for row in self.repository.list_recruitment_tasks()
+                if int(row["id"]) != task_id and row.get("status") in {"running", "waiting_user"}
+            ]
+            if conflicting:
+                raise ValueError(
+                    f"任务“{conflicting[0]['name']}”仍在执行或等待人工，请先暂停、完成或取消它。"
+                )
             existing = self.repository.get_recruitment_task(task_id)
             if existing is None:
                 raise ValueError("招聘任务不存在")
@@ -1480,6 +1490,7 @@ class MainWindow(QMainWindow):
             "batch_id": run["batch_id"],
             "candidates": candidates,
             "origin": "manual",
+            "task_id": run["task_id"],
         }
         self._launch_ai_screening(worker_payload, origin="manual")
 
@@ -1548,6 +1559,11 @@ class MainWindow(QMainWindow):
         thread.finished.connect(self._clear_ai_screening_thread)
         self._ai_screening_thread = (thread, worker)
         self._active_screening_profile_id = int(dict(worker_payload["profile"])["id"])
+        self._active_ai_recruitment_task_id = (
+            int(worker_payload["task_id"])
+            if worker_payload.get("task_id") is not None
+            else None
+        )
         self._ai_screening_origin = origin
         if origin == "automation":
             self.automation_flow_page.set_waiting(False)
@@ -1715,11 +1731,16 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"AI 初筛结束：完成 {result.get('completed', 0)}，失败 {result.get('failed', 0)}"
         )
-        task_id = self.config.automation_flow.task_id
+        run = self.repository.get_screening_run(run_id)
+        task_id = run["task_id"] if run is not None else None
         if task_id is not None:
-            self.repository.update_recruitment_task_progress(
-                int(task_id), current_step="人工复核", message=str(result.get("message") or "AI 初筛完成")
-            )
+            task = self.repository.get_recruitment_task(int(task_id))
+            if task is not None and task.get("status") == "running":
+                self.repository.set_recruitment_task_status(
+                    int(task_id),
+                    "waiting_user",
+                    message=str(result.get("message") or "AI 初筛完成，等待人工复核"),
+                )
             self.refresh_recruitment_tasks(int(task_id))
 
     def _on_ai_screening_failed(self, message: str) -> None:
@@ -1736,6 +1757,7 @@ class MainWindow(QMainWindow):
     def _clear_ai_screening_thread(self) -> None:
         self._ai_screening_thread = None
         self._active_screening_profile_id = None
+        self._active_ai_recruitment_task_id = None
         self._ai_screening_origin = "manual"
         if self._queued_automation_batches:
             queued = self._queued_automation_batches.pop(0)
@@ -1899,7 +1921,7 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "任务失败", message)
 
     def _mark_active_recruitment_task_failed(self, message: str) -> None:
-        task_id = self.config.automation_flow.task_id or self._active_recruitment_task_id
+        task_id = self._active_ai_recruitment_task_id or self._active_recruitment_task_id
         if task_id is None:
             return
         task = self.repository.get_recruitment_task(int(task_id))

@@ -101,8 +101,9 @@ class RecruitmentTasksPage(QWidget):
         self.start_button = QPushButton("启动任务")
         self.pause_button = QPushButton("暂停")
         self.complete_button = QPushButton("完成")
+        self.cancel_button = QPushButton("取消任务")
         self.open_platform_button = QPushButton("打开招聘平台")
-        for button in [self.save_button, self.start_button, self.pause_button, self.complete_button, self.open_platform_button]:
+        for button in [self.save_button, self.start_button, self.pause_button, self.complete_button, self.cancel_button, self.open_platform_button]:
             actions.addWidget(button)
         editor_layout.addWidget(form_group)
         editor_layout.addLayout(actions)
@@ -138,6 +139,7 @@ class RecruitmentTasksPage(QWidget):
         self.start_button.clicked.connect(lambda: self.current_task_id is not None and self.start_requested.emit(self.current_task_id))
         self.pause_button.clicked.connect(lambda: self.current_task_id is not None and self.status_requested.emit(self.current_task_id, "paused"))
         self.complete_button.clicked.connect(lambda: self.current_task_id is not None and self.status_requested.emit(self.current_task_id, "completed"))
+        self.cancel_button.clicked.connect(lambda: self.current_task_id is not None and self.status_requested.emit(self.current_task_id, "cancelled"))
         self.open_platform_button.clicked.connect(lambda: self.current_task_id is not None and self.open_platform_requested.emit(self.current_task_id))
         self.open_export_button.clicked.connect(self._emit_open_export)
         self.open_export_folder_button.clicked.connect(self.open_export_folder_requested.emit)
@@ -185,10 +187,25 @@ class RecruitmentTasksPage(QWidget):
             f"AI 运行 {summary.get('run_count', 0)}｜导出 {summary.get('export_count', 0)}"
         )
         self._set_exports(exports)
+        editable = str(row.get("status") or "ready") == "ready"
+        self.save_button.setEnabled(editable)
+        for widget in [
+            self.name_input, self.platform_combo, self.source_url_input,
+            self.target_candidates_input, self.target_ssr_input,
+            self.minimum_rating_combo, self.view_quota_input, self.greeting_quota_input,
+        ]:
+            widget.setEnabled(editable)
 
     def clear_task(self) -> None:
         self.current_task_id = None
         self.profile_combo.setEnabled(True)
+        self.save_button.setEnabled(True)
+        for widget in [
+            self.name_input, self.platform_combo, self.source_url_input,
+            self.target_candidates_input, self.target_ssr_input,
+            self.minimum_rating_combo, self.view_quota_input, self.greeting_quota_input,
+        ]:
+            widget.setEnabled(True)
         self.name_input.clear()
         self.target_candidates_input.setValue(0)
         self.target_ssr_input.setValue(0)
