@@ -143,6 +143,36 @@ class LocalApiServerTest(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertEqual(len(self.repository.list_candidates()), 0)
 
+    def test_import_error_reports_request_task_id(self) -> None:
+        errors: list[dict[str, object]] = []
+        self.server.on_error = errors.append
+
+        def fail_import(_payload):
+            raise ValueError("invalid capture payload")
+
+        self.service.import_cards = fail_import
+        body = json.dumps(
+            {"recruitment_task_id": 42, "cards": [{"raw_card_text": "broken"}]}
+        ).encode("utf-8")
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.port, timeout=5)
+        connection.request(
+            "POST",
+            "/api/import/cards",
+            body=body,
+            headers={
+                "Content-Type": "application/json",
+                "X-Boss-Local-Token": self.token,
+            },
+        )
+        response = connection.getresponse()
+        response.read()
+
+        self.assertEqual(response.status, 400)
+        self.assertEqual(
+            errors,
+            [{"message": "invalid capture payload", "recruitment_task_id": 42}],
+        )
+
     def test_options_allows_chrome_private_network_preflight(self) -> None:
         connection = http.client.HTTPConnection("127.0.0.1", self.server.port, timeout=5)
         connection.request(

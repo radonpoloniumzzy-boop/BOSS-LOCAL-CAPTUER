@@ -67,7 +67,7 @@ class _LogBridge(QObject):
 
 class _ImportBridge(QObject):
     imported = Signal(object)
-    error = Signal(str)
+    error = Signal(object)
 
 
 class MainWindow(QMainWindow):
@@ -138,6 +138,7 @@ class MainWindow(QMainWindow):
         self._automation_config_lock = threading.RLock()
         self._capture_running = False
         self._active_capture_profile_id: int | None = None
+        self._active_capture_task_id: int | None = None
         self._active_screening_profile_id: int | None = None
         self._active_recruitment_task_id: int | None = None
         self._selected_recruitment_task_id: int | None = None
@@ -579,6 +580,7 @@ class MainWindow(QMainWindow):
 
         self._capture_running = True
         self._active_capture_profile_id = int(collect_options.role_id)
+        self._active_capture_task_id = collect_options.task_id
         self.automation_worker.capture_service.reset_stop()
         self.dashboard_page.set_running(True)
         self.dashboard_page.set_status("running")
@@ -1055,7 +1057,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "记录失败", str(exc))
 
     def refresh_ai_screen(self, selected_run_id: int | None = None) -> None:
-        profiles = [dict(row) for row in self.repository.list_job_profiles(active_only=True)]
+        profiles = [dict(row) for row in self.repository.list_job_profiles()]
         runs = [dict(row) for row in self.repository.list_screening_runs()]
         active_ids = {int(profile["id"]) for profile in profiles}
         selected_profile_id = self.ai_page.current_profile_id
@@ -1093,7 +1095,7 @@ class MainWindow(QMainWindow):
             self._load_job_profile(int(current_id))
 
     def refresh_recruitment_tasks(self, selected_task_id: int | None = None) -> None:
-        profiles = [dict(row) for row in self.repository.list_job_profiles(active_only=True)]
+        profiles = [dict(row) for row in self.repository.list_job_profiles()]
         tasks = self.repository.list_recruitment_tasks()
         self.recruitment_tasks_page.set_job_profiles(profiles)
         self.recruitment_tasks_page.set_tasks(tasks)
@@ -1752,7 +1754,7 @@ class MainWindow(QMainWindow):
             self.ai_page.set_status(f"AI 初筛失败：{message}")
             QMessageBox.critical(self, "AI 初筛失败", message)
         self.statusBar().showMessage("AI 初筛失败")
-        self._mark_active_recruitment_task_failed(message)
+        self._mark_recruitment_task_failed(self._active_ai_recruitment_task_id, message)
 
     def _clear_ai_screening_thread(self) -> None:
         self._ai_screening_thread = None
@@ -1862,14 +1864,15 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(progress.message or "任务执行中")
 
     def _on_capture_finished(self, result) -> None:
+        task_id = self._active_capture_task_id
         self._capture_running = False
         self._active_capture_profile_id = None
+        self._active_capture_task_id = None
         self.dashboard_page.set_running(False)
         self.dashboard_page.update_result(result)
         self.refresh_candidates()
         self.refresh_dashboard_stats()
         self.statusBar().showMessage(result.message or f"采集结束：{result.status}")
-        task_id = self._current_running_task_id()
         if task_id is not None:
             self.repository.update_recruitment_task_progress(
                 task_id,
@@ -1902,26 +1905,33 @@ class MainWindow(QMainWindow):
             )
             self.refresh_recruitment_tasks(int(task_id))
 
-    def _on_extension_import_error(self, message: str) -> None:
+    def _on_extension_import_error(self, error: dict[str, object]) -> None:
+        message = str(error.get("message") or "扩展导入失败")
+        task_id = error.get("recruitment_task_id")
+        try:
+            task_id = int(task_id) if task_id is not None else None
+        except (TypeError, ValueError):
+            task_id = None
         self.dashboard_page.set_message(message)
         if self.config.automation_flow.enabled:
             self.automation_flow_page.set_status(f"采集导入失败：{message}")
         self.statusBar().showMessage("扩展导入失败")
-        self._mark_active_recruitment_task_failed(message)
+        self._mark_recruitment_task_failed(task_id, message)
 
     def _on_worker_error(self, message: str) -> None:
+        task_id = self._active_capture_task_id
         self._capture_running = False
         self._active_capture_profile_id = None
+        self._active_capture_task_id = None
         self.dashboard_page.set_running(False)
         self.dashboard_page.set_message(message)
         if self._automation_armed:
             self.automation_flow_page.set_status(f"自动化采集失败：{message}")
         self.statusBar().showMessage("任务失败")
-        self._mark_active_recruitment_task_failed(message)
+        self._mark_recruitment_task_failed(task_id, message)
         QMessageBox.critical(self, "任务失败", message)
 
-    def _mark_active_recruitment_task_failed(self, message: str) -> None:
-        task_id = self._active_ai_recruitment_task_id or self._active_recruitment_task_id
+    def _mark_recruitment_task_failed(self, task_id: int | None, message: str) -> None:
         if task_id is None:
             return
         task = self.repository.get_recruitment_task(int(task_id))

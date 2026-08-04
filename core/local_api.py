@@ -15,7 +15,7 @@ class LocalApiServer:
         import_service,
         logger=None,
         on_import: Callable[[dict[str, object]], None] | None = None,
-        on_error: Callable[[str], None] | None = None,
+        on_error: Callable[[dict[str, object]], None] | None = None,
         get_automation_status: Callable[[], dict[str, object]] | None = None,
         start_automation: Callable[[dict[str, object]], dict[str, object]] | None = None,
         get_extension_config: Callable[[], dict[str, object]] | None = None,
@@ -97,6 +97,7 @@ class LocalApiServer:
                 self._send_json(404, {"error": "Not found"})
 
             def do_POST(self) -> None:
+                payload: dict[str, object] = {}
                 if self.path not in {"/api/import/cards", "/api/automation/start"}:
                     self._send_json(404, {"error": "Not found"})
                     return
@@ -125,7 +126,16 @@ class LocalApiServer:
                     message = str(exc)
                     parent._log("exception", "Local API import failed: %s", exc)
                     if self.path == "/api/import/cards" and parent.on_error:
-                        parent.on_error(message)
+                        parent.on_error(
+                            {
+                                "message": message,
+                                "recruitment_task_id": (
+                                    payload.get("recruitment_task_id")
+                                    if isinstance(payload, dict)
+                                    else None
+                                ),
+                            }
+                        )
                     self._send_json(400, {"ok": False, "error": message})
 
             def log_message(self, format: str, *args) -> None:

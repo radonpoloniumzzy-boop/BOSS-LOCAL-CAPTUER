@@ -16,6 +16,57 @@ class _SignalSpy:
 
 
 class MainWindowJobLifecycleTest(unittest.TestCase):
+    def test_capture_completion_updates_bound_task_not_current_config_task(self) -> None:
+        repository = SimpleNamespace(update_recruitment_task_progress=Mock())
+        window = SimpleNamespace(
+            repository=repository,
+            _active_capture_task_id=7,
+            _capture_running=True,
+            _active_capture_profile_id=4,
+            dashboard_page=SimpleNamespace(set_running=Mock(), update_result=Mock()),
+            refresh_candidates=Mock(),
+            refresh_dashboard_stats=Mock(),
+            refresh_recruitment_tasks=Mock(),
+            statusBar=lambda: SimpleNamespace(showMessage=Mock()),
+            config=SimpleNamespace(automation_flow=SimpleNamespace(task_id=99)),
+        )
+
+        MainWindow._on_capture_finished(
+            window, SimpleNamespace(status="failed", message="采集失败")
+        )
+
+        repository.update_recruitment_task_progress.assert_called_once_with(
+            7, current_step="等待人工处理", message="采集失败"
+        )
+        window.refresh_recruitment_tasks.assert_called_once_with(7)
+        self.assertIsNone(window._active_capture_task_id)
+
+    def test_task_failure_without_execution_context_changes_nothing(self) -> None:
+        repository = SimpleNamespace(
+            get_recruitment_task=Mock(), set_recruitment_task_status=Mock()
+        )
+        window = SimpleNamespace(repository=repository, refresh_recruitment_tasks=Mock())
+
+        MainWindow._mark_recruitment_task_failed(window, None, "未知来源错误")
+
+        repository.get_recruitment_task.assert_not_called()
+        repository.set_recruitment_task_status.assert_not_called()
+
+    def test_extension_import_failure_updates_payload_task(self) -> None:
+        window = SimpleNamespace(
+            dashboard_page=SimpleNamespace(set_message=Mock()),
+            config=SimpleNamespace(automation_flow=SimpleNamespace(enabled=True)),
+            automation_flow_page=SimpleNamespace(set_status=Mock()),
+            statusBar=lambda: SimpleNamespace(showMessage=Mock()),
+            _mark_recruitment_task_failed=Mock(),
+        )
+
+        MainWindow._on_extension_import_error(
+            window, {"message": "导入失败", "recruitment_task_id": 42}
+        )
+
+        window._mark_recruitment_task_failed.assert_called_once_with(42, "导入失败")
+
     def test_ai_completion_updates_run_task_not_current_config_task(self) -> None:
         repository = SimpleNamespace(
             get_screening_run=Mock(return_value={"task_id": 7}),
