@@ -63,6 +63,11 @@ class MainWindowSmokeTest(unittest.TestCase):
                         window.product_development_page,
                     )
                     self.assertIn("0.3.0-dev", window.product_development_page.version_value.text())
+                    version_statuses = {
+                        window.product_development_page.version_table.item(row, 2).text()
+                        for row in range(window.product_development_page.version_table.rowCount())
+                    }
+                    self.assertIn("暂无稳定版", version_statuses)
                     window.product_development_page.feedback_description_input.setPlainText(
                         "测试环境反馈"
                     )

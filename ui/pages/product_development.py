@@ -165,7 +165,9 @@ class ProductDevelopmentPage(QWidget):
         action_row.addWidget(self.feedback_status_label, 1)
         action_row.addWidget(self.feedback_submit_button)
 
-        self.feedback_table = self._table(["编号", "时间", "类型", "模块", "影响", "状态", "内容"])
+        self.feedback_table = self._table(
+            ["编号", "时间", "类型", "模块", "影响", "状态", "内容", "期望结果"]
+        )
         layout.addWidget(form_group)
         layout.addLayout(action_row)
         layout.addWidget(QLabel("反馈记录"))
@@ -304,6 +306,7 @@ class ProductDevelopmentPage(QWidget):
                 item.get("impact"),
                 item.get("status"),
                 item.get("description"),
+                item.get("expected"),
             ]
             for column, value in enumerate(values):
                 self.feedback_table.setItem(row, column, QTableWidgetItem(str(value or "-")))

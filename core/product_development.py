@@ -57,6 +57,11 @@ class ProductDevelopmentRepository:
         for key in ("status_options", "roadmap", "modules", "versions"):
             if not isinstance(plan[key], list):
                 raise ValueError(f"产品方案字段 {key} 必须是列表。")
+        if not all(isinstance(status, str) for status in plan["status_options"]):
+            raise ValueError("产品方案字段 status_options 的每一项必须是文本。")
+        for key in ("roadmap", "modules", "versions"):
+            if not all(isinstance(item, dict) for item in plan[key]):
+                raise ValueError(f"产品方案字段 {key} 的每一项必须是对象。")
         return plan
 
     def _load_feedback(self) -> list[dict[str, Any]]:

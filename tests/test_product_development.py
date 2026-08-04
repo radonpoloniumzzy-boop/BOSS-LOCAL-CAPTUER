@@ -88,6 +88,28 @@ class ProductDevelopmentRepositoryTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "反馈内容"):
                 repository.submit_feedback({"description": "  "})
 
+    def test_plan_rejects_non_object_list_items_before_rendering(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            plan_path = root / "plan.json"
+            plan_path.write_text(
+                json.dumps(
+                    {
+                        "product": {"name": "招聘工作台", "current_version": "0.2.0"},
+                        "status_options": ["开发中"],
+                        "roadmap": [],
+                        "modules": ["错误数据"],
+                        "versions": [],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            repository = ProductDevelopmentRepository(plan_path, root / "feedback.json")
+
+            with self.assertRaisesRegex(ValueError, "modules.*对象"):
+                repository.load_snapshot()
+
 
 class ProductDevelopmentPageTest(unittest.TestCase):
     @classmethod
@@ -134,6 +156,22 @@ class ProductDevelopmentPageTest(unittest.TestCase):
         self.assertIn("0.2.0", page.version_value.text())
         self.assertEqual(page.module_table.rowCount(), 1)
         self.assertEqual(page.module_table.item(0, 1).text(), "可试用")
+
+        page.set_feedback(
+            [
+                {
+                    "id": "FB-1",
+                    "created_at": "2026-08-04T12:00:00+08:00",
+                    "type": "功能建议",
+                    "module": "候选人采集",
+                    "impact": "影响效率",
+                    "status": "待处理",
+                    "description": "希望保存采集条件",
+                    "expected": "下次可以直接复用",
+                }
+            ]
+        )
+        self.assertEqual(page.feedback_table.item(0, 7).text(), "下次可以直接复用")
 
         emitted: list[dict[str, str]] = []
         page.feedback_submit_requested.connect(emitted.append)
