@@ -1,5 +1,19 @@
 from __future__ import annotations
 
+import json
+
+
+def _json_or_default(value: object, default: object) -> object:
+    try:
+        decoded = json.loads(str(value or ""))
+    except (TypeError, json.JSONDecodeError):
+        return default
+    if isinstance(default, list) and not isinstance(decoded, list):
+        return default
+    if isinstance(default, dict) and not isinstance(decoded, dict):
+        return default
+    return decoded
+
 V1_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER NOT NULL PRIMARY KEY
@@ -649,10 +663,100 @@ def apply_migrations(connection) -> None:
         "evidence_policy_json": "TEXT NOT NULL DEFAULT '{}'",
         "version": "INTEGER NOT NULL DEFAULT 1",
         "parent_profile_id": "INTEGER",
+        "department": "TEXT NOT NULL DEFAULT ''",
+        "hiring_manager": "TEXT NOT NULL DEFAULT ''",
+        "location": "TEXT NOT NULL DEFAULT ''",
+        "employment_type": "TEXT NOT NULL DEFAULT ''",
+        "experience_requirement": "TEXT NOT NULL DEFAULT ''",
+        "education_requirement": "TEXT NOT NULL DEFAULT ''",
+        "target_hires": "INTEGER NOT NULL DEFAULT 1",
+        "recruitment_deadline": "TEXT NOT NULL DEFAULT ''",
+        "priority": "TEXT NOT NULL DEFAULT 'normal'",
+        "status": "TEXT NOT NULL DEFAULT 'active'",
     }
     for column, declaration in structured_columns.items():
         if column not in profile_columns:
             connection.execute(f"ALTER TABLE screening_profiles ADD COLUMN {column} {declaration}")
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_screening_profiles_status_updated "
+        "ON screening_profiles(status, updated_at DESC)"
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS job_profile_versions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            profile_id INTEGER NOT NULL,
+            version INTEGER NOT NULL,
+            snapshot_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(profile_id) REFERENCES screening_profiles(id) ON DELETE CASCADE,
+            UNIQUE(profile_id, version)
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_job_profile_versions_profile_version "
+        "ON job_profile_versions(profile_id, version DESC)"
+    )
+    profile_cursor = connection.execute("SELECT * FROM screening_profiles")
+    profile_columns_in_order = [str(column[0]) for column in profile_cursor.description]
+    profile_rows = profile_cursor.fetchall()
+    for row in profile_rows:
+        values = dict(zip(profile_columns_in_order, row))
+        snapshot = {
+            "id": int(values["id"]),
+            "job_title": str(values.get("job_title") or ""),
+            "department": str(values.get("department") or ""),
+            "hiring_manager": str(values.get("hiring_manager") or ""),
+            "location": str(values.get("location") or ""),
+            "employment_type": str(values.get("employment_type") or ""),
+            "experience_requirement": str(values.get("experience_requirement") or ""),
+            "education_requirement": str(values.get("education_requirement") or ""),
+            "target_hires": int(values.get("target_hires") or 1),
+            "recruitment_deadline": str(values.get("recruitment_deadline") or ""),
+            "priority": str(values.get("priority") or "normal"),
+            "status": str(values.get("status") or "draft"),
+            "jd_text": str(values.get("jd_text") or ""),
+            "prompt_text": str(values.get("prompt_text") or ""),
+            "prompt_source": str(values.get("prompt_source") or "generated"),
+            "must_have": _json_or_default(values.get("must_have_json"), []),
+            "nice_to_have": _json_or_default(values.get("nice_to_have_json"), []),
+            "risk_flags": _json_or_default(values.get("risk_flags_json"), []),
+            "exclusions": _json_or_default(values.get("exclusions_json"), []),
+            "interview_checks": _json_or_default(values.get("interview_checks_json"), []),
+            "evidence_policy": _json_or_default(values.get("evidence_policy_json"), {}),
+            "version": int(values.get("version") or 1),
+            "parent_profile_id": values.get("parent_profile_id"),
+        }
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO job_profile_versions(
+                profile_id, version, snapshot_json, created_at
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (
+                int(values["id"]),
+                int(values.get("version") or 1),
+                json.dumps(snapshot, ensure_ascii=False, sort_keys=True),
+                str(values.get("updated_at") or values.get("created_at") or ""),
+            ),
+        )
+    batch_columns = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(capture_batches)").fetchall()
+    }
+    if "role_id" not in batch_columns:
+        connection.execute("ALTER TABLE capture_batches ADD COLUMN role_id INTEGER")
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_capture_batches_role_start "
+        "ON capture_batches(role_id, start_time DESC)"
+    )
+    run_columns = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(screening_runs)").fetchall()
+    }
+    if "profile_version" not in run_columns:
+        connection.execute(
+            "ALTER TABLE screening_runs ADD COLUMN profile_version INTEGER NOT NULL DEFAULT 0"
+        )
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_candidates_job_updated ON candidates(job_title, updated_at DESC)"
     )
@@ -665,5 +769,5 @@ def apply_migrations(connection) -> None:
         "ON candidate_role_matches(role_id, recruitment_status, latest_rating, updated_at DESC)"
     )
     connection.execute("DELETE FROM schema_version")
-    connection.execute("INSERT INTO schema_version(version) VALUES (13)")
+    connection.execute("INSERT INTO schema_version(version) VALUES (14)")
     connection.commit()

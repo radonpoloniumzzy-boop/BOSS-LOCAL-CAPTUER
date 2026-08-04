@@ -31,7 +31,13 @@ class CardImportService:
             if meta.get("automation_requested"):
                 note_parts.append("automation_requested=true")
 
-        batch = self.repository.create_batch(job_title, source_url, note="; ".join(note_parts))
+        job_profile = self.repository.find_job_profile_by_title(job_title)
+        batch = self.repository.create_batch(
+            job_title,
+            source_url,
+            note="; ".join(note_parts),
+            role_id=(int(job_profile["id"]) if job_profile is not None else None),
+        )
         seen_keys: set[str] = set()
         parsed_records = []
         status = "completed"

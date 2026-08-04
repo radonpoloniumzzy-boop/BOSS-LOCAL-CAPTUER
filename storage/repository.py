@@ -57,16 +57,22 @@ class CandidateRepository:
         self.logger = logger
         self.profile_builder = profile_builder or StandardProfileBuilder()
 
-    def create_batch(self, job_title: str, source_url: str, note: str = "") -> CaptureBatch:
+    def create_batch(
+        self,
+        job_title: str,
+        source_url: str,
+        note: str = "",
+        role_id: int | None = None,
+    ) -> CaptureBatch:
         connection = self.db.get_connection()
         timestamp = now_iso()
         cursor = connection.execute(
             """
             INSERT INTO capture_batches(
-                job_title, source_url, start_time, status, note, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                job_title, source_url, start_time, status, note, role_id, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (job_title, source_url, timestamp, "running", note, timestamp, timestamp),
+            (job_title, source_url, timestamp, "running", note, role_id, timestamp, timestamp),
         )
         connection.commit()
         batch = CaptureBatch(
@@ -76,11 +82,19 @@ class CandidateRepository:
             start_time=timestamp,
             status="running",
             note=note,
+            role_id=role_id,
             created_at=timestamp,
             updated_at=timestamp,
         )
         self._log("info", "Created capture batch %s for job %s", batch.id, job_title)
         return batch
+
+    def find_job_profile_by_title(self, job_title: str) -> dict[str, object] | None:
+        row = self.db.get_connection().execute(
+            "SELECT * FROM screening_profiles WHERE job_title = ?",
+            (str(job_title or "").strip(),),
+        ).fetchone()
+        return self._decode_screening_profile(row) if row is not None else None
 
     def finalize_batch(
         self,
@@ -671,7 +685,7 @@ class CandidateRepository:
             "latest_batch_status": str(latest_batch["status"]) if latest_batch else "idle",
         }
 
-    def save_screening_profile(self, profile: ScreeningProfile) -> ScreeningProfile:
+    def save_job_profile(self, profile: ScreeningProfile) -> ScreeningProfile:
         connection = self.db.get_connection()
         timestamp = now_iso()
         existing = None
@@ -688,6 +702,16 @@ class CandidateRepository:
 
         values = (
             profile.job_title,
+            profile.department,
+            profile.hiring_manager,
+            profile.location,
+            profile.employment_type,
+            profile.experience_requirement,
+            profile.education_requirement,
+            max(1, int(profile.target_hires)),
+            profile.recruitment_deadline,
+            profile.priority,
+            profile.status,
             profile.jd_text,
             profile.prompt_text,
             profile.prompt_source,
@@ -698,43 +722,74 @@ class CandidateRepository:
             json.dumps(profile.interview_checks, ensure_ascii=False),
             json.dumps(profile.evidence_policy, ensure_ascii=False, sort_keys=True),
         )
-        if existing is None:
-            cursor = connection.execute(
-                """
-                INSERT INTO screening_profiles(
-                    job_title, jd_text, prompt_text, prompt_source,
-                    must_have_json, nice_to_have_json, risk_flags_json, exclusions_json,
-                    interview_checks_json, evidence_policy_json, version, parent_profile_id,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (*values, max(1, int(profile.version)), profile.parent_profile_id, timestamp, timestamp),
-            )
-            profile.id = int(cursor.lastrowid)
-            profile.created_at = timestamp
-        else:
-            profile.id = int(existing["id"])
-            profile.created_at = str(existing["created_at"])
-            profile.version = int(existing["version"] or 1) + 1
+        with connection:
+            if existing is None:
+                profile.version = max(1, int(profile.version))
+                cursor = connection.execute(
+                    """
+                    INSERT INTO screening_profiles(
+                        job_title, department, hiring_manager, location, employment_type,
+                        experience_requirement, education_requirement, target_hires,
+                        recruitment_deadline, priority, status,
+                        jd_text, prompt_text, prompt_source,
+                        must_have_json, nice_to_have_json, risk_flags_json, exclusions_json,
+                        interview_checks_json, evidence_policy_json, version, parent_profile_id,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (*values, profile.version, profile.parent_profile_id, timestamp, timestamp),
+                )
+                profile.id = int(cursor.lastrowid)
+                profile.created_at = timestamp
+            else:
+                profile.id = int(existing["id"])
+                profile.created_at = str(existing["created_at"])
+                profile.version = int(existing["version"] or 1) + 1
+                connection.execute(
+                    """
+                    UPDATE screening_profiles
+                    SET job_title = ?, department = ?, hiring_manager = ?, location = ?,
+                        employment_type = ?, experience_requirement = ?,
+                        education_requirement = ?, target_hires = ?, recruitment_deadline = ?,
+                        priority = ?, status = ?, jd_text = ?, prompt_text = ?, prompt_source = ?,
+                        must_have_json = ?, nice_to_have_json = ?, risk_flags_json = ?,
+                        exclusions_json = ?, interview_checks_json = ?, evidence_policy_json = ?,
+                        version = ?, parent_profile_id = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (*values, profile.version, profile.parent_profile_id, timestamp, profile.id),
+                )
+            profile.updated_at = timestamp
             connection.execute(
                 """
-                UPDATE screening_profiles
-                SET job_title = ?, jd_text = ?, prompt_text = ?, prompt_source = ?,
-                    must_have_json = ?, nice_to_have_json = ?, risk_flags_json = ?,
-                    exclusions_json = ?, interview_checks_json = ?, evidence_policy_json = ?,
-                    version = ?, parent_profile_id = ?, updated_at = ?
-                WHERE id = ?
+                INSERT INTO job_profile_versions(profile_id, version, snapshot_json, created_at)
+                VALUES (?, ?, ?, ?)
                 """,
-                (*values, profile.version, profile.parent_profile_id, timestamp, profile.id),
+                (
+                    int(profile.id),
+                    int(profile.version),
+                    json.dumps(profile.to_dict(), ensure_ascii=False, sort_keys=True),
+                    timestamp,
+                ),
             )
-        profile.updated_at = timestamp
-        connection.commit()
         return profile
 
-    def list_screening_profiles(self) -> list[dict[str, object]]:
+    def save_screening_profile(self, profile: ScreeningProfile) -> ScreeningProfile:
+        return self.save_job_profile(profile)
+
+    def list_job_profiles(self, *, active_only: bool = False) -> list[dict[str, object]]:
         connection = self.db.get_connection()
-        rows = connection.execute("SELECT * FROM screening_profiles ORDER BY updated_at DESC").fetchall()
+        sql = "SELECT * FROM screening_profiles"
+        params: tuple[object, ...] = ()
+        if active_only:
+            sql += " WHERE status = ?"
+            params = ("active",)
+        sql += " ORDER BY updated_at DESC"
+        rows = connection.execute(sql, params).fetchall()
         return [self._decode_screening_profile(row) for row in rows]
+
+    def list_screening_profiles(self) -> list[dict[str, object]]:
+        return self.list_job_profiles()
 
     def get_screening_profile(self, profile_id: int) -> dict[str, object] | None:
         row = self.db.get_connection().execute(
@@ -742,6 +797,34 @@ class CandidateRepository:
             (profile_id,),
         ).fetchone()
         return self._decode_screening_profile(row) if row is not None else None
+
+    def get_job_profile(self, profile_id: int) -> dict[str, object] | None:
+        return self.get_screening_profile(profile_id)
+
+    def list_job_profile_versions(self, profile_id: int) -> list[dict[str, object]]:
+        rows = self.db.get_connection().execute(
+            """
+            SELECT version, snapshot_json, created_at
+            FROM job_profile_versions
+            WHERE profile_id = ?
+            ORDER BY version DESC
+            """,
+            (profile_id,),
+        ).fetchall()
+        result: list[dict[str, object]] = []
+        for row in rows:
+            try:
+                snapshot = json.loads(str(row["snapshot_json"] or "{}"))
+            except (TypeError, json.JSONDecodeError):
+                snapshot = {}
+            result.append(
+                {
+                    "version": int(row["version"]),
+                    "snapshot": snapshot if isinstance(snapshot, dict) else {},
+                    "created_at": str(row["created_at"] or ""),
+                }
+            )
+        return result
 
     @staticmethod
     def _decode_screening_profile(row: sqlite3.Row) -> dict[str, object]:
@@ -760,22 +843,32 @@ class CandidateRepository:
                 result[target] = {} if target == "evidence_policy" else []
         return result
 
-    def clone_screening_profile(self, profile_id: int, new_job_title: str) -> ScreeningProfile:
+    def clone_job_profile(self, profile_id: int, new_job_title: str) -> ScreeningProfile:
         source = self.get_screening_profile(profile_id)
         if source is None:
-            raise ValueError("筛选方案不存在")
+            raise ValueError("岗位档案不存在")
         title = str(new_job_title or "").strip()
         if not title:
-            raise ValueError("复制方案必须填写新名称")
+            raise ValueError("复制岗位必须填写新名称")
         duplicate = self.db.get_connection().execute(
             "SELECT id FROM screening_profiles WHERE job_title = ?",
             (title,),
         ).fetchone()
         if duplicate is not None:
-            raise ValueError("同名筛选方案已存在")
-        return self.save_screening_profile(
+            raise ValueError("同名岗位档案已存在")
+        return self.save_job_profile(
             ScreeningProfile(
                 job_title=title,
+                department=str(source.get("department") or ""),
+                hiring_manager=str(source.get("hiring_manager") or ""),
+                location=str(source.get("location") or ""),
+                employment_type=str(source.get("employment_type") or ""),
+                experience_requirement=str(source.get("experience_requirement") or ""),
+                education_requirement=str(source.get("education_requirement") or ""),
+                target_hires=int(source.get("target_hires") or 1),
+                recruitment_deadline=str(source.get("recruitment_deadline") or ""),
+                priority=str(source.get("priority") or "normal"),
+                status="draft",
                 jd_text=str(source.get("jd_text") or ""),
                 prompt_text=str(source.get("prompt_text") or ""),
                 prompt_source=str(source.get("prompt_source") or "generated"),
@@ -789,10 +882,26 @@ class CandidateRepository:
             )
         )
 
+    def clone_screening_profile(self, profile_id: int, new_job_title: str) -> ScreeningProfile:
+        return self.clone_job_profile(profile_id, new_job_title)
+
+    def set_job_profile_status(self, profile_id: int, status: str) -> ScreeningProfile:
+        if status not in {"draft", "active", "paused", "closed"}:
+            raise ValueError("岗位状态无效")
+        source = self.get_job_profile(profile_id)
+        if source is None:
+            raise ValueError("岗位档案不存在")
+        values = {
+            key: source.get(key)
+            for key in ScreeningProfile.__dataclass_fields__
+            if key in source
+        }
+        profile = ScreeningProfile(**values)
+        profile.status = status
+        return self.save_job_profile(profile)
+
     def delete_screening_profile(self, profile_id: int) -> None:
-        connection = self.db.get_connection()
-        connection.execute("DELETE FROM screening_profiles WHERE id = ?", (profile_id,))
-        connection.commit()
+        self.set_job_profile_status(profile_id, "closed")
 
     def create_screening_run(
         self,
@@ -806,15 +915,19 @@ class CandidateRepository:
         origin: str = "manual",
     ) -> int:
         connection = self.db.get_connection()
+        profile = self.get_job_profile(profile_id)
+        if profile is None:
+            raise ValueError("岗位档案不存在")
         cursor = connection.execute(
             """
             INSERT INTO screening_runs(
-                profile_id, source_job_title, batch_id, provider, model, origin, status,
+                profile_id, profile_version, source_job_title, batch_id, provider, model, origin, status,
                 total_candidates, completed_candidates, failed_candidates, started_at
-            ) VALUES (?, ?, ?, ?, ?, ?, 'running', ?, 0, 0, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, 0, 0, ?)
             """,
             (
                 profile_id,
+                int(profile.get("version") or 1),
                 source_job_title,
                 batch_id,
                 provider,

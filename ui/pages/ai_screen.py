@@ -307,6 +307,35 @@ class AIScreenPage(QWidget):
             self.api_base_input.setText(config.ai_provider.api_base)
         self.api_key_env_input.setText(config.ai_provider.api_key_env)
 
+    def set_profile_editing_enabled(self, enabled: bool) -> None:
+        for button in [
+            self.new_profile_button,
+            self.save_profile_button,
+            self.clone_profile_button,
+            self.delete_profile_button,
+            self.upload_jd_button,
+            self.upload_prompt_button,
+            self.generate_prompt_button,
+        ]:
+            button.setVisible(enabled)
+        for line_edit in [
+            self.job_title_input,
+            self.must_have_input,
+            self.nice_to_have_input,
+            self.risk_flags_input,
+            self.exclusions_input,
+            self.interview_checks_input,
+            self.evidence_policy_input,
+        ]:
+            line_edit.setReadOnly(not enabled)
+        self.jd_text.setReadOnly(not enabled)
+        self.prompt_text.setReadOnly(not enabled)
+        self.compliance_label.setText(
+            "岗位信息和筛选规则统一在“岗位中心”维护；本页面只选择岗位并执行 AI 初筛。"
+            if not enabled
+            else "合规提示：只使用与岗位履职直接相关的标准。"
+        )
+
     def set_profiles(self, rows: list[dict[str, object]]) -> None:
         current_id = self.current_profile_id
         self.profile_combo.blockSignals(True)

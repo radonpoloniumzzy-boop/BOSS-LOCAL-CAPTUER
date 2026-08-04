@@ -160,7 +160,12 @@ class CaptureService:
 
         collector = BossCardCollector(selector_config=selector_config, logger=self.logger)
         collector.wait_for_page_ready(page)
-        batch = self.repository.create_batch(options.job_title, options.source_url, options.note)
+        batch = self.repository.create_batch(
+            options.job_title,
+            options.source_url,
+            options.note,
+            role_id=options.role_id,
+        )
         seen_keys: set[str] = set()
         total_inserted_candidates = 0
         total_batch_items = 0

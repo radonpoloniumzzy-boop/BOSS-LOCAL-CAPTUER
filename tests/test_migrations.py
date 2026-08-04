@@ -60,7 +60,7 @@ class MigrationTest(unittest.TestCase):
             self.assertIn("next_attempt_at", task_columns)
             self.assertIn("failure_category", task_columns)
             self.assertIn("idx_screening_tasks_claim", indexes)
-            self.assertEqual(version, 13)
+            self.assertEqual(version, 14)
             connection.close()
 
     def test_existing_screening_runs_table_gets_origin_column(self) -> None:
@@ -112,6 +112,9 @@ class MigrationTest(unittest.TestCase):
             profile_columns = {
                 row[1] for row in connection.execute("PRAGMA table_info(candidate_profiles)").fetchall()
             }
+            job_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(screening_profiles)").fetchall()
+            }
             version = connection.execute("SELECT version FROM schema_version").fetchone()[0]
             self.assertIn("origin", columns)
             self.assertIn("request_payload_hash", task_columns)
@@ -144,7 +147,12 @@ class MigrationTest(unittest.TestCase):
             self.assertIn("industry_tags_json", profile_columns)
             self.assertIn("skill_tags_json", profile_columns)
             self.assertIn("profile_completeness", profile_columns)
-            self.assertEqual(version, 13)
+            self.assertIn("department", job_columns)
+            self.assertIn("hiring_manager", job_columns)
+            self.assertIn("target_hires", job_columns)
+            self.assertIn("status", job_columns)
+            self.assertIn("profile_version", columns)
+            self.assertEqual(version, 14)
             connection.close()
 
     def test_existing_screening_results_are_backfilled_as_tasks(self) -> None:
@@ -292,6 +300,15 @@ class MigrationTest(unittest.TestCase):
                 FROM screening_results
                 """
             ).fetchone()
+            job_row = connection.execute(
+                "SELECT status, target_hires FROM screening_profiles WHERE id = 1"
+            ).fetchone()
+            version_row = connection.execute(
+                "SELECT profile_id, version FROM job_profile_versions WHERE profile_id = 1"
+            ).fetchone()
+            run_version = connection.execute(
+                "SELECT profile_version FROM screening_runs WHERE id = 1"
+            ).fetchone()[0]
             version = connection.execute("SELECT version FROM schema_version").fetchone()[0]
             self.assertIsNotNone(row)
             self.assertEqual(tuple(row), (
@@ -311,7 +328,10 @@ class MigrationTest(unittest.TestCase):
             self.assertEqual(tuple(event_row), (1, 1, "", "screened", "migration_backfill"))
             self.assertEqual(tuple(profile_row), (1, "Legacy Candidate", "Sales", "", ""))
             self.assertEqual(tuple(result_row), ("", "[]", "[]", "[]", ""))
-            self.assertEqual(version, 13)
+            self.assertEqual(tuple(job_row), ("active", 1))
+            self.assertEqual(tuple(version_row), (1, 1))
+            self.assertEqual(run_version, 0)
+            self.assertEqual(version, 14)
             connection.close()
 
 

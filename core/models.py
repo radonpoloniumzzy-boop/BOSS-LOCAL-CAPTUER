@@ -107,6 +107,7 @@ class CollectOptions:
     source_url: str
     note: str = ""
     auto_export: bool = False
+    role_id: int | None = None
 
 
 @dataclass(slots=True)
@@ -141,6 +142,7 @@ class CaptureBatch:
     start_time: str
     status: str
     note: str = ""
+    role_id: int | None = None
     id: int | None = None
     end_time: str = ""
     total_collected: int = 0
@@ -224,6 +226,16 @@ class ScreeningProfile:
     jd_text: str
     prompt_text: str
     prompt_source: str = "generated"
+    department: str = ""
+    hiring_manager: str = ""
+    location: str = ""
+    employment_type: str = ""
+    experience_requirement: str = ""
+    education_requirement: str = ""
+    target_hires: int = 1
+    recruitment_deadline: str = ""
+    priority: str = "normal"
+    status: str = "draft"
     must_have: list[str] = field(default_factory=list)
     nice_to_have: list[str] = field(default_factory=list)
     risk_flags: list[str] = field(default_factory=list)
@@ -238,6 +250,10 @@ class ScreeningProfile:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+# The existing type name remains as a compatibility alias for older integrations.
+JobProfile = ScreeningProfile
 
 
 @dataclass(slots=True)

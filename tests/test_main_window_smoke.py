@@ -62,7 +62,7 @@ class MainWindowSmokeTest(unittest.TestCase):
                         window._page_scroll_areas[product_index].widget(),
                         window.product_development_page,
                     )
-                    self.assertIn("0.3.0-dev", window.product_development_page.version_value.text())
+                    self.assertIn("0.4.0-dev", window.product_development_page.version_value.text())
                     version_statuses = {
                         window.product_development_page.version_table.item(row, 2).text()
                         for row in range(window.product_development_page.version_table.rowCount())
@@ -74,6 +74,50 @@ class MainWindowSmokeTest(unittest.TestCase):
                     window.product_development_page.feedback_submit_button.click()
                     self.assertTrue((config_service.data_dir / "product_feedback.json").exists())
                     self.assertEqual(window.product_development_page.feedback_table.rowCount(), 1)
+                finally:
+                    window.close()
+                    QTest.qWait(50)
+
+    def test_job_center_is_the_single_editor_and_feeds_operational_pages(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_service = ConfigService(Path(tmp_dir))
+            assets_dir = config_service.app_root / "assets"
+            assets_dir.mkdir(parents=True, exist_ok=True)
+            source_plan = Path(__file__).parents[1] / "assets" / "product_development_plan.json"
+            (assets_dir / "product_development_plan.json").write_text(
+                source_plan.read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            config = config_service.default_config()
+            config.local_api_port = 0
+            config_service.save(config)
+
+            with patch("ui.main_window.ConfigService", return_value=config_service):
+                window = MainWindow()
+                try:
+                    QTest.qWait(500)
+                    self.assertIn("岗位中心", window._navigation_full_labels)
+                    self.assertGreaterEqual(window.job_profiles_page.profile_table.rowCount(), 1)
+                    self.assertTrue(window.ai_page.job_title_input.isReadOnly())
+                    self.assertTrue(window.ai_page.save_profile_button.isHidden())
+                    self.assertGreaterEqual(window.dashboard_page.job_profile_combo.count(), 1)
+
+                    window.job_profiles_page.new_button.click()
+                    window.job_profiles_page.job_title_input.setText("数据分析师")
+                    window.job_profiles_page.jd_input.setPlainText("负责招聘数据分析")
+                    active_index = window.job_profiles_page.status_combo.findData("active")
+                    window.job_profiles_page.status_combo.setCurrentIndex(active_index)
+                    window.job_profiles_page.save_button.click()
+
+                    titles = {
+                        row["job_title"] for row in window.repository.list_job_profiles()
+                    }
+                    self.assertIn("数据分析师", titles)
+                    dashboard_titles = {
+                        window.dashboard_page.job_profile_combo.itemText(index)
+                        for index in range(window.dashboard_page.job_profile_combo.count())
+                    }
+                    self.assertIn("数据分析师", dashboard_titles)
                 finally:
                     window.close()
                     QTest.qWait(50)

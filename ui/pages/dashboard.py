@@ -76,9 +76,11 @@ class DashboardPage(QWidget):
         form_group = QGroupBox("采集控制")
         form_layout = QFormLayout(form_group)
         self.job_title_input = QLineEdit()
+        self.job_title_input.hide()
+        self.job_profile_combo = QComboBox()
         self.source_url_input = QLineEdit()
         self.note_input = QLineEdit()
-        form_layout.addRow("岗位名称", self.job_title_input)
+        form_layout.addRow("岗位档案", self.job_profile_combo)
         form_layout.addRow("目标链接", self.source_url_input)
         form_layout.addRow("批次备注", self.note_input)
 
@@ -258,6 +260,7 @@ class DashboardPage(QWidget):
         self.funnel_window_combo.currentIndexChanged.connect(self.funnel_refresh_requested.emit)
         self.funnel_detail_status_combo.currentIndexChanged.connect(self.funnel_refresh_requested.emit)
         self.funnel_detail_rating_combo.currentIndexChanged.connect(self.funnel_refresh_requested.emit)
+        self.job_profile_combo.currentIndexChanged.connect(self._sync_job_title)
 
     def load_config(self, config) -> None:
         default_job_title = config.default_job_title or ""
@@ -267,11 +270,40 @@ class DashboardPage(QWidget):
         self.source_url_input.setText(config.target_url)
         self.local_api_value.setText(f"http://127.0.0.1:{config.local_api_port}")
 
+    def set_job_profiles(
+        self,
+        profiles: list[dict[str, object]],
+        selected_profile_id: int | None = None,
+    ) -> None:
+        current = selected_profile_id
+        if current is None:
+            current = self.job_profile_combo.currentData()
+        self.job_profile_combo.blockSignals(True)
+        self.job_profile_combo.clear()
+        for profile in profiles:
+            self.job_profile_combo.addItem(
+                str(profile.get("job_title") or "未命名岗位"),
+                int(profile["id"]),
+            )
+        index = self.job_profile_combo.findData(current)
+        self.job_profile_combo.setCurrentIndex(max(0, index))
+        self.job_profile_combo.blockSignals(False)
+        self._sync_job_title()
+
+    def _sync_job_title(self) -> None:
+        if self.job_profile_combo.count():
+            self.job_title_input.setText(self.job_profile_combo.currentText())
+
     def build_collect_options(self) -> CollectOptions:
         return CollectOptions(
             job_title=self.job_title_input.text().strip() or "Boss 推荐牛人",
             source_url=self.source_url_input.text().strip(),
             note=self.note_input.text().strip(),
+            role_id=(
+                int(self.job_profile_combo.currentData())
+                if self.job_profile_combo.currentData() is not None
+                else None
+            ),
         )
 
     def set_running(self, running: bool) -> None:
@@ -467,6 +499,9 @@ class DashboardPage(QWidget):
         self.open_browser_requested.emit(self.source_url_input.text().strip())
 
     def _emit_start_capture(self) -> None:
+        if self.job_profile_combo.currentData() is None:
+            self.message_label.setText("请先在岗位中心建立并启用岗位档案。")
+            return
         self.start_capture_requested.emit(self.build_collect_options())
 
     @staticmethod

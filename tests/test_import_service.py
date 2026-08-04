@@ -6,6 +6,7 @@ from pathlib import Path
 
 from automation.importer import CardImportService
 from automation.parser import CandidateParser
+from core.models import JobProfile
 from storage.db import DatabaseManager
 from storage.repository import CandidateRepository
 
@@ -98,6 +99,29 @@ class CardImportServiceTest(unittest.TestCase):
         self.assertEqual(len(candidates), 1)
         self.assertEqual(candidates[0]["source_url"], "https://lpt.liepin.com/recommend")
         self.assertEqual(candidates[0]["candidate_key"], "platform:liepin:resume-1")
+
+    def test_import_batch_links_matching_job_profile_without_changing_candidate_identity(self) -> None:
+        profile = self.repository.save_job_profile(
+            JobProfile(
+                job_title="招聘实习生",
+                jd_text="负责招聘支持",
+                prompt_text="筛选招聘经历",
+                status="active",
+            )
+        )
+
+        result = self.service.import_cards(
+            {
+                "job_title": "招聘实习生",
+                "source_url": "https://www.zhipin.com/web/geek/recommend",
+                "cards": [{"raw_card_text": "李四 招聘实习 本科", "name": "李四"}],
+            }
+        )
+        batch = next(
+            row for row in self.repository.list_batches() if int(row["id"]) == int(result["batch_id"])
+        )
+
+        self.assertEqual(batch["role_id"], profile.id)
 
 
 if __name__ == "__main__":

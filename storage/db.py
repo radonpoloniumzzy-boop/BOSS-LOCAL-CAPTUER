@@ -21,10 +21,10 @@ class DatabaseManager:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         version = self._schema_version(connection)
-        if version is not None and version < 13:
+        if version is not None and version < 14:
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             backup_path = self.db_path.with_name(
-                f"{self.db_path.stem}.before_v13_{stamp}{self.db_path.suffix}.bak"
+                f"{self.db_path.stem}.before_v14_{stamp}{self.db_path.suffix}.bak"
             )
             backup = sqlite3.connect(str(backup_path))
             try:

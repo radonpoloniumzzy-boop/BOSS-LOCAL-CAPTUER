@@ -33,7 +33,7 @@ from core.config import ConfigService
 from core.credentials import CredentialStore
 from core.local_api import LocalApiServer
 from core.logger import LoggingService
-from core.models import AutomationFlowConfig, ScreeningProfile
+from core.models import AutomationFlowConfig, JobProfile, ScreeningProfile
 from core.product_development import ProductDevelopmentRepository
 from storage.db import DatabaseManager
 from storage.export_service import ExportService
@@ -42,6 +42,7 @@ from ui.pages.ai_screen import AIScreenPage
 from ui.pages.automation_flow import AutomationFlowPage
 from ui.pages.candidates import CandidatesPage
 from ui.pages.dashboard import DashboardPage
+from ui.pages.job_profiles import JobProfilesPage
 from ui.pages.product_development import ProductDevelopmentPage
 from ui.pages.review import ReviewPage
 from ui.pages.settings import SettingsPage
@@ -179,6 +180,7 @@ class MainWindow(QMainWindow):
         self.navigation.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         for label in [
             "仪表盘",
+            "岗位中心",
             "自动化流程",
             "候选人",
             "AI 初筛",
@@ -193,9 +195,11 @@ class MainWindow(QMainWindow):
         self.stack.setMinimumSize(0, 0)
         self.stack.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
         self.dashboard_page = DashboardPage()
+        self.job_profiles_page = JobProfilesPage()
         self.automation_flow_page = AutomationFlowPage()
         self.candidates_page = CandidatesPage()
         self.ai_page = AIScreenPage(self.prompt_manager)
+        self.ai_page.set_profile_editing_enabled(False)
         self.review_page = ReviewPage()
         self.product_development_page = ProductDevelopmentPage()
         self.settings_page = SettingsPage()
@@ -203,6 +207,7 @@ class MainWindow(QMainWindow):
         self._page_scroll_areas: list[QScrollArea] = []
         for page in [
             self.dashboard_page,
+            self.job_profiles_page,
             self.automation_flow_page,
             self.candidates_page,
             self.ai_page,
@@ -229,7 +234,7 @@ class MainWindow(QMainWindow):
         self._navigation_full_labels = [
             self.navigation.item(index).text() for index in range(self.navigation.count())
         ]
-        self._navigation_compact_labels = ["概", "流", "人", "AI", "核", "建", "设"]
+        self._navigation_compact_labels = ["概", "岗", "流", "人", "AI", "核", "建", "设"]
         self.navigation_container = QWidget()
         navigation_layout = QVBoxLayout(self.navigation_container)
         navigation_layout.setContentsMargins(0, 0, 0, 0)
@@ -396,6 +401,11 @@ class MainWindow(QMainWindow):
         self.dashboard_page.open_export_folder_requested.connect(self.handle_open_export_folder)
         self.dashboard_page.funnel_refresh_requested.connect(self.refresh_dashboard_stats)
 
+        self.job_profiles_page.profile_selected.connect(self._load_job_profile)
+        self.job_profiles_page.save_requested.connect(self._save_job_profile)
+        self.job_profiles_page.clone_requested.connect(self._clone_job_profile)
+        self.job_profiles_page.status_change_requested.connect(self._change_job_profile_status)
+
         self.candidates_page.refresh_requested.connect(self.refresh_candidates)
         self.candidates_page.export_requested.connect(self._export_candidates_view)
         self.candidates_page.candidate_selected.connect(self._load_candidate_detail)
@@ -439,6 +449,7 @@ class MainWindow(QMainWindow):
         self.settings_page.load_config(self.config)
         self.ai_page.load_config(self.config)
         self.automation_flow_page.load_config(self.config)
+        self.refresh_job_profiles()
         self.refresh_product_development()
 
     def refresh_product_development(self) -> None:
@@ -494,7 +505,11 @@ class MainWindow(QMainWindow):
             self.config = self.config_service.load()
         return {
             "resume_filename_template": self.config.resume_filename_template,
-            "job_title": self.config.default_job_title,
+            "job_title": (
+                self.dashboard_page.job_profile_combo.currentText()
+                or self.config.default_job_title
+            ),
+            "job_profile_id": self.dashboard_page.job_profile_combo.currentData(),
         }
 
     def handle_open_browser(self) -> None:
@@ -506,6 +521,9 @@ class MainWindow(QMainWindow):
         self._start_capture_from_dashboard(self.dashboard_page.build_collect_options())
 
     def _start_capture_from_dashboard(self, collect_options) -> None:
+        if collect_options.role_id is None:
+            QMessageBox.warning(self, "请选择岗位", "请先在岗位中心建立并启用岗位档案。")
+            return
         if "zhipin.com" in (collect_options.source_url or "").lower():
             endpoint = f"http://127.0.0.1:{self.config.local_api_port}"
             message = (
@@ -840,7 +858,7 @@ class MainWindow(QMainWindow):
         self.logger.info("Settings updated")
 
     def refresh_automation_flow(self, selected_run_id: int | None = None) -> None:
-        profiles = [dict(row) for row in self.repository.list_screening_profiles()]
+        profiles = [dict(row) for row in self.repository.list_job_profiles(active_only=True)]
         runs = [dict(row) for row in self.repository.list_screening_runs(origin="automation")]
         self.automation_flow_page.set_profiles(
             profiles,
@@ -862,7 +880,11 @@ class MainWindow(QMainWindow):
                 if flow.profile_id is not None
                 else None
             )
-            ready = profile is not None and bool(flow.model and flow.provider)
+            ready = (
+                profile is not None
+                and profile.get("status") == "active"
+                and bool(flow.model and flow.provider)
+            )
             return {
                 "ready": ready,
                 "enabled": bool(flow.enabled),
@@ -884,6 +906,8 @@ class MainWindow(QMainWindow):
             profile = self.repository.get_screening_profile(int(flow.profile_id))
             if profile is None:
                 raise ValueError("自动化筛选方案不存在，请在桌面端重新选择并保存。")
+            if profile.get("status") != "active":
+                raise ValueError("所选岗位不是招聘中状态，请先在岗位中心启用。")
             if not flow.provider or not flow.model:
                 raise ValueError("自动化流程缺少 AI 服务商或模型配置。")
             flow.enabled = True
@@ -905,7 +929,12 @@ class MainWindow(QMainWindow):
 
     def _save_automation_flow(self, payload: dict[str, object]) -> bool:
         profile_id = payload.get("profile_id")
-        if profile_id is None or self.repository.get_screening_profile(int(profile_id)) is None:
+        profile = (
+            self.repository.get_job_profile(int(profile_id))
+            if profile_id is not None
+            else None
+        )
+        if profile is None or profile.get("status") != "active":
             self.automation_flow_page.set_status("请先选择一个已保存的筛选方案。")
             return False
         provider = dict(payload.get("provider") or {})
@@ -985,9 +1014,18 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "记录失败", str(exc))
 
     def refresh_ai_screen(self, selected_run_id: int | None = None) -> None:
-        profiles = [dict(row) for row in self.repository.list_screening_profiles()]
+        profiles = [dict(row) for row in self.repository.list_job_profiles(active_only=True)]
         runs = [dict(row) for row in self.repository.list_screening_runs()]
+        active_ids = {int(profile["id"]) for profile in profiles}
+        selected_profile_id = self.ai_page.current_profile_id
+        if selected_profile_id not in active_ids:
+            selected_profile_id = int(profiles[0]["id"]) if profiles else None
         self.ai_page.set_profiles(profiles)
+        if selected_profile_id is not None:
+            self.ai_page.current_profile_id = selected_profile_id
+            self._load_screening_profile(selected_profile_id)
+        else:
+            self.ai_page.clear_profile()
         self.ai_page.set_source_options(
             self.repository.list_job_titles(),
             [dict(batch) for batch in self.repository.list_batches()],
@@ -1004,11 +1042,130 @@ class MainWindow(QMainWindow):
         row = self.repository.get_screening_profile(profile_id)
         self.ai_page.show_profile(dict(row) if row else None)
 
+    def refresh_job_profiles(self, selected_profile_id: int | None = None) -> None:
+        profiles = [dict(row) for row in self.repository.list_job_profiles()]
+        active_profiles = [row for row in profiles if row.get("status") == "active"]
+        self.job_profiles_page.set_profiles(profiles)
+        self.dashboard_page.set_job_profiles(active_profiles, selected_profile_id)
+        current_id = selected_profile_id or self.job_profiles_page.current_profile_id
+        if current_id is not None:
+            self._load_job_profile(int(current_id))
+
+    def _load_job_profile(self, profile_id: int) -> None:
+        profile = self.repository.get_job_profile(profile_id)
+        self.job_profiles_page.show_profile(dict(profile) if profile else None)
+        self.job_profiles_page.set_versions(
+            self.repository.list_job_profile_versions(profile_id) if profile else []
+        )
+
+    def _save_job_profile(self, payload: dict[str, object]) -> JobProfile | None:
+        try:
+            requested_title = str(payload.get("job_title") or "").strip()
+            if payload.get("id") is None and requested_title:
+                duplicate = self.repository.find_job_profile_by_title(requested_title)
+                if duplicate is not None:
+                    raise ValueError("同名岗位档案已存在，请直接编辑现有岗位或使用复制功能")
+            existing = (
+                self.repository.get_job_profile(int(payload["id"]))
+                if payload.get("id") is not None
+                else {}
+            ) or {}
+
+            def value(key: str, default: object = "") -> object:
+                return payload[key] if key in payload else existing.get(key, default)
+
+            evidence_policy = dict(value("evidence_policy", {}) or {})
+            if "_invalid" in evidence_policy:
+                raise ValueError("证据策略必须是有效 JSON")
+            profile = JobProfile(
+                id=int(payload["id"]) if payload.get("id") is not None else None,
+                job_title=str(value("job_title") or "").strip(),
+                department=str(value("department") or "").strip(),
+                hiring_manager=str(value("hiring_manager") or "").strip(),
+                location=str(value("location") or "").strip(),
+                employment_type=str(value("employment_type") or "").strip(),
+                experience_requirement=str(value("experience_requirement") or "").strip(),
+                education_requirement=str(value("education_requirement") or "").strip(),
+                target_hires=max(1, int(value("target_hires", 1) or 1)),
+                recruitment_deadline=str(value("recruitment_deadline") or "").strip(),
+                priority=str(value("priority", "normal") or "normal"),
+                status=str(value("status", "draft") or "draft"),
+                jd_text=str(value("jd_text") or "").strip(),
+                prompt_text=str(value("prompt_text") or ""),
+                prompt_source=str(value("prompt_source", "generated") or "generated"),
+                must_have=list(value("must_have", []) or []),
+                nice_to_have=list(value("nice_to_have", []) or []),
+                risk_flags=list(value("risk_flags", []) or []),
+                exclusions=list(value("exclusions", []) or []),
+                interview_checks=list(value("interview_checks", []) or []),
+                evidence_policy=evidence_policy,
+                parent_profile_id=existing.get("parent_profile_id"),
+            )
+            if not profile.job_title or not profile.jd_text:
+                raise ValueError("岗位名称和岗位说明 JD 为必填项")
+            if profile.status not in {"draft", "active", "paused", "closed"}:
+                raise ValueError("岗位状态无效")
+            if not profile.prompt_text:
+                profile.prompt_text = (
+                    self.prompt_manager.build_structured(profile)
+                    if any(
+                        [
+                            profile.must_have,
+                            profile.nice_to_have,
+                            profile.risk_flags,
+                            profile.exclusions,
+                            profile.interview_checks,
+                            profile.evidence_policy,
+                        ]
+                    )
+                    else self.prompt_manager.build_from_jd(profile.job_title, profile.jd_text)
+                )
+                profile.prompt_source = "generated"
+            errors = self.prompt_manager.validate_screening_criteria(profile.prompt_text)
+            if errors:
+                raise ValueError("筛选条件包含不能用于自动招聘评级的条件：" + "、".join(errors))
+            saved = self.repository.save_job_profile(profile)
+            self.refresh_job_profiles(int(saved.id))
+            self.refresh_ai_screen()
+            self.refresh_automation_flow()
+            self.statusBar().showMessage(f"已保存岗位档案：{saved.job_title} V{saved.version}")
+            return saved
+        except Exception as exc:
+            self.job_profiles_page.message_label.setText(f"无法保存岗位档案：{exc}")
+            QMessageBox.warning(self, "无法保存岗位档案", str(exc))
+            return None
+
+    def _clone_job_profile(self, profile_id: int, new_job_title: str) -> None:
+        try:
+            profile = self.repository.clone_job_profile(profile_id, new_job_title)
+            self.refresh_job_profiles(int(profile.id))
+            self.refresh_ai_screen()
+            self.refresh_automation_flow()
+            self.statusBar().showMessage(f"已复制岗位档案：{new_job_title}，当前为草稿")
+        except Exception as exc:
+            QMessageBox.warning(self, "无法复制岗位档案", str(exc))
+
+    def _change_job_profile_status(self, profile_id: int, status: str) -> None:
+        try:
+            profile = self.repository.set_job_profile_status(profile_id, status)
+            if status != "active" and self.config.automation_flow.profile_id == profile_id:
+                self.config.automation_flow.enabled = False
+                self.config_service.save(self.config)
+            self.refresh_job_profiles(profile_id)
+            self.refresh_ai_screen()
+            self.refresh_automation_flow()
+            self.statusBar().showMessage(
+                f"岗位状态已更新：{profile.job_title} → {status}（V{profile.version}）"
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "无法更新岗位状态", str(exc))
+
     def _ensure_builtin_screening_profiles(self) -> None:
         if any(str(row.get("job_title") or "") == "证券交易员" for row in self.repository.list_screening_profiles()):
             return
         profile = ScreeningProfile(
             job_title="证券交易员",
+            status="active",
             jd_text="负责证券交易执行、交易风险控制、交易记录复盘与异常处理。",
             prompt_text="",
             must_have=["候选人资料中存在明确的证券或金融产品交易证据"],
@@ -1022,72 +1179,13 @@ class MainWindow(QMainWindow):
             },
         )
         profile.prompt_text = self.prompt_manager.build_structured(profile)
-        self.repository.save_screening_profile(profile)
+        self.repository.save_job_profile(profile)
 
     def _save_screening_profile(self, payload: dict[str, object]) -> ScreeningProfile | None:
-        try:
-            evidence_policy = dict(payload.get("evidence_policy") or {})
-            if "_invalid" in evidence_policy:
-                raise ValueError("证据策略必须是有效 JSON")
-            structured_profile = ScreeningProfile(
-                id=int(payload["id"]) if payload.get("id") is not None else None,
-                job_title=str(payload.get("job_title") or "").strip(),
-                jd_text=str(payload.get("jd_text") or "").strip(),
-                prompt_text=str(payload.get("prompt_text") or ""),
-                prompt_source=str(payload.get("prompt_source") or "generated"),
-                must_have=list(payload.get("must_have") or []),
-                nice_to_have=list(payload.get("nice_to_have") or []),
-                risk_flags=list(payload.get("risk_flags") or []),
-                exclusions=list(payload.get("exclusions") or []),
-                interview_checks=list(payload.get("interview_checks") or []),
-                evidence_policy=evidence_policy,
-            )
-            prompt_text = str(payload.get("prompt_text") or "")
-            prompt_source = str(payload.get("prompt_source") or "generated")
-            if not prompt_text:
-                prompt_text = (
-                    self.prompt_manager.build_structured(structured_profile)
-                    if any(
-                        [
-                            structured_profile.must_have,
-                            structured_profile.nice_to_have,
-                            structured_profile.risk_flags,
-                            structured_profile.exclusions,
-                            structured_profile.interview_checks,
-                            structured_profile.evidence_policy,
-                        ]
-                    )
-                    else self.prompt_manager.build_from_jd(
-                        structured_profile.job_title,
-                        structured_profile.jd_text,
-                    )
-                )
-                prompt_source = "generated"
-            errors = self.prompt_manager.validate_screening_criteria(prompt_text)
-            if errors:
-                raise ValueError("筛选条件包含不能用于自动招聘评级的条件：" + "、".join(errors))
-            structured_profile.prompt_text = prompt_text
-            structured_profile.prompt_source = prompt_source
-            profile = self.repository.save_screening_profile(structured_profile)
-            self.ai_page.current_profile_id = profile.id
-            self.refresh_ai_screen()
-            self.refresh_automation_flow()
-            self._load_screening_profile(int(profile.id))
-            self.statusBar().showMessage(f"已保存筛选方案：{profile.job_title}")
-            return profile
-        except Exception as exc:
-            QMessageBox.warning(self, "无法保存筛选方案", str(exc))
-            return None
+        return self._save_job_profile(payload)
 
     def _clone_screening_profile(self, profile_id: int, new_job_title: str) -> None:
-        try:
-            profile = self.repository.clone_screening_profile(profile_id, new_job_title)
-            self.ai_page.current_profile_id = profile.id
-            self.refresh_ai_screen()
-            self._load_screening_profile(int(profile.id))
-            self.statusBar().showMessage(f"已复制筛选方案：{new_job_title}")
-        except Exception as exc:
-            QMessageBox.warning(self, "无法复制筛选方案", str(exc))
+        self._clone_job_profile(profile_id, new_job_title)
 
     def _delete_screening_profile(self, profile_id: int) -> None:
         self.repository.delete_screening_profile(profile_id)
@@ -1096,10 +1194,11 @@ class MainWindow(QMainWindow):
             self.config.automation_flow.profile_id = None
             self.config_service.save(self.config)
             self.automation_flow_page.enabled_checkbox.setChecked(False)
-        self.ai_page.clear_profile()
+        self.job_profiles_page.clear_profile()
         self.refresh_ai_screen()
         self.refresh_automation_flow()
-        self.statusBar().showMessage("筛选方案已删除")
+        self.refresh_job_profiles()
+        self.statusBar().showMessage("岗位档案已结束，历史记录已保留")
 
     def _start_ai_screening(self, payload: dict[str, object]) -> None:
         if self._ai_screening_thread is not None:
@@ -1107,8 +1206,13 @@ class MainWindow(QMainWindow):
             return
 
         profile_payload = dict(payload.get("profile") or {})
-        profile = self._save_screening_profile(profile_payload)
-        if profile is None:
+        profile_id = profile_payload.get("id")
+        if profile_id is None:
+            QMessageBox.warning(self, "请选择岗位", "请先在岗位中心建立并启用岗位档案。")
+            return
+        profile = self.repository.get_job_profile(int(profile_id))
+        if profile is None or profile.get("status") != "active":
+            QMessageBox.warning(self, "岗位不可执行", "所选岗位不是招聘中状态，请到岗位中心确认。")
             return
         candidates = self.repository.list_screening_candidates(
             job_title=str(payload.get("source_job_title") or ""),
@@ -1120,7 +1224,7 @@ class MainWindow(QMainWindow):
             return
 
         worker_payload = dict(payload)
-        worker_payload["profile"] = profile.to_dict()
+        worker_payload["profile"] = dict(profile)
         worker_payload["candidates"] = candidates
         worker_payload["origin"] = "manual"
         self._launch_ai_screening(worker_payload, origin="manual")
@@ -1529,6 +1633,8 @@ class MainWindow(QMainWindow):
         page = self._page_scroll_areas[index].widget()
         if page is self.automation_flow_page:
             self.refresh_automation_flow()
+        elif page is self.job_profiles_page:
+            self.refresh_job_profiles()
         elif page is self.candidates_page:
             self.refresh_candidates()
         elif page is self.ai_page:

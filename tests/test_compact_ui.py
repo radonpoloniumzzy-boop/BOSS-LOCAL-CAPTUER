@@ -90,9 +90,10 @@ class CompactMainWindowTest(unittest.TestCase):
                     self.app.processEvents()
                     self.assertEqual(window.navigation_container.width(), 132)
                     window._set_navigation_collapsed(True)
-                    window.navigation.setCurrentRow(2)
+                    candidate_index = window._navigation_full_labels.index("候选人")
+                    window.navigation.setCurrentRow(candidate_index)
                     self.app.processEvents()
-                    candidate_scroll = window._page_scroll_areas[2]
+                    candidate_scroll = window._page_scroll_areas[candidate_index]
                     self.assertLessEqual(
                         window.candidates_page.width(), candidate_scroll.viewport().width()
                     )

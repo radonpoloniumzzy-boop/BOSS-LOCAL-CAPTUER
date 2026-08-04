@@ -66,6 +66,7 @@ class AutomationFlowPage(QWidget):
         self.profile_combo.addItem("请选择筛选方案", None)
         self.job_title_input = QLineEdit()
         self.job_title_input.setPlaceholderText("本次采集岗位名称")
+        self.job_title_input.setReadOnly(True)
         self.source_url_input = QLineEdit()
         self.source_url_input.setPlaceholderText("Boss 或猎聘推荐人才页面")
         self.max_candidates_input = QSpinBox()
