@@ -358,7 +358,7 @@ function testAutomationAutoButtonStartsDesktopWorkflow() {
   assert(html.includes('id="apiToken"'));
   assert(popup.includes("automation_requested"));
   assert(popup.includes("AUTO 采集完成，已提交 AI 初筛"));
-  assert.strictEqual(manifest.version, "0.4.0");
+  assert.strictEqual(manifest.version, "0.5.0");
 }
 
 function testChatAutomationIsOptIn() {
@@ -492,6 +492,29 @@ function testFilenameTemplatesMatchDesktopFixtures() {
   }
 }
 
+function testDesktopRemoteControlKeepsPopupControlsAndUsesTaskScopedCommands() {
+  const worker = fs.readFileSync(path.join(EXTENSION_DIR, "service_worker.js"), "utf8");
+  const remote = fs.readFileSync(path.join(EXTENSION_DIR, "remote_control.js"), "utf8");
+  const popup = fs.readFileSync(path.join(EXTENSION_DIR, "popup.html"), "utf8");
+
+  assert(worker.includes('importScripts("remote_control.js")'));
+  for (const action of [
+    "automation_auto",
+    "collect_current",
+    "collect_auto",
+    "pause_scroll",
+    "stop_capture",
+  ]) {
+    assert(remote.includes(`"${action}"`));
+  }
+  assert(remote.includes("recruitment_task_id"));
+  assert(remote.includes("/api/extension/commands/next"));
+  assert(popup.includes('id="automationAuto"'));
+  assert(popup.includes('id="collectCurrent"'));
+  assert(popup.includes('id="collectAuto"'));
+  assert(popup.includes('id="pauseScroll"'));
+}
+
 async function main() {
   await testDownloadEndpointValidation();
   await testStopGuardIgnoresStaleProgress();
@@ -517,6 +540,7 @@ async function main() {
   testPopupSupportsPairingAndAuthenticatedConnectionCheck();
   testCollectionCarriesCanonicalJobProfileId();
   testFilenameTemplatesMatchDesktopFixtures();
+  testDesktopRemoteControlKeepsPopupControlsAndUsesTaskScopedCommands();
   console.log("extension regression tests passed");
 }
 

@@ -60,6 +60,45 @@ class RecruitmentTasksPageTest(unittest.TestCase):
 
         self.assertEqual(page.profile_combo.currentData(), 7)
 
+    def test_frontend_plugin_buttons_emit_selected_task_actions(self) -> None:
+        page = RecruitmentTasksPage()
+        page.set_job_profiles([{"id": 7, "job_title": "招聘顾问", "version": 1}])
+        page.show_task(
+            {
+                "id": 11,
+                "name": "招聘任务",
+                "role_id": 7,
+                "profile_version": 1,
+                "platform": "boss",
+                "source_url": "https://www.zhipin.com/web/geek/recommend",
+                "status": "running",
+            },
+            {},
+            [],
+        )
+        emitted: list[tuple[str, int]] = []
+        page.extension_action_requested.connect(
+            lambda action, task_id: emitted.append((action, task_id))
+        )
+
+        page.plugin_auto_button.click()
+        page.plugin_collect_current_button.click()
+        page.plugin_collect_auto_button.click()
+        page.plugin_pause_button.click()
+        page.plugin_stop_button.click()
+
+        self.assertEqual(
+            emitted,
+            [
+                ("automation_auto", 11),
+                ("collect_current", 11),
+                ("collect_auto", 11),
+                ("pause_scroll", 11),
+                ("stop_capture", 11),
+            ],
+        )
+        self.assertIn("插件原按钮仍可使用", page.plugin_control_hint.text())
+
 
 if __name__ == "__main__":
     unittest.main()

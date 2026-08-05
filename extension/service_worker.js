@@ -1016,6 +1016,10 @@ async function safeTabsSendMessage(tabId, message) {
   }
 }
 
+if (typeof importScripts === "function") {
+  importScripts("remote_control.js");
+}
+
 async function handleBatchTabRemoved(tabId) {
   const current = await getBatchStatus();
   if (current.running && current.tabId === tabId) {

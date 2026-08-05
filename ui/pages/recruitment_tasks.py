@@ -37,6 +37,7 @@ class RecruitmentTasksPage(QWidget):
     open_platform_requested = Signal(int)
     open_export_requested = Signal(str)
     open_export_folder_requested = Signal()
+    extension_action_requested = Signal(str, int)
 
     def __init__(self) -> None:
         super().__init__()
@@ -112,6 +113,34 @@ class RecruitmentTasksPage(QWidget):
         self.summary_label.setWordWrap(True)
         editor_layout.addWidget(self.summary_label)
 
+        plugin_group = QGroupBox("插件远程控制｜试用")
+        plugin_layout = QVBoxLayout(plugin_group)
+        self.plugin_control_hint = QLabel(
+            "在这里向 Chrome 插件发送采集指令；插件原按钮仍可使用，两边互不删除。"
+        )
+        self.plugin_control_hint.setWordWrap(True)
+        plugin_layout.addWidget(self.plugin_control_hint)
+        plugin_actions = QHBoxLayout()
+        self.plugin_auto_button = QPushButton("AUTO 采集 + AI 初筛")
+        self.plugin_collect_current_button = QPushButton("采集当前已加载")
+        self.plugin_collect_auto_button = QPushButton("自动滚动采集")
+        self.plugin_pause_button = QPushButton("暂停滚动")
+        self.plugin_stop_button = QPushButton("停止采集")
+        self._plugin_buttons = [
+            self.plugin_auto_button,
+            self.plugin_collect_current_button,
+            self.plugin_collect_auto_button,
+            self.plugin_pause_button,
+            self.plugin_stop_button,
+        ]
+        for button in self._plugin_buttons:
+            plugin_actions.addWidget(button)
+        plugin_layout.addLayout(plugin_actions)
+        self.plugin_status_label = QLabel("等待选择招聘任务")
+        self.plugin_status_label.setWordWrap(True)
+        plugin_layout.addWidget(self.plugin_status_label)
+        editor_layout.addWidget(plugin_group)
+
         export_group = QGroupBox("最近导出｜无需常驻文件夹窗口")
         export_layout = QVBoxLayout(export_group)
         self.export_table = QTableWidget(0, 4)
@@ -143,6 +172,21 @@ class RecruitmentTasksPage(QWidget):
         self.open_platform_button.clicked.connect(lambda: self.current_task_id is not None and self.open_platform_requested.emit(self.current_task_id))
         self.open_export_button.clicked.connect(self._emit_open_export)
         self.open_export_folder_button.clicked.connect(self.open_export_folder_requested.emit)
+        self.plugin_auto_button.clicked.connect(
+            lambda: self._emit_extension_action("automation_auto")
+        )
+        self.plugin_collect_current_button.clicked.connect(
+            lambda: self._emit_extension_action("collect_current")
+        )
+        self.plugin_collect_auto_button.clicked.connect(
+            lambda: self._emit_extension_action("collect_auto")
+        )
+        self.plugin_pause_button.clicked.connect(
+            lambda: self._emit_extension_action("pause_scroll")
+        )
+        self.plugin_stop_button.clicked.connect(
+            lambda: self._emit_extension_action("stop_capture")
+        )
         self.task_table.itemSelectionChanged.connect(self._emit_selected)
         self.platform_combo.currentIndexChanged.connect(self._platform_changed)
         self.clear_task()
@@ -188,6 +232,12 @@ class RecruitmentTasksPage(QWidget):
         )
         self._set_exports(exports)
         editable = str(row.get("status") or "ready") == "ready"
+        controls_enabled = str(row.get("status") or "ready") in {"running", "waiting_user"}
+        for button in self._plugin_buttons:
+            button.setEnabled(controls_enabled)
+        self.plugin_status_label.setText(
+            "插件控制已就绪" if controls_enabled else "请先启动招聘任务"
+        )
         self.save_button.setEnabled(editable)
         for widget in [
             self.name_input, self.platform_combo, self.source_url_input,
@@ -212,7 +262,19 @@ class RecruitmentTasksPage(QWidget):
         self.view_quota_input.setValue(0)
         self.greeting_quota_input.setValue(0)
         self.summary_label.setText("新任务会固定当前岗位版本。")
+        for button in self._plugin_buttons:
+            button.setEnabled(False)
+        self.plugin_status_label.setText("等待选择招聘任务")
         self.export_table.setRowCount(0)
+
+    def show_extension_command_status(self, message: str) -> None:
+        self.plugin_status_label.setText(str(message or "等待插件响应"))
+
+    def _emit_extension_action(self, action: str) -> None:
+        if self.current_task_id is None:
+            self.plugin_status_label.setText("请先选择并启动招聘任务")
+            return
+        self.extension_action_requested.emit(action, self.current_task_id)
 
     def _emit_save(self) -> None:
         if not self.name_input.text().strip() or self.profile_combo.currentData() is None:

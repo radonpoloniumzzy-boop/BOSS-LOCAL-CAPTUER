@@ -9,6 +9,7 @@ from pathlib import Path
 from automation.importer import CardImportService
 from automation.parser import CandidateParser
 from core.local_api import LocalApiServer
+from core.extension_commands import ExtensionCommandBroker
 from core.models import JobProfile
 from storage.db import DatabaseManager
 from storage.repository import CandidateRepository
@@ -87,6 +88,45 @@ class LocalApiServerTest(unittest.TestCase):
 
         self.assertEqual(response.status, 200)
         self.assertEqual(payload["result"]["job_title"], "证券交易员")
+
+    def test_extension_claims_and_completes_frontend_command(self) -> None:
+        broker = ExtensionCommandBroker()
+        self.server.extension_command_broker = broker
+        command = broker.enqueue("collect_current", recruitment_task_id=19)
+
+        claim = http.client.HTTPConnection("127.0.0.1", self.server.port, timeout=5)
+        claim.request(
+            "GET",
+            "/api/extension/commands/next",
+            headers={"X-Boss-Local-Token": self.token},
+        )
+        claim_response = claim.getresponse()
+        claim_payload = json.loads(claim_response.read().decode("utf-8"))
+        self.assertEqual(claim_payload["result"]["action"], "collect_current")
+        self.assertEqual(claim_payload["result"]["recruitment_task_id"], 19)
+
+        complete = http.client.HTTPConnection("127.0.0.1", self.server.port, timeout=5)
+        complete.request(
+            "POST",
+            f"/api/extension/commands/{command['id']}/complete",
+            body=json.dumps({"ok": True, "message": "采集完成"}).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "X-Boss-Local-Token": self.token,
+            },
+        )
+        complete_response = complete.getresponse()
+        complete_payload = json.loads(complete_response.read().decode("utf-8"))
+        self.assertEqual(complete_response.status, 200)
+        self.assertEqual(complete_payload["result"]["status"], "completed")
+
+    def test_extension_command_endpoint_requires_token(self) -> None:
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.port, timeout=5)
+        connection.request("GET", "/api/extension/commands/next")
+        response = connection.getresponse()
+        payload = json.loads(response.read().decode("utf-8"))
+        self.assertEqual(response.status, 401)
+        self.assertFalse(payload["ok"])
 
     def test_import_endpoint(self) -> None:
         profile = self.repository.save_job_profile(

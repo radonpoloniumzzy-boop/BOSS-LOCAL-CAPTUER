@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
-from PySide6.QtCore import QObject, QSettings, Qt, QThread, QUrl, Signal
+from PySide6.QtCore import QObject, QSettings, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices
 from PySide6.QtWidgets import (
     QDockWidget,
@@ -31,6 +31,7 @@ from ai.prompt_manager import PromptManager
 from ai.provider import AIProviderError, ProviderSettings, validate_provider_settings
 from core.config import ConfigService
 from core.credentials import CredentialStore
+from core.extension_commands import ExtensionCommandBroker
 from core.local_api import LocalApiServer
 from core.logger import LoggingService
 from core.models import AutomationFlowConfig, JobProfile, RecruitmentTask, ScreeningProfile
@@ -123,6 +124,8 @@ class MainWindow(QMainWindow):
         )
         self._ensure_builtin_screening_profiles()
 
+        self.extension_command_broker = ExtensionCommandBroker()
+        self._last_extension_command_id: str | None = None
         self.local_api_server: LocalApiServer | None = None
         self.import_bridge = _ImportBridge()
         self._export_threads: list[tuple[QThread, ExportWorker]] = []
@@ -154,6 +157,10 @@ class MainWindow(QMainWindow):
         self._connect_signals()
         self._load_config_into_pages()
         self._start_local_api_server()
+        self._extension_command_timer = QTimer(self)
+        self._extension_command_timer.setInterval(750)
+        self._extension_command_timer.timeout.connect(self._refresh_extension_command_status)
+        self._extension_command_timer.start()
         self.refresh_candidates()
         self.refresh_dashboard_stats()
         self.refresh_automation_flow()
@@ -423,6 +430,9 @@ class MainWindow(QMainWindow):
         self.recruitment_tasks_page.open_platform_requested.connect(self._open_recruitment_task_platform)
         self.recruitment_tasks_page.open_export_requested.connect(self._open_export_file)
         self.recruitment_tasks_page.open_export_folder_requested.connect(self.handle_open_export_folder)
+        self.recruitment_tasks_page.extension_action_requested.connect(
+            self._queue_extension_action
+        )
 
         self.candidates_page.refresh_requested.connect(self.refresh_candidates)
         self.candidates_page.export_requested.connect(self._export_candidates_view)
@@ -508,6 +518,7 @@ class MainWindow(QMainWindow):
             get_automation_status=self._automation_status_payload,
             start_automation=self._start_automation_from_extension,
             get_extension_config=self._extension_config_payload,
+            extension_command_broker=self.extension_command_broker,
             auth_token=self.config.local_api_token,
         )
         try:
@@ -1209,6 +1220,42 @@ class MainWindow(QMainWindow):
         task = self.repository.get_recruitment_task(task_id)
         if task is not None:
             QDesktopServices.openUrl(QUrl(str(task.get("source_url") or self.config.target_url)))
+
+    def _queue_extension_action(self, action: str, task_id: int) -> None:
+        task = self.repository.get_recruitment_task(int(task_id))
+        if task is None or task.get("status") not in {"running", "waiting_user"}:
+            self.recruitment_tasks_page.show_extension_command_status(
+                "请先启动招聘任务，再发送插件操作。"
+            )
+            return
+        try:
+            command = self.extension_command_broker.enqueue(action, int(task_id))
+        except ValueError as exc:
+            self.recruitment_tasks_page.show_extension_command_status(str(exc))
+            return
+        self._last_extension_command_id = str(command["id"])
+        self.recruitment_tasks_page.show_extension_command_status(
+            "指令已发送，等待 Chrome 插件领取……"
+        )
+        self.statusBar().showMessage(f"插件指令已排队：{action}")
+
+    def _refresh_extension_command_status(self) -> None:
+        if not self._last_extension_command_id:
+            return
+        command = self.extension_command_broker.status(self._last_extension_command_id)
+        if command is None:
+            return
+        status = str(command.get("status") or "queued")
+        message = str(command.get("message") or "等待插件响应")
+        labels = {
+            "queued": "等待插件领取",
+            "running": "插件正在执行",
+            "completed": "执行完成",
+            "failed": "执行失败",
+        }
+        self.recruitment_tasks_page.show_extension_command_status(
+            f"{labels.get(status, status)}：{message}"
+        )
 
     def _open_export_file(self, file_path: str) -> None:
         path = Path(file_path)
