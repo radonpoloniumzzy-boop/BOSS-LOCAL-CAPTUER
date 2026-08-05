@@ -429,6 +429,7 @@ class MainWindow(QMainWindow):
         self.recruitment_tasks_page.start_requested.connect(self._start_recruitment_task)
         self.recruitment_tasks_page.status_requested.connect(self._change_recruitment_task_status)
         self.recruitment_tasks_page.open_platform_requested.connect(self._open_recruitment_task_platform)
+        self.recruitment_tasks_page.export_task_requested.connect(self._export_recruitment_task_report)
         self.recruitment_tasks_page.open_export_requested.connect(self._open_export_file)
         self.recruitment_tasks_page.open_export_folder_requested.connect(self.handle_open_export_folder)
         self.recruitment_tasks_page.extension_action_requested.connect(
@@ -1233,6 +1234,17 @@ class MainWindow(QMainWindow):
         task = self.repository.get_recruitment_task(task_id)
         if task is not None:
             QDesktopServices.openUrl(QUrl(str(task.get("source_url") or self.config.target_url)))
+
+    def _export_recruitment_task_report(self, task_id: int) -> None:
+        configured_path = str(self.config.default_export_dir or "").strip()
+        export_dir = Path(configured_path) if configured_path else self.config_service.default_export_dir
+        try:
+            result = self.export_service.export_recruitment_task_report(task_id, export_dir)
+            self._open_export_file(result.file_path)
+            self.statusBar().showMessage(f"招聘任务报告已导出：{result.file_path}")
+        except Exception as exc:
+            self.logger.exception("Failed to export recruitment task report %s: %s", task_id, exc)
+            QMessageBox.warning(self, "无法导出任务报告", str(exc))
 
     def _queue_extension_action(self, action: str, task_id: int) -> None:
         task = self.repository.get_recruitment_task(int(task_id))

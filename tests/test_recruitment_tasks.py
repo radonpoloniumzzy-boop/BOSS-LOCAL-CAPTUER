@@ -6,6 +6,7 @@ from pathlib import Path
 
 from core.models import JobProfile, RecruitmentTask
 from storage.db import DatabaseManager
+from storage.export_service import ExportService
 from storage.repository import CandidateRepository
 
 
@@ -106,6 +107,65 @@ class RecruitmentTaskRepositoryTest(unittest.TestCase):
         self.repository.set_recruitment_task_status(int(task.id), "cancelled")
         with self.assertRaisesRegex(ValueError, "终态"):
             self.repository.set_recruitment_task_status(int(task.id), "running")
+
+    def test_task_report_export_contains_configuration_progress_and_outputs(self) -> None:
+        task = self.repository.save_recruitment_task(
+            RecruitmentTask(
+                name="BOSS 第一轮 Mapping",
+                role_id=int(self.profile.id),
+                platform="boss",
+                source_url="https://www.zhipin.com/web/geek/recommend",
+                target_candidates=80,
+                target_ssr=5,
+                minimum_rating="SR",
+                view_quota=120,
+                greeting_quota=30,
+            )
+        )
+        self.repository.set_recruitment_task_status(int(task.id), "running")
+        batch = self.repository.create_batch(
+            "高级招聘顾问",
+            task.source_url,
+            role_id=int(self.profile.id),
+            task_id=int(task.id),
+        )
+        output_path = Path(self.temp_dir.name) / "candidate-list.csv"
+        output_path.write_text("name\n", encoding="utf-8")
+        self.repository.record_export(
+            file_path=str(output_path),
+            export_format="csv",
+            row_count=0,
+            batch_id=int(batch.id),
+            role_id=int(self.profile.id),
+        )
+        for index in range(50):
+            extra_path = Path(self.temp_dir.name) / f"candidate-list-{index}.csv"
+            extra_path.write_text("name\n", encoding="utf-8")
+            self.repository.record_export(
+                file_path=str(extra_path),
+                export_format="csv",
+                row_count=0,
+                batch_id=int(batch.id),
+                role_id=int(self.profile.id),
+            )
+        self.profile.job_title = "后来改名的岗位"
+        self.repository.save_job_profile(self.profile)
+        service = ExportService(self.repository)
+
+        result = service.export_recruitment_task_report(
+            int(task.id), Path(self.temp_dir.name) / "exports"
+        )
+
+        report = Path(result.file_path).read_text(encoding="utf-8")
+        self.assertEqual(result.export_format, "task_markdown")
+        self.assertIn("# 招聘任务报告｜BOSS 第一轮 Mapping", report)
+        self.assertIn("岗位：高级招聘顾问", report)
+        self.assertNotIn("岗位：后来改名的岗位", report)
+        self.assertIn("岗位版本：V1", report)
+        self.assertIn("目标候选人：80", report)
+        self.assertIn("SSR 目标：5", report)
+        self.assertIn("采集批次：1", report)
+        self.assertIn("candidate-list.csv", report)
 
 
 if __name__ == "__main__":

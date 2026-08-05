@@ -36,6 +36,7 @@ class RecruitmentTasksPage(QWidget):
     start_requested = Signal(int)
     status_requested = Signal(int, str)
     open_platform_requested = Signal(int)
+    export_task_requested = Signal(int)
     open_export_requested = Signal(str)
     open_export_folder_requested = Signal()
     extension_action_requested = Signal(str, int)
@@ -105,7 +106,16 @@ class RecruitmentTasksPage(QWidget):
         self.complete_button = QPushButton("完成")
         self.cancel_button = QPushButton("取消任务")
         self.open_platform_button = QPushButton("打开招聘平台")
-        for button in [self.save_button, self.start_button, self.pause_button, self.complete_button, self.cancel_button, self.open_platform_button]:
+        self.export_task_button = QPushButton("导出任务报告")
+        for button in [
+            self.save_button,
+            self.start_button,
+            self.pause_button,
+            self.complete_button,
+            self.cancel_button,
+            self.open_platform_button,
+            self.export_task_button,
+        ]:
             actions.addWidget(button)
         editor_layout.addWidget(form_group)
         editor_layout.addLayout(actions)
@@ -171,6 +181,7 @@ class RecruitmentTasksPage(QWidget):
         self.complete_button.clicked.connect(lambda: self.current_task_id is not None and self.status_requested.emit(self.current_task_id, "completed"))
         self.cancel_button.clicked.connect(lambda: self.current_task_id is not None and self.status_requested.emit(self.current_task_id, "cancelled"))
         self.open_platform_button.clicked.connect(lambda: self.current_task_id is not None and self.open_platform_requested.emit(self.current_task_id))
+        self.export_task_button.clicked.connect(lambda: self.current_task_id is not None and self.export_task_requested.emit(self.current_task_id))
         self.open_export_button.clicked.connect(self._emit_open_export)
         self.open_export_folder_button.clicked.connect(self.open_export_folder_requested.emit)
         self.plugin_auto_button.clicked.connect(
@@ -240,6 +251,7 @@ class RecruitmentTasksPage(QWidget):
             "插件控制已就绪" if controls_enabled else "请先启动招聘任务"
         )
         self.save_button.setEnabled(editable)
+        self.export_task_button.setEnabled(True)
         for widget in [
             self.name_input, self.platform_combo, self.source_url_input,
             self.target_candidates_input, self.target_ssr_input,
@@ -251,6 +263,7 @@ class RecruitmentTasksPage(QWidget):
         self.current_task_id = None
         self.profile_combo.setEnabled(True)
         self.save_button.setEnabled(True)
+        self.export_task_button.setEnabled(False)
         for widget in [
             self.name_input, self.platform_combo, self.source_url_input,
             self.target_candidates_input, self.target_ssr_input,

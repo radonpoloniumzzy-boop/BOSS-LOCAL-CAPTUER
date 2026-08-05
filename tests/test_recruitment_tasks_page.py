@@ -99,6 +99,30 @@ class RecruitmentTasksPageTest(unittest.TestCase):
         )
         self.assertIn("插件原按钮仍可使用", page.plugin_control_hint.text())
 
+    def test_export_task_report_emits_selected_task(self) -> None:
+        page = RecruitmentTasksPage()
+        page.set_job_profiles([{"id": 7, "job_title": "招聘顾问", "version": 1}])
+        page.show_task(
+            {
+                "id": 11,
+                "name": "招聘任务",
+                "role_id": 7,
+                "profile_version": 1,
+                "platform": "boss",
+                "source_url": "https://www.zhipin.com/web/geek/recommend",
+                "status": "running",
+            },
+            {},
+            [],
+        )
+        emitted: list[int] = []
+        page.export_task_requested.connect(emitted.append)
+
+        page.export_task_button.click()
+
+        self.assertEqual(emitted, [11])
+        self.assertEqual(page.export_task_button.text(), "导出任务报告")
+
 
 if __name__ == "__main__":
     unittest.main()

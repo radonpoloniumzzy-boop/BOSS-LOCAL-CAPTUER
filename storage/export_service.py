@@ -100,6 +100,100 @@ class ExportService:
             task_id=task_id,
         )
 
+    def export_recruitment_task_report(self, task_id: int, export_dir: Path) -> ExportResult:
+        task = self.repository.get_recruitment_task(task_id)
+        if task is None:
+            raise ValueError("招聘任务不存在")
+        summary = self.repository.get_recruitment_task_summary(task_id)
+        profile_snapshot = self.repository.get_job_profile_version(
+            int(task["role_id"]), int(task["profile_version"])
+        )
+        if profile_snapshot is None:
+            raise ValueError("招聘任务固定的岗位版本不存在")
+        outputs = self.repository.list_export_records(
+            task_id=task_id,
+            limit=max(1, int(summary.get("export_count") or 0)),
+        )
+        ensure_directory(export_dir)
+        exported_at = now_iso()
+        filename = render_filename(
+            "{job_title}_{date}_{time}_招聘任务报告",
+            {
+                "job_title": task.get("name") or task.get("role_title") or "招聘任务",
+                "date": exported_at[:10].replace("-", ""),
+                "time": exported_at[11:19].replace(":", ""),
+            },
+        )
+        target_path = unique_path(export_dir / f"{filename}.md")
+        status_labels = {
+            "ready": "待启动",
+            "running": "执行中",
+            "waiting_user": "等待人工",
+            "paused": "已暂停",
+            "completed": "已完成",
+            "failed": "失败",
+            "cancelled": "已取消",
+        }
+        lines = [
+            f"# 招聘任务报告｜{task.get('name') or '-'}",
+            "",
+            f"- 导出时间：{exported_at}",
+            f"- 任务 ID：{task_id}",
+            f"- 岗位：{profile_snapshot.get('job_title') or task.get('role_title') or '-'}",
+            f"- 岗位版本：V{task.get('profile_version') or '-'}",
+            f"- 招聘平台：{task.get('platform') or '-'}",
+            f"- 来源页面：{task.get('source_url') or '-'}",
+            f"- 任务状态：{status_labels.get(str(task.get('status')), task.get('status') or '-')}",
+            f"- 当前步骤：{task.get('current_step') or '-'}",
+            f"- 最近消息：{task.get('latest_message') or '-'}",
+            "",
+            "## 目标与资源计划",
+            "",
+            f"- 目标候选人：{task.get('target_candidates') or 0}",
+            f"- SSR 目标：{task.get('target_ssr') or 0}",
+            f"- 最低目标评级：{task.get('minimum_rating') or '-'}",
+            f"- 查看额度：{task.get('view_quota') or 0}",
+            f"- 打招呼额度：{task.get('greeting_quota') or 0}",
+            "",
+            "## 当前进度",
+            "",
+            f"- 采集批次：{summary.get('batch_count', 0)}",
+            f"- 已采集候选人：{summary.get('candidate_count', 0)}",
+            f"- AI 初筛运行：{summary.get('run_count', 0)}",
+            f"- 候选人导出：{summary.get('export_count', 0)}",
+            "",
+            "## 已有输出记录",
+            "",
+        ]
+        if outputs:
+            for output in outputs:
+                lines.append(
+                    f"- {output.get('created_at') or '-'}｜{output.get('export_format') or '-'}｜"
+                    f"{output.get('row_count') or 0} 人｜{output.get('file_path') or '-'}"
+                )
+        else:
+            lines.append("- 暂无候选人导出记录")
+        lines.extend(
+            [
+                "",
+                "## 时间记录",
+                "",
+                f"- 创建时间：{task.get('created_at') or '-'}",
+                f"- 最近更新：{task.get('updated_at') or '-'}",
+                "",
+            ]
+        )
+        target_path.write_text("\n".join(lines), encoding="utf-8")
+        if self.logger:
+            self.logger.info("Exported recruitment task report task_id=%s to %s", task_id, target_path)
+        return ExportResult(
+            file_path=str(target_path),
+            row_count=int(summary.get("candidate_count") or 0),
+            mode="recruitment_task",
+            export_format="task_markdown",
+            task_id=task_id,
+        )
+
     def _export_csv(self, target_path: Path, rows: list[dict[str, object]], columns: list[str]) -> None:
         with target_path.open("w", encoding="utf-8-sig", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=columns, extrasaction="ignore")
