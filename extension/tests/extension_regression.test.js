@@ -425,6 +425,96 @@ function testRuntimeFingerprintAndVersionAwareRunnerInjection() {
   assert(popup.includes("formatRuntimeFingerprint"));
 }
 
+function loadRemoteControlForBehaviorTest() {
+  const store = {};
+  const chrome = {
+    alarms: { create() {}, onAlarm: { addListener() {} } },
+    tabs: {
+      async query() {
+        return [{ id: 71, url: "https://www.zhipin.com/web/geek/recommend" }];
+      },
+      async get(id) {
+        return { id, url: "https://www.zhipin.com/web/geek/recommend" };
+      },
+    },
+    storage: {
+      local: {
+        async get(key) {
+          if (typeof key === "string") return { [key]: store[key] };
+          return { ...key, ...store };
+        },
+        async set(value) {
+          Object.assign(store, value);
+        },
+        async remove(key) {
+          delete store[key];
+        },
+      },
+    },
+    scripting: {
+      async executeScript(details) {
+        if (details.args?.length === 2) {
+          return [
+            {
+              result: {
+                cards: [{ platform_uid: "boss-1", raw_card_text: "候选人 A" }],
+                meta: { platform: "boss", rounds_completed: 2 },
+                frameUrl: "https://www.zhipin.com/web/geek/recommend",
+              },
+            },
+          ];
+        }
+        return [];
+      },
+    },
+  };
+  const fetch = async (url) => {
+    const textUrl = String(url);
+    if (textUrl.endsWith("/api/automation/start")) {
+      return {
+        ok: true,
+        async json() {
+          return {
+            ok: true,
+            result: {
+              ready: true,
+              profile_id: 3,
+              task_id: 12,
+              platform: "boss",
+              source_url: "https://www.zhipin.com/web/geek/recommend",
+              job_title: "招聘顾问",
+            },
+          };
+        },
+      };
+    }
+    if (textUrl.endsWith("/api/import/cards")) {
+      return {
+        ok: true,
+        async json() {
+          return { ok: true, result: { batch_id: 88 } };
+        },
+      };
+    }
+    throw new Error(`Unexpected fetch: ${textUrl}`);
+  };
+  const context = {
+    URL,
+    chrome,
+    clearInterval,
+    console,
+    fetch,
+    globalThis: {},
+    setInterval,
+    setTimeout,
+    __bossLocalRemoteControlTestMode: true,
+  };
+  context.globalThis = context;
+  const source = fs.readFileSync(path.join(EXTENSION_DIR, "remote_control.js"), "utf8");
+  vm.runInNewContext(source, context, { filename: "remote_control.js" });
+  return context.BossLocalRemoteControl;
+}
+
 function testPairingCodeParsesAndRejectsInvalidInput() {
   const source = fs.readFileSync(path.join(EXTENSION_DIR, "pairing.js"), "utf8");
   const context = { URL };
@@ -523,6 +613,29 @@ function testDesktopRemoteControlKeepsPopupControlsAndUsesTaskScopedCommands() {
   assert(popup.includes('id="pauseScroll"'));
 }
 
+async function testDesktopRemoteAutoExecutesAgainstMatchedTaskTab() {
+  const remote = loadRemoteControlForBehaviorTest();
+  const message = await remote.executeRemoteCommand(
+    {
+      id: "command-1",
+      action: "automation_auto",
+      recruitment_task_id: 12,
+      platform: "boss",
+      source_url: "https://www.zhipin.com/web/geek/recommend",
+    },
+    {
+      apiBase: "http://127.0.0.1:17863",
+      apiToken: "token",
+      scrollMode: "hold_end",
+      scrollStep: 900,
+      scrollWaitMs: 30,
+      maxScrollCount: 5,
+      noNewStopRounds: 2,
+    },
+  );
+  assert.strictEqual(message, "采集完成：识别 1 人，导入批次 #88");
+}
+
 async function main() {
   await testDownloadEndpointValidation();
   await testStopGuardIgnoresStaleProgress();
@@ -549,6 +662,7 @@ async function main() {
   testCollectionCarriesCanonicalJobProfileId();
   testFilenameTemplatesMatchDesktopFixtures();
   testDesktopRemoteControlKeepsPopupControlsAndUsesTaskScopedCommands();
+  await testDesktopRemoteAutoExecutesAgainstMatchedTaskTab();
   console.log("extension regression tests passed");
 }
 

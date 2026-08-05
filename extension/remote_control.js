@@ -81,6 +81,11 @@ async function executeRemoteCommand(command, storedSettings) {
   if (!SUPPORTED_REMOTE_ACTIONS.has(action)) {
     throw new Error(`不支持的远程操作：${action || "-"}`);
   }
+  const interruptRequested = action === "pause_scroll" || action === "stop_capture";
+  const tab = interruptRequested ? null : await findActiveSupportedRecruitingTab(command);
+  if (!interruptRequested && !tab?.id) {
+    throw new Error(`未找到已打开的${remotePlatformLabel(command.platform)}招聘页面。`)
+  }
   let settings = { ...storedSettings };
   const automationRequested = action === "automation_auto";
   if (automationRequested) {
@@ -98,16 +103,12 @@ async function executeRemoteCommand(command, storedSettings) {
   }
   validateRemoteTaskContext(command, settings);
 
-  if (action === "pause_scroll" || action === "stop_capture") {
+  if (interruptRequested) {
     const captureTab = await findRemoteCaptureTab(command);
     await requestRemoteScrollPause(captureTab.id, action);
     return action === "stop_capture" ? "已发送停止采集请求" : "已发送暂停滚动请求";
   }
 
-  const tab = await findActiveSupportedRecruitingTab(command);
-  if (!tab?.id) {
-    throw new Error(`未找到已打开的${remotePlatformLabel(command.platform)}招聘页面。`)
-  }
   await chrome.storage.local.set(settings);
   await resetRemoteScrollPause(tab.id);
   await chrome.storage.local.set({
@@ -483,4 +484,6 @@ globalThis.BossLocalRemoteControl = {
   start: startRemoteControlPolling,
 };
 
-startRemoteControlPolling();
+if (!globalThis.__bossLocalRemoteControlTestMode) {
+  startRemoteControlPolling();
+}
