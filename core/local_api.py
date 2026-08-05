@@ -116,7 +116,15 @@ class LocalApiServer:
                     self.path.startswith("/api/extension/commands/")
                     and self.path.endswith("/complete")
                 )
-                if self.path not in {"/api/import/cards", "/api/automation/start"} and not is_command_completion:
+                is_command_heartbeat = (
+                    self.path.startswith("/api/extension/commands/")
+                    and self.path.endswith("/heartbeat")
+                )
+                if (
+                    self.path not in {"/api/import/cards", "/api/automation/start"}
+                    and not is_command_completion
+                    and not is_command_heartbeat
+                ):
                     self._send_json(404, {"error": "Not found"})
                     return
                 if not self._is_authorized():
@@ -129,18 +137,26 @@ class LocalApiServer:
                         return
                     body = self.rfile.read(content_length).decode("utf-8")
                     payload = json.loads(body or "{}")
-                    if is_command_completion:
+                    if is_command_completion or is_command_heartbeat:
                         if parent.extension_command_broker is None:
                             self._send_json(503, {"ok": False, "error": "Extension control is unavailable"})
                             return
-                        command_id = self.path.removeprefix("/api/extension/commands/").removesuffix(
-                            "/complete"
+                        command_id = self.path.removeprefix("/api/extension/commands/")
+                        command_id = command_id.removesuffix(
+                            "/complete" if is_command_completion else "/heartbeat"
                         )
-                        result = parent.extension_command_broker.complete(
-                            command_id,
-                            ok=bool(payload.get("ok")),
-                            message=str(payload.get("message") or ""),
-                        )
+                        if is_command_completion:
+                            result = parent.extension_command_broker.complete(
+                                command_id,
+                                claim_token=str(payload.get("claim_token") or ""),
+                                ok=bool(payload.get("ok")),
+                                message=str(payload.get("message") or ""),
+                            )
+                        else:
+                            result = parent.extension_command_broker.heartbeat(
+                                command_id,
+                                claim_token=str(payload.get("claim_token") or ""),
+                            )
                         self._send_json(200, {"ok": True, "result": result})
                         return
                     if self.path == "/api/automation/start":

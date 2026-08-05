@@ -92,7 +92,12 @@ class LocalApiServerTest(unittest.TestCase):
     def test_extension_claims_and_completes_frontend_command(self) -> None:
         broker = ExtensionCommandBroker()
         self.server.extension_command_broker = broker
-        command = broker.enqueue("collect_current", recruitment_task_id=19)
+        command = broker.enqueue(
+            "collect_current",
+            recruitment_task_id=19,
+            platform="boss",
+            source_url="https://www.zhipin.com/web/geek/recommend",
+        )
 
         claim = http.client.HTTPConnection("127.0.0.1", self.server.port, timeout=5)
         claim.request(
@@ -105,11 +110,33 @@ class LocalApiServerTest(unittest.TestCase):
         self.assertEqual(claim_payload["result"]["action"], "collect_current")
         self.assertEqual(claim_payload["result"]["recruitment_task_id"], 19)
 
+        heartbeat = http.client.HTTPConnection("127.0.0.1", self.server.port, timeout=5)
+        heartbeat.request(
+            "POST",
+            f"/api/extension/commands/{command['id']}/heartbeat",
+            body=json.dumps(
+                {"claim_token": claim_payload["result"]["claim_token"]}
+            ).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "X-Boss-Local-Token": self.token,
+            },
+        )
+        heartbeat_response = heartbeat.getresponse()
+        heartbeat_response.read()
+        self.assertEqual(heartbeat_response.status, 200)
+
         complete = http.client.HTTPConnection("127.0.0.1", self.server.port, timeout=5)
         complete.request(
             "POST",
             f"/api/extension/commands/{command['id']}/complete",
-            body=json.dumps({"ok": True, "message": "采集完成"}).encode("utf-8"),
+            body=json.dumps(
+                {
+                    "ok": True,
+                    "message": "采集完成",
+                    "claim_token": claim_payload["result"]["claim_token"],
+                }
+            ).encode("utf-8"),
             headers={
                 "Content-Type": "application/json",
                 "X-Boss-Local-Token": self.token,

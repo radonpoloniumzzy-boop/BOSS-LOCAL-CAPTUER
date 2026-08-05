@@ -4,6 +4,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+from core.extension_commands import ExtensionCommandBroker
 from ui.main_window import MainWindow
 
 
@@ -16,6 +17,66 @@ class _SignalSpy:
 
 
 class MainWindowJobLifecycleTest(unittest.TestCase):
+    def test_frontend_extension_command_keeps_task_platform_and_source(self) -> None:
+        broker = ExtensionCommandBroker()
+        page = SimpleNamespace(show_extension_command_status=Mock())
+        window = SimpleNamespace(
+            repository=SimpleNamespace(
+                get_recruitment_task=Mock(
+                    return_value={
+                        "id": 7,
+                        "status": "running",
+                        "platform": "liepin",
+                        "source_url": "https://lpt.liepin.com/recommend",
+                    }
+                )
+            ),
+            extension_command_broker=broker,
+            recruitment_tasks_page=page,
+            _last_extension_command_id=None,
+            statusBar=lambda: SimpleNamespace(showMessage=Mock()),
+        )
+
+        MainWindow._queue_extension_action(window, "collect_auto", 7)
+        claimed = broker.claim_next()
+
+        self.assertEqual(claimed["platform"], "liepin")
+        self.assertEqual(claimed["source_url"], "https://lpt.liepin.com/recommend")
+
+    def test_failed_extension_command_moves_running_task_to_waiting_user(self) -> None:
+        broker = ExtensionCommandBroker()
+        command = broker.enqueue(
+            "collect_auto",
+            7,
+            platform="boss",
+            source_url="https://www.zhipin.com/web/geek/recommend",
+        )
+        claimed = broker.claim_next()
+        broker.complete(
+            command["id"],
+            claim_token=claimed["claim_token"],
+            ok=False,
+            message="没有找到招聘页面",
+        )
+        repository = SimpleNamespace(
+            get_recruitment_task=Mock(return_value={"id": 7, "status": "running"}),
+            set_recruitment_task_status=Mock(),
+        )
+        window = SimpleNamespace(
+            extension_command_broker=broker,
+            _last_extension_command_id=command["id"],
+            _handled_extension_command_ids=set(),
+            recruitment_tasks_page=SimpleNamespace(show_extension_command_status=Mock()),
+            repository=repository,
+            refresh_recruitment_tasks=Mock(),
+        )
+
+        MainWindow._refresh_extension_command_status(window)
+
+        repository.set_recruitment_task_status.assert_called_once_with(
+            7, "waiting_user", message="插件操作失败：没有找到招聘页面"
+        )
+
     def test_capture_completion_updates_bound_task_not_current_config_task(self) -> None:
         repository = SimpleNamespace(update_recruitment_task_progress=Mock())
         window = SimpleNamespace(

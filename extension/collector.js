@@ -135,6 +135,15 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
     return { ok: true, pauseRequested: true, reason: control.reason };
   };
 
+  globalThis.__bossLocalRequestCaptureStop = function bossLocalRequestCaptureStop(reason) {
+    const control = getScrollControl();
+    control.pauseRequested = true;
+    control.stopRequested = true;
+    control.reason = String(reason || "stop");
+    control.requestedAt = Date.now();
+    return { ok: true, pauseRequested: true, stopRequested: true, reason: control.reason };
+  };
+
   globalThis.__bossLocalResetScrollPause = function bossLocalResetScrollPause() {
     resetScrollControl(false);
     return { ok: true, pauseRequested: false };
@@ -177,6 +186,7 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
         platform_label: platform.label,
         rounds_completed: result.scrollInfo.roundsCompleted,
         pause_requested: result.scrollInfo.pauseRequested,
+        stop_requested: result.scrollInfo.stopRequested,
         page_title: document.title,
       },
     };
@@ -269,6 +279,7 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
         stopReason,
         noMoreDetected,
         pauseRequested: isScrollPauseRequested(),
+        stopRequested: Boolean(getScrollControl().stopRequested),
       },
     };
   }
@@ -277,6 +288,7 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
     if (!globalThis.__bossLocalScrollControl || typeof globalThis.__bossLocalScrollControl !== "object") {
       globalThis.__bossLocalScrollControl = {
         pauseRequested: false,
+        stopRequested: false,
         running: false,
         reason: "",
         requestedAt: 0,
@@ -290,6 +302,7 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
   function resetScrollControl(running) {
     globalThis.__bossLocalScrollControl = {
       pauseRequested: false,
+      stopRequested: false,
       running: Boolean(running),
       reason: "",
       requestedAt: 0,

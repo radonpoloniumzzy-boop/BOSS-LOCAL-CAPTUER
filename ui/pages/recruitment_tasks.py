@@ -4,6 +4,7 @@ from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QFormLayout,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -120,7 +121,7 @@ class RecruitmentTasksPage(QWidget):
         )
         self.plugin_control_hint.setWordWrap(True)
         plugin_layout.addWidget(self.plugin_control_hint)
-        plugin_actions = QHBoxLayout()
+        plugin_actions = QGridLayout()
         self.plugin_auto_button = QPushButton("AUTO 采集 + AI 初筛")
         self.plugin_collect_current_button = QPushButton("采集当前已加载")
         self.plugin_collect_auto_button = QPushButton("自动滚动采集")
@@ -133,8 +134,8 @@ class RecruitmentTasksPage(QWidget):
             self.plugin_pause_button,
             self.plugin_stop_button,
         ]
-        for button in self._plugin_buttons:
-            plugin_actions.addWidget(button)
+        for index, button in enumerate(self._plugin_buttons):
+            plugin_actions.addWidget(button, index // 3, index % 3)
         plugin_layout.addLayout(plugin_actions)
         self.plugin_status_label = QLabel("等待选择招聘任务")
         self.plugin_status_label.setWordWrap(True)
@@ -232,7 +233,7 @@ class RecruitmentTasksPage(QWidget):
         )
         self._set_exports(exports)
         editable = str(row.get("status") or "ready") == "ready"
-        controls_enabled = str(row.get("status") or "ready") in {"running", "waiting_user"}
+        controls_enabled = str(row.get("status") or "ready") == "running"
         for button in self._plugin_buttons:
             button.setEnabled(controls_enabled)
         self.plugin_status_label.setText(

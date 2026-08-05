@@ -126,6 +126,7 @@ class MainWindow(QMainWindow):
 
         self.extension_command_broker = ExtensionCommandBroker()
         self._last_extension_command_id: str | None = None
+        self._handled_extension_command_ids: set[str] = set()
         self.local_api_server: LocalApiServer | None = None
         self.import_bridge = _ImportBridge()
         self._export_threads: list[tuple[QThread, ExportWorker]] = []
@@ -535,6 +536,7 @@ class MainWindow(QMainWindow):
             self.config = self.config_service.load()
         profile_id = self.dashboard_page.job_profile_combo.currentData()
         task_id = self._current_running_task_id()
+        task = None
         if task_id is not None:
             task = self.repository.get_recruitment_task(task_id)
             if task is None or int(task["role_id"]) != int(profile_id or 0):
@@ -547,6 +549,8 @@ class MainWindow(QMainWindow):
             ),
             "job_profile_id": profile_id,
             "recruitment_task_id": task_id,
+            "platform": str(task.get("platform") or "") if task is not None else "",
+            "source_url": str(task.get("source_url") or "") if task is not None else "",
         }
 
     def handle_open_browser(self) -> None:
@@ -929,6 +933,11 @@ class MainWindow(QMainWindow):
                 if flow.profile_id is not None
                 else None
             )
+            task = (
+                self.repository.get_recruitment_task(int(flow.task_id))
+                if flow.task_id is not None
+                else None
+            )
             ready = (
                 profile is not None
                 and profile.get("status") == "active"
@@ -943,12 +952,13 @@ class MainWindow(QMainWindow):
                 "profile_job_title": str(profile["job_title"]) if profile else "",
                 "job_title": flow.job_title or (str(profile["job_title"]) if profile else ""),
                 "source_url": flow.source_url,
+                "platform": str(task.get("platform") or "") if task is not None else "",
                 "provider": flow.provider,
                 "model": flow.model,
                 "max_candidates": flow.max_candidates,
             }
 
-    def _start_automation_from_extension(self, _payload: dict[str, object]) -> dict[str, object]:
+    def _start_automation_from_extension(self, payload: dict[str, object]) -> dict[str, object]:
         with self._automation_config_lock:
             config = self.config_service.load()
             flow = config.automation_flow
@@ -961,6 +971,9 @@ class MainWindow(QMainWindow):
                 raise ValueError("所选岗位不是招聘中状态，请先在岗位中心启用。")
             if not self._automation_task_is_ready(flow.task_id, flow.profile_id):
                 raise ValueError("招聘任务未启动或与岗位不一致，请先在“招聘任务”页面启动任务。")
+            requested_task_id = payload.get("recruitment_task_id")
+            if requested_task_id is not None and int(requested_task_id) != int(flow.task_id or 0):
+                raise ValueError("插件指令与桌面端当前招聘任务不一致。")
             if not flow.provider or not flow.model:
                 raise ValueError("自动化流程缺少 AI 服务商或模型配置。")
             flow.enabled = True
@@ -1229,7 +1242,12 @@ class MainWindow(QMainWindow):
             )
             return
         try:
-            command = self.extension_command_broker.enqueue(action, int(task_id))
+            command = self.extension_command_broker.enqueue(
+                action,
+                int(task_id),
+                platform=str(task.get("platform") or ""),
+                source_url=str(task.get("source_url") or ""),
+            )
         except ValueError as exc:
             self.recruitment_tasks_page.show_extension_command_status(str(exc))
             return
@@ -1256,6 +1274,25 @@ class MainWindow(QMainWindow):
         self.recruitment_tasks_page.show_extension_command_status(
             f"{labels.get(status, status)}：{message}"
         )
+        command_id = str(command.get("id") or "")
+        if status == "failed" and command_id not in self._handled_extension_command_ids:
+            self._handled_extension_command_ids.add(command_id)
+            task_id = command.get("recruitment_task_id")
+            task = (
+                self.repository.get_recruitment_task(int(task_id))
+                if task_id is not None
+                else None
+            )
+            if task is not None and task.get("status") == "running":
+                self.repository.set_recruitment_task_status(
+                    int(task_id),
+                    "waiting_user",
+                    message=f"插件操作失败：{message}",
+                )
+                self.refresh_recruitment_tasks(int(task_id))
+                self.recruitment_tasks_page.show_extension_command_status(
+                    f"执行失败：{message}。处理浏览器页面后重新启动任务即可重试。"
+                )
 
     def _open_export_file(self, file_path: str) -> None:
         path = Path(file_path)

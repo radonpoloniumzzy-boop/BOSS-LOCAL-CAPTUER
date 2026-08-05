@@ -508,7 +508,15 @@ function testDesktopRemoteControlKeepsPopupControlsAndUsesTaskScopedCommands() {
     assert(remote.includes(`"${action}"`));
   }
   assert(remote.includes("recruitment_task_id"));
+  assert(remote.includes("command.platform"));
+  assert(remote.includes("command.source_url"));
   assert(remote.includes("/api/extension/commands/next"));
+  assert(remote.includes("/heartbeat"));
+  assert(remote.includes("chrome.alarms.create"));
+  assert(remote.includes("findRemoteCaptureTab"));
+  assert(remote.includes("stopRequested"));
+  const manifest = JSON.parse(fs.readFileSync(path.join(EXTENSION_DIR, "manifest.json"), "utf8"));
+  assert(manifest.permissions.includes("alarms"));
   assert(popup.includes('id="automationAuto"'));
   assert(popup.includes('id="collectCurrent"'));
   assert(popup.includes('id="collectAuto"'));
