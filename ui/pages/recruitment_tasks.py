@@ -37,6 +37,7 @@ class RecruitmentTasksPage(QWidget):
     status_requested = Signal(int, str)
     open_platform_requested = Signal(int)
     export_task_requested = Signal(int)
+    capture_quality_refresh_requested = Signal(int)
     open_export_requested = Signal(str)
     open_export_folder_requested = Signal()
     extension_action_requested = Signal(str, int)
@@ -124,6 +125,22 @@ class RecruitmentTasksPage(QWidget):
         self.summary_label.setWordWrap(True)
         editor_layout.addWidget(self.summary_label)
 
+        quality_group = QGroupBox("采集质量检查")
+        quality_layout = QVBoxLayout(quality_group)
+        quality_header = QHBoxLayout()
+        self.capture_quality_status_label = QLabel("等待选择招聘任务")
+        self.capture_quality_refresh_button = QPushButton("刷新质量检查")
+        quality_header.addWidget(self.capture_quality_status_label, 1)
+        quality_header.addWidget(self.capture_quality_refresh_button)
+        self.capture_quality_metrics_label = QLabel("完成采集后，将检查数量、重复、完整度和来源一致性。")
+        self.capture_quality_metrics_label.setWordWrap(True)
+        self.capture_quality_issues_label = QLabel("-")
+        self.capture_quality_issues_label.setWordWrap(True)
+        quality_layout.addLayout(quality_header)
+        quality_layout.addWidget(self.capture_quality_metrics_label)
+        quality_layout.addWidget(self.capture_quality_issues_label)
+        editor_layout.addWidget(quality_group)
+
         plugin_group = QGroupBox("插件远程控制｜试用")
         plugin_layout = QVBoxLayout(plugin_group)
         self.plugin_control_hint = QLabel(
@@ -182,6 +199,10 @@ class RecruitmentTasksPage(QWidget):
         self.cancel_button.clicked.connect(lambda: self.current_task_id is not None and self.status_requested.emit(self.current_task_id, "cancelled"))
         self.open_platform_button.clicked.connect(lambda: self.current_task_id is not None and self.open_platform_requested.emit(self.current_task_id))
         self.export_task_button.clicked.connect(lambda: self.current_task_id is not None and self.export_task_requested.emit(self.current_task_id))
+        self.capture_quality_refresh_button.clicked.connect(
+            lambda: self.current_task_id is not None
+            and self.capture_quality_refresh_requested.emit(self.current_task_id)
+        )
         self.open_export_button.clicked.connect(self._emit_open_export)
         self.open_export_folder_button.clicked.connect(self.open_export_folder_requested.emit)
         self.plugin_auto_button.clicked.connect(
@@ -252,6 +273,7 @@ class RecruitmentTasksPage(QWidget):
         )
         self.save_button.setEnabled(editable)
         self.export_task_button.setEnabled(True)
+        self.capture_quality_refresh_button.setEnabled(True)
         for widget in [
             self.name_input, self.platform_combo, self.source_url_input,
             self.target_candidates_input, self.target_ssr_input,
@@ -264,6 +286,7 @@ class RecruitmentTasksPage(QWidget):
         self.profile_combo.setEnabled(True)
         self.save_button.setEnabled(True)
         self.export_task_button.setEnabled(False)
+        self.capture_quality_refresh_button.setEnabled(False)
         for widget in [
             self.name_input, self.platform_combo, self.source_url_input,
             self.target_candidates_input, self.target_ssr_input,
@@ -279,7 +302,32 @@ class RecruitmentTasksPage(QWidget):
         for button in self._plugin_buttons:
             button.setEnabled(False)
         self.plugin_status_label.setText("等待选择招聘任务")
+        self.show_capture_quality(None)
         self.export_table.setRowCount(0)
+
+    def show_capture_quality(self, report: dict[str, object] | None) -> None:
+        if not report:
+            self.capture_quality_status_label.setText("等待采集数据")
+            self.capture_quality_metrics_label.setText(
+                "完成采集后，将检查数量、重复、完整度和来源一致性。"
+            )
+            self.capture_quality_issues_label.setText("-")
+            return
+        batch_id = report.get("batch_id")
+        self.capture_quality_status_label.setText(
+            f"检查结论：{report.get('decision_label') or '-'}"
+        )
+        self.capture_quality_metrics_label.setText(
+            f"批次 {batch_id or '-'}｜唯一候选人 {report.get('unique_candidates', 0)}｜"
+            f"新增 {report.get('new_candidates', 0)}｜重复率 {report.get('duplicate_rate', 0)}%｜"
+            f"完整度 {report.get('core_completeness', 0)}%｜"
+            f"来源一致率 {report.get('source_consistency', 0)}%｜"
+            f"任务缺口 {report.get('target_gap', 0)}/{report.get('target_candidates', 0)}"
+        )
+        issues = [str(issue) for issue in report.get("issues", []) if str(issue).strip()]
+        self.capture_quality_issues_label.setText(
+            "需要关注：" + "；".join(issues) if issues else "未发现阻断问题。"
+        )
 
     def show_extension_command_status(self, message: str) -> None:
         self.plugin_status_label.setText(str(message or "等待插件响应"))

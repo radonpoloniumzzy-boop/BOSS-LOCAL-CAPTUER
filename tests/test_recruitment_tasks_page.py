@@ -123,6 +123,49 @@ class RecruitmentTasksPageTest(unittest.TestCase):
         self.assertEqual(emitted, [11])
         self.assertEqual(page.export_task_button.text(), "导出任务报告")
 
+    def test_capture_quality_panel_shows_metrics_and_refreshes_selected_task(self) -> None:
+        page = RecruitmentTasksPage()
+        page.set_job_profiles([{"id": 7, "job_title": "招聘顾问", "version": 1}])
+        page.show_task(
+            {
+                "id": 11,
+                "name": "招聘任务",
+                "role_id": 7,
+                "profile_version": 1,
+                "platform": "boss",
+                "source_url": "https://www.zhipin.com/web/geek/recommend",
+                "status": "running",
+            },
+            {},
+            [],
+        )
+        page.show_capture_quality(
+            {
+                "batch_id": 153,
+                "decision": "needs_supplement",
+                "decision_label": "建议补充采集",
+                "unique_candidates": 40,
+                "new_candidates": 30,
+                "duplicate_rate": 25,
+                "core_completeness": 85,
+                "source_consistency": 100,
+                "target_candidates": 50,
+                "target_gap": 10,
+                "issues": ["距离任务目标还差 10 人"],
+            }
+        )
+        refreshed: list[int] = []
+        page.capture_quality_refresh_requested.connect(refreshed.append)
+
+        page.capture_quality_refresh_button.click()
+
+        self.assertIn("建议补充采集", page.capture_quality_status_label.text())
+        self.assertIn("批次 153", page.capture_quality_metrics_label.text())
+        self.assertIn("唯一候选人 40", page.capture_quality_metrics_label.text())
+        self.assertIn("完整度 85%", page.capture_quality_metrics_label.text())
+        self.assertIn("距离任务目标还差 10 人", page.capture_quality_issues_label.text())
+        self.assertEqual(refreshed, [11])
+
 
 if __name__ == "__main__":
     unittest.main()

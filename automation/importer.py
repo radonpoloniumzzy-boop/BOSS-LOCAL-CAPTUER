@@ -92,7 +92,7 @@ class CardImportService:
                 batch_id=batch.id,
                 status=status,
                 total_collected=len(parsed_records),
-                total_new=repo_result["inserted_batch_items"],
+                total_new=repo_result["inserted_candidates"],
                 note=message,
             )
             response = result.to_dict()

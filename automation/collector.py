@@ -274,7 +274,7 @@ class CaptureService:
                 batch_id=batch.id,
                 status=status,
                 total_collected=len(seen_keys),
-                total_new=total_batch_items,
+                total_new=total_inserted_candidates,
                 note=message or options.note,
             )
 

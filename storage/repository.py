@@ -873,6 +873,59 @@ class CandidateRepository:
             ).fetchall()
         )
 
+    def get_latest_capture_batch_for_task(self, task_id: int) -> dict[str, object] | None:
+        row = self.db.get_connection().execute(
+            """
+            SELECT * FROM capture_batches
+            WHERE task_id = ?
+            ORDER BY start_time DESC, id DESC
+            LIMIT 1
+            """,
+            (task_id,),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def get_capture_batch_quality_metrics(self, batch_id: int) -> dict[str, object]:
+        batch = self.db.get_connection().execute(
+            "SELECT * FROM capture_batches WHERE id = ?",
+            (batch_id,),
+        ).fetchone()
+        if batch is None:
+            raise ValueError("采集批次不存在")
+        counts = self.db.get_connection().execute(
+            """
+            SELECT
+                COUNT(*) AS unique_candidates,
+                SUM(
+                    CASE WHEN bi.id = (
+                        SELECT MIN(first_bi.id)
+                        FROM capture_batch_items first_bi
+                        WHERE first_bi.candidate_id = bi.candidate_id
+                    ) THEN 1 ELSE 0 END
+                ) AS new_candidates,
+                SUM(
+                    CASE WHEN TRIM(COALESCE(bi.name, '')) <> ''
+                              AND TRIM(COALESCE(bi.raw_card_text, '')) <> ''
+                              AND TRIM(COALESCE(bi.source_url, '')) <> ''
+                         THEN 1 ELSE 0 END
+                ) AS core_complete,
+                SUM(
+                    CASE WHEN TRIM(COALESCE(bi.source_url, '')) = TRIM(COALESCE(?, ''))
+                         THEN 1 ELSE 0 END
+                ) AS source_consistent
+            FROM capture_batch_items bi
+            WHERE bi.batch_id = ?
+            """,
+            (batch["source_url"], batch_id),
+        ).fetchone()
+        return {
+            **dict(batch),
+            "unique_candidates": int(counts["unique_candidates"] or 0),
+            "new_candidates": int(counts["new_candidates"] or 0),
+            "core_complete": int(counts["core_complete"] or 0),
+            "source_consistent": int(counts["source_consistent"] or 0),
+        }
+
     def list_job_titles(self) -> list[str]:
         connection = self.db.get_connection()
         rows = connection.execute(
@@ -1032,6 +1085,7 @@ class CandidateRepository:
             json.dumps(profile.interview_checks, ensure_ascii=False),
             json.dumps(profile.evidence_policy, ensure_ascii=False, sort_keys=True),
         )
+
         with connection:
             if existing is None:
                 profile.version = max(1, int(profile.version))

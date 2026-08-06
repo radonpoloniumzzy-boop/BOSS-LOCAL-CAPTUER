@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from automation.capture_quality import CaptureQualityService
 from automation.importer import CardImportService
 from automation.parser import CandidateParser
 from ai.prompt_manager import PromptManager
@@ -122,6 +123,7 @@ class MainWindow(QMainWindow):
             self.config_service.app_root / "assets" / "product_development_plan.json",
             self.config_service.data_dir / "product_feedback.json",
         )
+        self.capture_quality_service = CaptureQualityService(self.repository)
         self._ensure_builtin_screening_profiles()
 
         self.extension_command_broker = ExtensionCommandBroker()
@@ -430,6 +432,9 @@ class MainWindow(QMainWindow):
         self.recruitment_tasks_page.status_requested.connect(self._change_recruitment_task_status)
         self.recruitment_tasks_page.open_platform_requested.connect(self._open_recruitment_task_platform)
         self.recruitment_tasks_page.export_task_requested.connect(self._export_recruitment_task_report)
+        self.recruitment_tasks_page.capture_quality_refresh_requested.connect(
+            self._refresh_capture_quality
+        )
         self.recruitment_tasks_page.open_export_requested.connect(self._open_export_file)
         self.recruitment_tasks_page.open_export_folder_requested.connect(self.handle_open_export_folder)
         self.recruitment_tasks_page.extension_action_requested.connect(
@@ -1138,6 +1143,19 @@ class MainWindow(QMainWindow):
             self.repository.get_recruitment_task_summary(task_id),
             self.repository.list_export_records(task_id=task_id),
         )
+        self._refresh_capture_quality(task_id)
+
+    def _refresh_capture_quality(self, task_id: int) -> None:
+        try:
+            report = self.capture_quality_service.check_task(task_id)
+            self.recruitment_tasks_page.show_capture_quality(report)
+            self.statusBar().showMessage(
+                f"采集质量检查：{report.get('decision_label') or '-'}"
+            )
+        except Exception as exc:
+            self.logger.exception("Failed to check capture quality for task %s: %s", task_id, exc)
+            self.recruitment_tasks_page.show_capture_quality(None)
+            QMessageBox.warning(self, "无法检查采集质量", str(exc))
 
     def _save_recruitment_task(self, payload: dict[str, object]) -> None:
         try:
