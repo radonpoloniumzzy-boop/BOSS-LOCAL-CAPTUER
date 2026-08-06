@@ -14,7 +14,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from core.config import ConfigService
-from core.models import CandidateRecord
+from core.models import CandidateRecord, JobProfile, RecruitmentTask
 from ui.main_window import MainWindow
 
 
@@ -118,6 +118,23 @@ class MainWindowSmokeTest(unittest.TestCase):
                         for row in window.repository.list_candidates()
                         if row["name"] == "Zulu 目标候选人"
                     )
+                    first_role = window.repository.save_job_profile(
+                        JobProfile(
+                            job_title="对照岗位一", jd_text="JD", prompt_text="Prompt", status="active"
+                        )
+                    )
+                    second_role = window.repository.save_job_profile(
+                        JobProfile(
+                            job_title="对照岗位二", jd_text="JD", prompt_text="Prompt", status="active"
+                        )
+                    )
+                    for role in [first_role, second_role]:
+                        window.repository.upsert_candidate_role_match(
+                            candidate_id=int(target["id"]),
+                            role_id=int(role.id),
+                            match_status="ai_screened",
+                            recruitment_status="screened",
+                        )
                     self.assertIn("AI 对照", window._navigation_full_labels)
                     comparison_index = window._navigation_full_labels.index("AI 对照")
                     window.navigation.setCurrentRow(comparison_index)
@@ -137,12 +154,62 @@ class MainWindowSmokeTest(unittest.TestCase):
                         window.navigation.currentRow(),
                         window._navigation_full_labels.index("候选人"),
                     )
-                    for _attempt in range(20):
+                    for _attempt in range(60):
                         QTest.qWait(50)
                         if window.candidates_page.selected_candidate_id() == int(target["id"]):
                             break
                     self.assertIn("Zulu 目标候选人", window.candidates_page.detail_text.toPlainText())
                     self.assertEqual(window.candidates_page.selected_candidate_id(), int(target["id"]))
+                    window._open_comparison_candidate(int(target["id"]), int(second_role.id))
+                    for _attempt in range(60):
+                        QTest.qWait(50)
+                        role_data = window.candidates_page.status_role_combo.currentData()
+                        if isinstance(role_data, dict) and role_data.get("role_id") == second_role.id:
+                            break
+                    self.assertEqual(
+                        window.candidates_page.status_role_combo.currentData()["role_id"],
+                        second_role.id,
+                    )
+                finally:
+                    window.close()
+                    QTest.qWait(50)
+
+    def test_recruitment_task_can_create_next_action_from_workbench(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_service = ConfigService(Path(tmp_dir))
+            config = config_service.default_config()
+            config.local_api_port = 0
+            config_service.save(config)
+
+            with patch("ui.main_window.ConfigService", return_value=config_service):
+                window = MainWindow()
+                try:
+                    profile = window.repository.list_job_profiles(active_only=True)[0]
+                    task = window.repository.save_recruitment_task(
+                        RecruitmentTask(
+                            name="下一步动作测试任务",
+                            role_id=int(profile["id"]),
+                            source_url="https://example.com",
+                        )
+                    )
+
+                    window._prefill_task_next_action(int(task.id))
+                    window.next_actions_page.title_input.setText("检查招聘进展")
+                    window.next_actions_page.save_button.click()
+                    for _attempt in range(20):
+                        QTest.qWait(50)
+                        if window.next_actions_page.table.rowCount() == 1:
+                            break
+
+                    actions = window.repository.page_next_actions(
+                        view="all", page=1, page_size=20
+                    )
+                    self.assertEqual(
+                        window.navigation.currentRow(),
+                        window._navigation_full_labels.index("行动待办"),
+                    )
+                    self.assertEqual(actions["total"], 1)
+                    self.assertEqual(actions["rows"][0]["task_id"], task.id)
                 finally:
                     window.close()
                     QTest.qWait(50)

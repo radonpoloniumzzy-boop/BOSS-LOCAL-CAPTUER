@@ -82,6 +82,7 @@ class CandidatesPage(QWidget):
     export_requested = Signal(object)
     candidate_selected = Signal(int)
     status_change_requested = Signal(object)
+    next_action_requested = Signal(object)
     page_requested = Signal(int)
 
     def __init__(self) -> None:
@@ -197,6 +198,7 @@ class CandidatesPage(QWidget):
             self.reason_code_combo.addItem(label, code)
         self.record_status_button = QPushButton("记录")
         self.record_status_button.setProperty("primary", True)
+        self.next_action_button = QPushButton("创建下一步动作")
         self.status_note_input = QLineEdit()
         self.status_note_input.setPlaceholderText("备注")
         detail_layout.addWidget(status_group)
@@ -240,6 +242,7 @@ class CandidatesPage(QWidget):
         self.next_page_button.clicked.connect(lambda: self._request_page(self._page + 1))
         self.table.itemSelectionChanged.connect(self._emit_selection)
         self.record_status_button.clicked.connect(self._emit_status_change)
+        self.next_action_button.clicked.connect(self._emit_next_action)
 
     def _apply_compact_layout(self) -> None:
         compact_combos = (
@@ -379,6 +382,7 @@ class CandidatesPage(QWidget):
         status_grid.addWidget(self.reason_code_combo, 1, 1)
         status_grid.addWidget(self.status_note_input, 1, 2)
         status_grid.addWidget(self.record_status_button, 1, 3)
+        status_grid.addWidget(self.next_action_button, 2, 0, 1, 4)
         status_grid.setColumnStretch(1, 1)
         status_grid.setColumnStretch(2, 2)
         self.status_layout.insertWidget(0, status_controls)
@@ -640,6 +644,14 @@ class CandidatesPage(QWidget):
                 return True
         return False
 
+    def select_status_role(self, role_id: int) -> bool:
+        for index in range(self.status_role_combo.count()):
+            data = self.status_role_combo.itemData(index)
+            if isinstance(data, dict) and int(data.get("role_id") or 0) == int(role_id):
+                self.status_role_combo.setCurrentIndex(index)
+                return True
+        return False
+
     def _emit_export(self, export_format: str) -> None:
         payload = self.current_filters()
         payload["export_format"] = export_format
@@ -668,6 +680,7 @@ class CandidatesPage(QWidget):
             )
         self.status_role_combo.blockSignals(False)
         self.record_status_button.setEnabled(bool(role_matches))
+        self.next_action_button.setEnabled(bool(role_matches))
 
     def _emit_status_change(self) -> None:
         role_data = self.status_role_combo.currentData()
@@ -680,6 +693,25 @@ class CandidatesPage(QWidget):
                 "to_status": self.recruitment_status_update_combo.currentData(),
                 "reason_code": self.reason_code_combo.currentData() or "",
                 "note": self.status_note_input.text().strip(),
+            }
+        )
+
+    def _emit_next_action(self) -> None:
+        role_data = self.status_role_combo.currentData()
+        if not isinstance(role_data, dict):
+            return
+        candidate_id = int(role_data["candidate_id"])
+        role_id = int(role_data["role_id"])
+        candidate_name = ""
+        current_row = self.table.currentRow()
+        if current_row >= 0 and self.table.item(current_row, 0) is not None:
+            candidate_name = self.table.item(current_row, 0).text()
+        self.next_action_requested.emit(
+            {
+                "candidate_id": candidate_id,
+                "role_id": role_id,
+                "candidate_name": candidate_name or f"候选人 #{candidate_id}",
+                "role_title": self.status_role_combo.currentText().split(" | ", 1)[0],
             }
         )
 

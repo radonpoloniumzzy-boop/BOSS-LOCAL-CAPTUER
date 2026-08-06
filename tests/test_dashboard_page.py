@@ -65,6 +65,23 @@ class DashboardPageTest(unittest.TestCase):
         self.assertEqual(options.role_id, 13)
         self.assertEqual(options.job_title, "招聘顾问")
 
+    def test_action_reminder_summary_shows_today_and_overdue_counts(self) -> None:
+        page = DashboardPage()
+        self.addCleanup(page.deleteLater)
+
+        page.set_next_action_summary(
+            {
+                "pending_total": 8,
+                "today": 2,
+                "overdue": 1,
+                "next_7_days": 3,
+                "completed_today": 4,
+            }
+        )
+
+        self.assertIn("今日 2", page.next_action_summary_label.text())
+        self.assertIn("逾期 1", page.next_action_summary_label.text())
+
 
 if __name__ == "__main__":
     unittest.main()

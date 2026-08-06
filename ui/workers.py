@@ -188,6 +188,20 @@ class CandidatePageWorker(QObject):
                 result["rows"] = [dict(row) for row in result["rows"]]
                 self.finished.emit(request_id, result)
                 return
+            if kind == "next_actions":
+                role_id = int(filters["role_id"]) if filters.get("role_id") is not None else None
+                result = self.repository.page_next_actions(
+                    view=str(filters.get("view") or "pending"),
+                    role_id=role_id,
+                    owner=str(filters.get("owner") or ""),
+                    page=page,
+                    page_size=page_size,
+                )
+                result["summary"] = self.repository.get_next_action_summary(role_id=role_id)
+                result["kind"] = kind
+                result["rows"] = [dict(row) for row in result["rows"]]
+                self.finished.emit(request_id, result)
+                return
             if kind == "screening_results":
                 result = self.repository.page_screening_task_results(
                     int(request["run_id"]), page=page, page_size=page_size

@@ -284,6 +284,28 @@ class RecruitmentTask:
 
 
 @dataclass(slots=True)
+class NextAction:
+    subject_type: str
+    action_type: str
+    title: str
+    due_at: str
+    role_id: int
+    candidate_id: int | None = None
+    task_id: int | None = None
+    owner: str = ""
+    priority: str = "normal"
+    status: str = "pending"
+    note: str = ""
+    completed_at: str = ""
+    id: int | None = None
+    created_at: str = ""
+    updated_at: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
 class ScreeningResult:
     run_id: int
     candidate_id: int

@@ -41,6 +41,7 @@ class RecruitmentTasksPage(QWidget):
     open_export_requested = Signal(str)
     open_export_folder_requested = Signal()
     extension_action_requested = Signal(str, int)
+    next_action_requested = Signal(int)
 
     def __init__(self) -> None:
         super().__init__()
@@ -108,6 +109,7 @@ class RecruitmentTasksPage(QWidget):
         self.cancel_button = QPushButton("取消任务")
         self.open_platform_button = QPushButton("打开招聘平台")
         self.export_task_button = QPushButton("导出任务报告")
+        self.next_action_button = QPushButton("创建下一步动作")
         for button in [
             self.save_button,
             self.start_button,
@@ -116,6 +118,7 @@ class RecruitmentTasksPage(QWidget):
             self.cancel_button,
             self.open_platform_button,
             self.export_task_button,
+            self.next_action_button,
         ]:
             actions.addWidget(button)
         editor_layout.addWidget(form_group)
@@ -199,6 +202,10 @@ class RecruitmentTasksPage(QWidget):
         self.cancel_button.clicked.connect(lambda: self.current_task_id is not None and self.status_requested.emit(self.current_task_id, "cancelled"))
         self.open_platform_button.clicked.connect(lambda: self.current_task_id is not None and self.open_platform_requested.emit(self.current_task_id))
         self.export_task_button.clicked.connect(lambda: self.current_task_id is not None and self.export_task_requested.emit(self.current_task_id))
+        self.next_action_button.clicked.connect(
+            lambda: self.current_task_id is not None
+            and self.next_action_requested.emit(self.current_task_id)
+        )
         self.capture_quality_refresh_button.clicked.connect(
             lambda: self.current_task_id is not None
             and self.capture_quality_refresh_requested.emit(self.current_task_id)
@@ -273,6 +280,7 @@ class RecruitmentTasksPage(QWidget):
         )
         self.save_button.setEnabled(editable)
         self.export_task_button.setEnabled(True)
+        self.next_action_button.setEnabled(True)
         self.capture_quality_refresh_button.setEnabled(True)
         for widget in [
             self.name_input, self.platform_combo, self.source_url_input,
@@ -286,6 +294,7 @@ class RecruitmentTasksPage(QWidget):
         self.profile_combo.setEnabled(True)
         self.save_button.setEnabled(True)
         self.export_task_button.setEnabled(False)
+        self.next_action_button.setEnabled(False)
         self.capture_quality_refresh_button.setEnabled(False)
         for widget in [
             self.name_input, self.platform_combo, self.source_url_input,

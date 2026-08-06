@@ -834,6 +834,42 @@ def apply_migrations(connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_export_records_task_created "
         "ON export_records(task_id, created_at DESC)"
     )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS next_actions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            subject_type TEXT NOT NULL,
+            candidate_id INTEGER,
+            role_id INTEGER NOT NULL,
+            task_id INTEGER,
+            action_type TEXT NOT NULL,
+            title TEXT NOT NULL,
+            owner TEXT NOT NULL DEFAULT '',
+            due_at TEXT NOT NULL,
+            priority TEXT NOT NULL DEFAULT 'normal',
+            status TEXT NOT NULL DEFAULT 'pending',
+            note TEXT NOT NULL DEFAULT '',
+            completed_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(candidate_id) REFERENCES candidates(id) ON DELETE CASCADE,
+            FOREIGN KEY(role_id) REFERENCES screening_profiles(id) ON DELETE RESTRICT,
+            FOREIGN KEY(task_id) REFERENCES recruitment_tasks(id) ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_next_actions_status_due "
+        "ON next_actions(status, due_at, priority)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_next_actions_candidate_role "
+        "ON next_actions(candidate_id, role_id, status)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_next_actions_task_status "
+        "ON next_actions(task_id, status)"
+    )
     connection.execute("DELETE FROM schema_version")
-    connection.execute("INSERT INTO schema_version(version) VALUES (15)")
+    connection.execute("INSERT INTO schema_version(version) VALUES (16)")
     connection.commit()

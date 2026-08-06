@@ -10,6 +10,7 @@ from core.models import (
     CandidateRecord,
     CaptureBatch,
     CaptureBatchItem,
+    NextAction,
     RecruitmentTask,
     ScreeningProfile,
     ScreeningResult,
@@ -432,6 +433,228 @@ class CandidateRepository:
             (current_step, message, now_iso(), task_id),
         )
         self.db.get_connection().commit()
+
+    def save_next_action(self, action: NextAction) -> NextAction:
+        action.title = action.title.strip()
+        action.owner = action.owner.strip()
+        action.note = action.note.strip()
+        if not action.title:
+            raise ValueError("下一步动作标题不能为空")
+        if action.subject_type not in {"candidate_role", "recruitment_task"}:
+            raise ValueError("下一步动作关联对象无效")
+        allowed_types = {
+            "outreach", "follow_up", "collect_info", "manual_review", "interview",
+            "interview_feedback", "offer_follow_up", "revisit", "other",
+        }
+        if action.action_type not in allowed_types:
+            raise ValueError("下一步动作类型无效")
+        if action.priority not in {"low", "normal", "high", "urgent"}:
+            raise ValueError("下一步动作优先级无效")
+        try:
+            parsed_due_at = datetime.fromisoformat(action.due_at)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("下一步动作截止时间无效") from exc
+        if parsed_due_at.tzinfo is not None:
+            parsed_due_at = parsed_due_at.astimezone().replace(tzinfo=None)
+        action.due_at = parsed_due_at.isoformat(timespec="seconds")
+        connection = self.db.get_connection()
+        if action.subject_type == "candidate_role":
+            if action.candidate_id is None or action.task_id is not None:
+                raise ValueError("候选人待办必须关联候选人岗位关系")
+            match = connection.execute(
+                "SELECT id FROM candidate_role_matches WHERE candidate_id = ? AND role_id = ?",
+                (action.candidate_id, action.role_id),
+            ).fetchone()
+            if match is None:
+                raise ValueError("候选人岗位关系不存在")
+        else:
+            if action.task_id is None or action.candidate_id is not None:
+                raise ValueError("招聘任务待办必须关联招聘任务")
+            task = self.get_recruitment_task(int(action.task_id))
+            if task is None or int(task["role_id"]) != int(action.role_id):
+                raise ValueError("招聘任务与岗位不一致")
+        timestamp = now_iso()
+        if action.id is None:
+            if action.status != "pending":
+                raise ValueError("新建下一步动作必须为待处理")
+            cursor = connection.execute(
+                """
+                INSERT INTO next_actions(
+                    subject_type, candidate_id, role_id, task_id, action_type, title,
+                    owner, due_at, priority, status, note, completed_at, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, NULL, ?, ?)
+                """,
+                (
+                    action.subject_type, action.candidate_id, action.role_id, action.task_id,
+                    action.action_type, action.title, action.owner, action.due_at,
+                    action.priority, action.note, timestamp, timestamp,
+                ),
+            )
+            action.id = int(cursor.lastrowid)
+            action.created_at = timestamp
+            action.status = "pending"
+        else:
+            existing = self.get_next_action(int(action.id))
+            if existing is None:
+                raise ValueError("下一步动作不存在")
+            if str(existing["status"]) != "pending":
+                raise ValueError("已结束的下一步动作不能编辑")
+            connection.execute(
+                """
+                UPDATE next_actions
+                SET action_type = ?, title = ?, owner = ?, due_at = ?, priority = ?,
+                    note = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    action.action_type, action.title, action.owner, action.due_at,
+                    action.priority, action.note, timestamp, action.id,
+                ),
+            )
+            action.subject_type = str(existing["subject_type"])
+            action.candidate_id = existing["candidate_id"]
+            action.role_id = int(existing["role_id"])
+            action.task_id = existing["task_id"]
+            action.status = "pending"
+            action.created_at = str(existing["created_at"])
+        connection.commit()
+        action.updated_at = timestamp
+        return action
+
+    def get_next_action(self, action_id: int) -> dict[str, object] | None:
+        row = self.db.get_connection().execute(
+            "SELECT * FROM next_actions WHERE id = ?", (action_id,)
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def set_next_action_status(self, action_id: int, status: str) -> NextAction:
+        if status not in {"completed", "cancelled"}:
+            raise ValueError("下一步动作结束状态无效")
+        existing = self.get_next_action(action_id)
+        if existing is None:
+            raise ValueError("下一步动作不存在")
+        if str(existing["status"]) != "pending":
+            raise ValueError("下一步动作已经结束")
+        timestamp = now_iso()
+        completed_at = timestamp if status == "completed" else None
+        connection = self.db.get_connection()
+        connection.execute(
+            """
+            UPDATE next_actions
+            SET status = ?, completed_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (status, completed_at, timestamp, action_id),
+        )
+        connection.commit()
+        updated = self.get_next_action(action_id)
+        assert updated is not None
+        return NextAction(
+            **{key: updated[key] for key in NextAction.__dataclass_fields__ if key in updated}
+        )
+
+    def page_next_actions(
+        self,
+        *,
+        view: str = "pending",
+        role_id: int | None = None,
+        owner: str = "",
+        page: int = 1,
+        page_size: int = 100,
+    ) -> dict[str, object]:
+        if view not in {"pending", "today", "overdue", "next_7_days", "completed", "all"}:
+            raise ValueError("下一步动作视图无效")
+        page, page_size, _offset = self._normalize_page(page, page_size)
+        where: list[str] = []
+        params: list[object] = []
+        if view == "pending":
+            where.append("a.status = 'pending'")
+        elif view == "today":
+            where.extend(["a.status = 'pending'", "DATE(a.due_at) = DATE('now', 'localtime')"])
+        elif view == "overdue":
+            where.extend([
+                "a.status = 'pending'",
+                "a.due_at < STRFTIME('%Y-%m-%dT%H:%M:%S', 'now', 'localtime')",
+            ])
+        elif view == "next_7_days":
+            where.extend([
+                "a.status = 'pending'",
+                "DATE(a.due_at) BETWEEN DATE('now', 'localtime', '+1 day') "
+                "AND DATE('now', 'localtime', '+7 day')",
+            ])
+        elif view == "completed":
+            where.append("a.status = 'completed'")
+        if role_id is not None:
+            where.append("a.role_id = ?")
+            params.append(role_id)
+        if owner.strip():
+            where.append("a.owner = ?")
+            params.append(owner.strip())
+        where_sql = "WHERE " + " AND ".join(where) if where else ""
+        connection = self.db.get_connection()
+        total_row = connection.execute(
+            f"SELECT COUNT(*) AS value FROM next_actions a {where_sql}", params
+        ).fetchone()
+        total = int(total_row["value"] or 0)
+        last_page = max(1, (total + page_size - 1) // page_size)
+        page = min(page, last_page)
+        rows = list(
+            connection.execute(
+                f"""
+                SELECT
+                    a.*,
+                    p.job_title AS role_title,
+                    c.name AS candidate_name,
+                    t.name AS task_name
+                FROM next_actions a
+                JOIN screening_profiles p ON p.id = a.role_id
+                LEFT JOIN candidates c ON c.id = a.candidate_id
+                LEFT JOIN recruitment_tasks t ON t.id = a.task_id
+                {where_sql}
+                ORDER BY
+                    CASE a.status WHEN 'pending' THEN 1 ELSE 2 END,
+                    CASE a.priority WHEN 'urgent' THEN 1 WHEN 'high' THEN 2
+                         WHEN 'normal' THEN 3 ELSE 4 END,
+                    a.due_at,
+                    a.id DESC
+                LIMIT ? OFFSET ?
+                """,
+                [*params, page_size, (page - 1) * page_size],
+            ).fetchall()
+        )
+        return {"rows": rows, "total": total, "page": page, "page_size": page_size}
+
+    def get_next_action_summary(self, *, role_id: int | None = None) -> dict[str, int]:
+        where = "WHERE (? IS NULL OR role_id = ?)"
+        row = self.db.get_connection().execute(
+            f"""
+            SELECT
+                SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending_total,
+                SUM(CASE WHEN status = 'pending'
+                              AND DATE(due_at) = DATE('now', 'localtime')
+                         THEN 1 ELSE 0 END) AS today,
+                SUM(CASE WHEN status = 'pending'
+                              AND due_at < STRFTIME('%Y-%m-%dT%H:%M:%S', 'now', 'localtime')
+                         THEN 1 ELSE 0 END) AS overdue,
+                SUM(CASE WHEN status = 'pending'
+                              AND DATE(due_at) BETWEEN DATE('now', 'localtime', '+1 day')
+                                                   AND DATE('now', 'localtime', '+7 day')
+                         THEN 1 ELSE 0 END) AS next_7_days,
+                SUM(CASE WHEN status = 'completed'
+                              AND DATE(completed_at) = DATE('now', 'localtime')
+                         THEN 1 ELSE 0 END) AS completed_today
+            FROM next_actions
+            {where}
+            """,
+            (role_id, role_id),
+        ).fetchone()
+        return {
+            "pending_total": int(row["pending_total"] or 0),
+            "today": int(row["today"] or 0),
+            "overdue": int(row["overdue"] or 0),
+            "next_7_days": int(row["next_7_days"] or 0),
+            "completed_today": int(row["completed_today"] or 0),
+        }
 
     def pause_active_recruitment_tasks_for_role(self, role_id: int, message: str) -> list[int]:
         rows = self.db.get_connection().execute(

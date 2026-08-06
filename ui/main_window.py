@@ -35,7 +35,7 @@ from core.credentials import CredentialStore
 from core.extension_commands import ExtensionCommandBroker
 from core.local_api import LocalApiServer
 from core.logger import LoggingService
-from core.models import AutomationFlowConfig, JobProfile, RecruitmentTask, ScreeningProfile
+from core.models import AutomationFlowConfig, JobProfile, NextAction, RecruitmentTask, ScreeningProfile
 from core.product_development import ProductDevelopmentRepository
 from storage.db import DatabaseManager
 from storage.export_service import ExportService
@@ -46,6 +46,7 @@ from ui.pages.automation_flow import AutomationFlowPage
 from ui.pages.candidates import CandidatesPage
 from ui.pages.dashboard import DashboardPage
 from ui.pages.job_profiles import JobProfilesPage
+from ui.pages.next_actions import NextActionsPage
 from ui.pages.product_development import ProductDevelopmentPage
 from ui.pages.recruitment_tasks import RecruitmentTasksPage
 from ui.pages.review import ReviewPage
@@ -137,6 +138,7 @@ class MainWindow(QMainWindow):
         self._page_request_kind: dict[int, str] = {}
         self._latest_page_request: dict[str, int] = {}
         self._pending_candidate_focus_id: int | None = None
+        self._pending_candidate_focus_role_id: int | None = None
         self._ai_screening_thread: tuple[QThread, AIScreeningWorker] | None = None
         self._ai_screening_origin = "manual"
         self._ai_test_running = False
@@ -206,6 +208,7 @@ class MainWindow(QMainWindow):
             "AI 初筛",
             "人工复核",
             "AI 对照",
+            "行动待办",
             "产品建设",
             "设置",
         ]:
@@ -224,6 +227,7 @@ class MainWindow(QMainWindow):
         self.ai_page.set_profile_editing_enabled(False)
         self.review_page = ReviewPage()
         self.ai_human_comparison_page = AIHumanComparisonPage()
+        self.next_actions_page = NextActionsPage()
         self.product_development_page = ProductDevelopmentPage()
         self.settings_page = SettingsPage()
 
@@ -237,6 +241,7 @@ class MainWindow(QMainWindow):
             self.ai_page,
             self.review_page,
             self.ai_human_comparison_page,
+            self.next_actions_page,
             self.product_development_page,
             self.settings_page,
         ]:
@@ -259,7 +264,7 @@ class MainWindow(QMainWindow):
         self._navigation_full_labels = [
             self.navigation.item(index).text() for index in range(self.navigation.count())
         ]
-        self._navigation_compact_labels = ["概", "岗", "任", "流", "人", "AI", "核", "对", "建", "设"]
+        self._navigation_compact_labels = ["概", "岗", "任", "流", "人", "AI", "核", "对", "办", "建", "设"]
         self.navigation_container = QWidget()
         navigation_layout = QVBoxLayout(self.navigation_container)
         navigation_layout.setContentsMargins(0, 0, 0, 0)
@@ -445,11 +450,17 @@ class MainWindow(QMainWindow):
         self.recruitment_tasks_page.extension_action_requested.connect(
             self._queue_extension_action
         )
+        self.recruitment_tasks_page.next_action_requested.connect(
+            self._prefill_task_next_action
+        )
 
         self.candidates_page.refresh_requested.connect(self.refresh_candidates)
         self.candidates_page.export_requested.connect(self._export_candidates_view)
         self.candidates_page.candidate_selected.connect(self._load_candidate_detail)
         self.candidates_page.status_change_requested.connect(self._record_recruitment_status_change)
+        self.candidates_page.next_action_requested.connect(
+            self._prefill_candidate_next_action
+        )
 
         self.review_page.refresh_requested.connect(self.refresh_review_queue)
         self.review_page.status_change_requested.connect(self._record_recruitment_status_change)
@@ -459,6 +470,10 @@ class MainWindow(QMainWindow):
         self.ai_human_comparison_page.candidate_open_requested.connect(
             self._open_comparison_candidate
         )
+        self.next_actions_page.refresh_requested.connect(self.refresh_next_actions)
+        self.next_actions_page.save_requested.connect(self._save_next_action)
+        self.next_actions_page.status_requested.connect(self._set_next_action_status)
+        self.next_actions_page.subject_open_requested.connect(self._open_next_action_subject)
 
         self.product_development_page.feedback_submit_requested.connect(
             self._submit_product_feedback
@@ -786,6 +801,18 @@ class MainWindow(QMainWindow):
                 f"AI 对照：当前 {len(rows)} 条，共 {result['total']} 条"
             )
             return
+        if kind == "next_actions":
+            self.next_actions_page.set_summary(dict(result.get("summary") or {}))
+            self.next_actions_page.set_page_result(
+                rows,
+                total=int(result["total"]),
+                page=int(result["page"]),
+                page_size=int(result["page_size"]),
+            )
+            self.statusBar().showMessage(
+                f"行动待办：当前 {len(rows)} 条，共 {result['total']} 条"
+            )
+            return
         if kind == "screening_results":
             self.ai_page.set_result_page(
                 rows,
@@ -807,7 +834,10 @@ class MainWindow(QMainWindow):
             candidate_id = self._pending_candidate_focus_id
             self.candidates_page.select_candidate(candidate_id)
             self._load_candidate_detail(candidate_id)
+            if self._pending_candidate_focus_role_id is not None:
+                self.candidates_page.select_status_role(self._pending_candidate_focus_role_id)
             self._pending_candidate_focus_id = None
+            self._pending_candidate_focus_role_id = None
         self.statusBar().showMessage(
             f"候选人已加载：当前 {len(rows)} 条，共 {result['total']} 条"
         )
@@ -831,6 +861,9 @@ class MainWindow(QMainWindow):
             DashboardPage.translate_status(str(stats["latest_batch_status"]))
         )
         self.dashboard_page.inserted_value.setText(str(stats["total_candidates"]))
+        self.dashboard_page.set_next_action_summary(
+            self.repository.get_next_action_summary()
+        )
         if self.local_api_server is not None:
             self.dashboard_page.set_local_api_status(self.local_api_server.endpoint)
         else:
@@ -953,11 +986,94 @@ class MainWindow(QMainWindow):
         )
         self.statusBar().showMessage("正在加载 AI 与人工结果对照...")
 
-    def _open_comparison_candidate(self, candidate_id: int) -> None:
+    def _open_comparison_candidate(self, candidate_id: int, role_id: int | None = None) -> None:
         self._pending_candidate_focus_id = int(candidate_id)
+        self._pending_candidate_focus_role_id = int(role_id) if role_id is not None else None
         candidate_index = self._navigation_full_labels.index("候选人")
         self.navigation.setCurrentRow(candidate_index)
         self._load_candidate_detail(int(candidate_id))
+        if role_id is not None:
+            self.candidates_page.select_status_role(int(role_id))
+
+    def refresh_next_actions(self) -> None:
+        self.next_actions_page.set_profiles(
+            [dict(profile) for profile in self.repository.list_screening_profiles()]
+        )
+        self._candidate_request_id += 1
+        request_id = self._candidate_request_id
+        self._page_request_kind[request_id] = "next_actions"
+        self._latest_page_request["next_actions"] = request_id
+        self.candidate_query_requested.emit(
+            {
+                "request_id": request_id,
+                "kind": "next_actions",
+                "filters": self.next_actions_page.current_filters(),
+                "page": self.next_actions_page.current_page(),
+                "page_size": self.next_actions_page.page_size(),
+            }
+        )
+        self.statusBar().showMessage("正在加载行动待办...")
+
+    def _save_next_action(self, payload: dict[str, object]) -> None:
+        try:
+            action = NextAction(
+                **{
+                    key: payload.get(key)
+                    for key in NextAction.__dataclass_fields__
+                    if key in payload
+                }
+            )
+            self.repository.save_next_action(action)
+        except (TypeError, ValueError) as exc:
+            self.next_actions_page.feedback_label.setText(str(exc))
+            return
+        self.statusBar().showMessage("下一步动作已保存")
+        self.refresh_next_actions()
+        self.refresh_dashboard_stats()
+
+    def _set_next_action_status(self, action_id: int, status: str) -> None:
+        try:
+            self.repository.set_next_action_status(action_id, status)
+        except ValueError as exc:
+            self.next_actions_page.feedback_label.setText(str(exc))
+            return
+        self.refresh_next_actions()
+        self.refresh_dashboard_stats()
+
+    def _prefill_candidate_next_action(self, payload: dict[str, object]) -> None:
+        action_index = self._navigation_full_labels.index("行动待办")
+        self.navigation.setCurrentRow(action_index)
+        self.next_actions_page.prefill_candidate(
+            candidate_id=int(payload["candidate_id"]),
+            role_id=int(payload["role_id"]),
+            candidate_name=str(payload.get("candidate_name") or ""),
+            role_title=str(payload.get("role_title") or ""),
+        )
+
+    def _prefill_task_next_action(self, task_id: int) -> None:
+        task = self.repository.get_recruitment_task(task_id)
+        if task is None:
+            return
+        action_index = self._navigation_full_labels.index("行动待办")
+        self.navigation.setCurrentRow(action_index)
+        self.next_actions_page.prefill_task(
+            task_id=task_id,
+            role_id=int(task["role_id"]),
+            task_name=str(task["name"]),
+            role_title=str(task["role_title"]),
+        )
+
+    def _open_next_action_subject(self, payload: dict[str, object]) -> None:
+        if payload.get("subject_type") == "candidate_role":
+            self._open_comparison_candidate(
+                int(payload["candidate_id"]), int(payload["role_id"])
+            )
+            return
+        task_id = payload.get("task_id")
+        if task_id is not None:
+            task_index = self._navigation_full_labels.index("招聘任务")
+            self.navigation.setCurrentRow(task_index)
+            self._load_recruitment_task(int(task_id))
 
     def _save_settings(self, config) -> None:
         config.automation_flow = self.config.automation_flow
@@ -2141,6 +2257,8 @@ class MainWindow(QMainWindow):
             self.refresh_review_queue()
         elif page is self.ai_human_comparison_page:
             self.refresh_ai_human_comparison()
+        elif page is self.next_actions_page:
+            self.refresh_next_actions()
         elif page is self.product_development_page:
             self.refresh_product_development()
 

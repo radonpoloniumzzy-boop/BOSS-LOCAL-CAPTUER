@@ -133,6 +133,14 @@ class DashboardPage(QWidget):
         stats_layout.addWidget(QLabel("采集模式"), 3, 2)
         stats_layout.addWidget(self.capture_mode_value, 3, 3)
 
+        next_action_group = QGroupBox("行动提醒")
+        next_action_layout = QVBoxLayout(next_action_group)
+        self.next_action_summary_label = QLabel(
+            "待处理 0｜今日 0｜逾期 0｜未来七天 0｜今日完成 0"
+        )
+        self.next_action_summary_label.setWordWrap(True)
+        next_action_layout.addWidget(self.next_action_summary_label)
+
         funnel_group = QGroupBox("招聘漏斗")
         funnel_layout = QVBoxLayout(funnel_group)
         funnel_filter_row = QHBoxLayout()
@@ -242,6 +250,7 @@ class DashboardPage(QWidget):
         root_layout.addLayout(action_row)
         root_layout.addWidget(export_group)
         root_layout.addWidget(stats_group)
+        root_layout.addWidget(next_action_group)
         root_layout.addWidget(funnel_group)
         root_layout.addWidget(self.hint_label)
         root_layout.addWidget(self.message_label)
@@ -392,6 +401,13 @@ class DashboardPage(QWidget):
             f"风险 {summary.get('risky', 0)}",
         ]
         self.review_quality_label.setText("人工池占比：" + " / ".join(parts))
+
+    def set_next_action_summary(self, summary: dict[str, int]) -> None:
+        self.next_action_summary_label.setText(
+            f"待处理 {summary.get('pending_total', 0)}｜今日 {summary.get('today', 0)}｜"
+            f"逾期 {summary.get('overdue', 0)}｜未来七天 {summary.get('next_7_days', 0)}｜"
+            f"今日完成 {summary.get('completed_today', 0)}"
+        )
 
     def set_ai_rating_cohort_summary(self, summary: dict[str, object], minimum_rating: str) -> None:
         screened = int(summary.get("screened_count") or 0)
