@@ -62,6 +62,8 @@ REASON_CODE_LABELS = {
     "priority_candidate": "优先候选人",
     "manual_review_passed": "人工复核通过",
     "manual_review_rejected": "人工复核拒绝",
+    "manual_review_needs_info": "人工复核待补充资料",
+    "manual_review_deferred": "人工复核暂缓",
     "salary_mismatch": "薪资不匹配",
     "location_mismatch": "地点不匹配",
     "experience_gap": "经验不足",

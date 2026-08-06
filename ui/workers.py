@@ -162,8 +162,12 @@ class CandidatePageWorker(QObject):
             if kind == "review":
                 result = self.repository.page_manual_review_candidates(
                     role_id=(int(filters["role_id"]) if filters.get("role_id") is not None else None),
+                    queue_category=str(filters.get("queue_category") or "all"),
                     page=page,
                     page_size=page_size,
+                )
+                result["summary"] = self.repository.get_manual_review_workbench_summary(
+                    role_id=(int(filters["role_id"]) if filters.get("role_id") is not None else None)
                 )
                 result["kind"] = kind
                 result["rows"] = [dict(row) for row in result["rows"]]

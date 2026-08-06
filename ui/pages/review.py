@@ -31,6 +31,7 @@ class ReviewPage(QWidget):
         self._page = 1
         self._page_size = 100
         self._total = 0
+        self._advance_from: tuple[int, int] | None = None
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -38,22 +39,41 @@ class ReviewPage(QWidget):
         root_layout.setContentsMargins(12, 12, 12, 12)
         root_layout.setSpacing(12)
 
+        todo_group = QGroupBox("今日复核待办")
+        todo_layout = QVBoxLayout(todo_group)
+        self.todo_summary_label = QLabel(
+            "待复核 0｜高优先级 0｜AI 不确定 0｜资料不完整 0｜待补充 0｜已暂缓 0｜今日已复核 0"
+        )
+        self.todo_summary_label.setWordWrap(True)
+        todo_layout.addWidget(self.todo_summary_label)
+
         filter_group = QGroupBox("复核范围")
         filter_layout = QHBoxLayout(filter_group)
         self.role_combo = QComboBox()
         self.summary_label = QLabel("待复核 0")
         self.role_combo.addItem("全部岗位", None)
+        self.queue_combo = QComboBox()
+        for label, value in [
+            ("全部待办", "all"),
+            ("优先复核", "priority"),
+            ("普通待复核", "pending"),
+            ("待补充资料", "needs_info"),
+            ("已暂缓", "deferred"),
+        ]:
+            self.queue_combo.addItem(label, value)
         self.refresh_button = QPushButton("刷新")
         filter_layout.addWidget(QLabel("岗位"))
         filter_layout.addWidget(self.role_combo, 2)
+        filter_layout.addWidget(QLabel("队列"))
+        filter_layout.addWidget(self.queue_combo)
         filter_layout.addWidget(self.refresh_button)
         filter_layout.addWidget(self.summary_label)
         filter_layout.addStretch(1)
 
         splitter = QSplitter(Qt.Horizontal)
-        self.table = QTableWidget(0, 8)
+        self.table = QTableWidget(0, 9)
         self.table.setHorizontalHeaderLabels(
-            ["候选人", "岗位", "评级", "置信度", "原因", "建议动作", "招聘阶段", "更新时间"]
+            ["优先说明", "候选人", "岗位", "评级", "置信度", "原因", "建议动作", "招聘阶段", "更新时间"]
         )
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setSelectionMode(QTableWidget.SingleSelection)
@@ -77,23 +97,33 @@ class ReviewPage(QWidget):
         for code, label in REASON_CODE_LABELS.items():
             self.reason_code_combo.addItem(label, code)
         self.record_status_button = QPushButton("记录")
+        self.record_and_next_button = QPushButton("保存并处理下一位")
         status_row.addWidget(QLabel("阶段"))
         status_row.addWidget(self.recruitment_status_update_combo)
         status_row.addWidget(QLabel("原因"))
         status_row.addWidget(self.reason_code_combo)
         status_row.addWidget(self.record_status_button)
+        status_row.addWidget(self.record_and_next_button)
         self.status_note_input = QLineEdit()
         quick_row = QHBoxLayout()
-        self.pass_review_button = QPushButton("人工通过")
-        self.reject_review_button = QPushButton("人工拒绝")
-        self.talent_pool_button = QPushButton("放入人才库")
+        self.pass_review_button = QPushButton("通过并下一位")
+        self.reject_review_button = QPushButton("拒绝并下一位")
+        self.talent_pool_button = QPushButton("人才库并下一位")
+        self.needs_info_button = QPushButton("待补充资料")
+        self.defer_review_button = QPushButton("暂缓")
         quick_row.addWidget(self.pass_review_button)
         quick_row.addWidget(self.reject_review_button)
         quick_row.addWidget(self.talent_pool_button)
+        quick_row.addWidget(self.needs_info_button)
+        quick_row.addWidget(self.defer_review_button)
         quick_row.addStretch(1)
         self.status_note_input.setPlaceholderText("备注")
+        self.review_feedback_label = QLabel("")
+        self.review_feedback_label.setStyleSheet("color: #b42318;")
+        self.status_note_input.textChanged.connect(self.review_feedback_label.clear)
         status_layout.addLayout(status_row)
         status_layout.addWidget(self.status_note_input)
+        status_layout.addWidget(self.review_feedback_label)
         status_layout.addLayout(quick_row)
         detail_layout.addWidget(status_group)
 
@@ -101,6 +131,7 @@ class ReviewPage(QWidget):
         splitter.addWidget(detail_group)
         splitter.setSizes([760, 460])
 
+        root_layout.addWidget(todo_group)
         root_layout.addWidget(filter_group)
         root_layout.addWidget(splitter, 1)
         page_row = QHBoxLayout()
@@ -115,10 +146,12 @@ class ReviewPage(QWidget):
 
         self.refresh_button.clicked.connect(self._request_first_page)
         self.role_combo.currentIndexChanged.connect(self._request_first_page)
+        self.queue_combo.currentIndexChanged.connect(self._request_first_page)
         self.previous_page_button.clicked.connect(lambda: self._request_page(self._page - 1))
         self.next_page_button.clicked.connect(lambda: self._request_page(self._page + 1))
         self.table.itemSelectionChanged.connect(self._show_selected_detail)
         self.record_status_button.clicked.connect(self._emit_status_change)
+        self.record_and_next_button.clicked.connect(lambda: self._emit_status_change(True))
         self.pass_review_button.clicked.connect(
             lambda: self._emit_quick_status_change(
                 "priority_outreach",
@@ -140,9 +173,37 @@ class ReviewPage(QWidget):
                 "Manual review passed; keep in talent pool.",
             )
         )
+        self.needs_info_button.clicked.connect(
+            lambda: self._emit_quick_status_change(
+                "screened",
+                "manual_review_needs_info",
+                "资料不足，等待补充后重新复核。",
+            )
+        )
+        self.defer_review_button.clicked.connect(
+            lambda: self._emit_quick_status_change(
+                "screened",
+                "manual_review_deferred",
+                "当前暂缓处理，保留在复核队列。",
+            )
+        )
 
     def current_filters(self) -> dict[str, object]:
-        return {"role_id": self.role_combo.currentData()}
+        return {
+            "role_id": self.role_combo.currentData(),
+            "queue_category": self.queue_combo.currentData() or "all",
+        }
+
+    def set_workbench_summary(self, summary: dict[str, object]) -> None:
+        self.todo_summary_label.setText(
+            f"待复核 {summary.get('pending_total', 0)}｜"
+            f"高优先级 {summary.get('high_priority', 0)}｜"
+            f"AI 不确定 {summary.get('ai_uncertain', 0)}｜"
+            f"资料不完整 {summary.get('incomplete_profiles', 0)}｜"
+            f"待补充 {summary.get('needs_info', 0)}｜"
+            f"已暂缓 {summary.get('deferred', 0)}｜"
+            f"今日已复核 {summary.get('reviewed_today', 0)}"
+        )
 
     def set_profiles(self, profiles: list[dict[str, object]]) -> None:
         current_role = self.role_combo.currentData()
@@ -161,6 +222,7 @@ class ReviewPage(QWidget):
         self.table.setRowCount(len(rows))
         for row_index, row in enumerate(rows):
             values = [
+                row.get("priority_reason") or "普通待复核",
                 row.get("name") or f"候选人 #{row.get('candidate_id')}",
                 row.get("role_title") or "-",
                 row.get("latest_rating") or "-",
@@ -175,17 +237,35 @@ class ReviewPage(QWidget):
             ]
             for column, value in enumerate(values):
                 item = QTableWidgetItem(str(value))
-                if column == 0:
+                if column == 1:
                     item.setData(Qt.UserRole, row_index)
                 self.table.setItem(row_index, column, item)
         if rows:
-            self.table.selectRow(0)
+            target_row = 0
+            if self._advance_from is not None:
+                next_rows = [
+                    index
+                    for index, row in enumerate(rows)
+                    if (int(row["candidate_id"]), int(row["role_id"])) != self._advance_from
+                ]
+                target_row = next_rows[0] if next_rows else -1
+                self._advance_from = None
+            if target_row >= 0:
+                self.table.selectRow(target_row)
+            else:
+                self.table.clearSelection()
+                self.detail_text.setPlainText("当前队列没有下一位待办。")
         else:
+            self._advance_from = None
             self.detail_text.setPlainText("暂无需要人工复核的候选人。")
-        self.record_status_button.setEnabled(bool(rows))
-        self.pass_review_button.setEnabled(bool(rows))
-        self.reject_review_button.setEnabled(bool(rows))
-        self.talent_pool_button.setEnabled(bool(rows))
+        has_selection = self.table.currentRow() >= 0
+        self.record_status_button.setEnabled(has_selection)
+        self.record_and_next_button.setEnabled(has_selection)
+        self.pass_review_button.setEnabled(has_selection)
+        self.reject_review_button.setEnabled(has_selection)
+        self.talent_pool_button.setEnabled(has_selection)
+        self.needs_info_button.setEnabled(has_selection)
+        self.defer_review_button.setEnabled(has_selection)
 
     def set_page_result(
         self,
@@ -221,20 +301,27 @@ class ReviewPage(QWidget):
         row = self._selected_review_row()
         if row is None:
             self.record_status_button.setEnabled(False)
+            self.record_and_next_button.setEnabled(False)
             self.pass_review_button.setEnabled(False)
             self.reject_review_button.setEnabled(False)
             self.talent_pool_button.setEnabled(False)
+            self.needs_info_button.setEnabled(False)
+            self.defer_review_button.setEnabled(False)
             return
         self.record_status_button.setEnabled(True)
+        self.record_and_next_button.setEnabled(True)
         self.pass_review_button.setEnabled(True)
         self.reject_review_button.setEnabled(True)
         self.talent_pool_button.setEnabled(True)
+        self.needs_info_button.setEnabled(True)
+        self.defer_review_button.setEnabled(True)
         lines = [
             f"候选人：{row.get('name') or '-'}",
             f"岗位：{row.get('role_title') or '-'}",
             f"评级：{row.get('latest_rating') or '-'}",
             f"置信度：{row.get('latest_confidence') or row.get('confidence') or '-'}",
             f"复核原因：{row.get('review_reason') or '-'}",
+            f"待办分类：{row.get('priority_reason') or '-'}",
             f"建议动作：{row.get('recommended_action') or '-'}",
             f"招聘阶段：{row.get('recruitment_status') or '-'}",
             f"AI失败原因：{row.get('task_error') or '-'}",
@@ -265,15 +352,18 @@ class ReviewPage(QWidget):
         for item in self._loads(row.get("risk_json"), []) or ["-"]:
             lines.append(f"- {item}")
         lines.extend(["", "原始卡片：", str(row.get("raw_card_text") or "-")])
+        lines.extend(["", "人工复核记录：", self._review_history_detail(row)])
         self.detail_text.setPlainText("\n".join(lines))
 
-    def _emit_status_change(self) -> None:
-        self._emit_status_payload(
+    def _emit_status_change(self, advance_after_save: bool = False) -> None:
+        saved = self._emit_status_payload(
             self.recruitment_status_update_combo.currentData(),
             self.reason_code_combo.currentData() or "",
             self.status_note_input.text().strip(),
+            advance_after_save=bool(advance_after_save),
         )
-        self.status_note_input.clear()
+        if saved:
+            self.status_note_input.clear()
 
     def _emit_quick_status_change(
         self,
@@ -281,34 +371,72 @@ class ReviewPage(QWidget):
         reason_code: str,
         default_note: str,
     ) -> None:
-        note = self.status_note_input.text().strip() or default_note
-        self._emit_status_payload(to_status, reason_code, note)
-        self.status_note_input.clear()
+        entered_note = self.status_note_input.text().strip()
+        note = entered_note or default_note
+        saved = self._emit_status_payload(to_status, reason_code, note, note_was_entered=bool(entered_note))
+        if saved:
+            self.status_note_input.clear()
 
     def _emit_status_payload(
         self,
         to_status: object,
         reason_code: object,
         note: str,
-    ) -> None:
+        *,
+        advance_after_save: bool = True,
+        note_was_entered: bool | None = None,
+    ) -> bool:
         row = self._selected_review_row()
         if row is None:
-            return
+            return False
+        normalized_reason = str(reason_code or "")
+        has_specific_note = bool(note.strip()) if note_was_entered is None else note_was_entered
+        required_note_messages = {
+            "manual_review_needs_info": "请先填写需要补充的具体资料。",
+            "manual_review_deferred": "请先填写暂缓原因。",
+        }
+        if normalized_reason in required_note_messages and not has_specific_note:
+            self.review_feedback_label.setText(required_note_messages[normalized_reason])
+            self.status_note_input.setFocus()
+            return False
+        self.review_feedback_label.clear()
+        if advance_after_save:
+            self._advance_from = (int(row["candidate_id"]), int(row["role_id"]))
         self.status_change_requested.emit(
             {
                 "candidate_id": int(row["candidate_id"]),
                 "role_id": int(row["role_id"]),
                 "to_status": to_status,
-                "reason_code": reason_code or "",
+                "reason_code": normalized_reason,
                 "note": note,
+                "advance_after_save": advance_after_save,
+                "operator": "review_workbench",
             }
         )
+        return True
 
     def _selected_review_row(self) -> dict[str, object] | None:
         current_row = self.table.currentRow()
         if current_row < 0 or current_row >= len(self._rows):
             return None
         return self._rows[current_row]
+
+    @staticmethod
+    def _review_history_detail(row: dict[str, object]) -> str:
+        text = str(row.get("review_history_text") or "").strip()
+        if not text:
+            return "-"
+        lines: list[str] = []
+        for raw_line in text.splitlines():
+            parts = raw_line.split("｜", 3)
+            if len(parts) < 4:
+                lines.append(raw_line)
+                continue
+            changed_at, status, reason, note = parts
+            status_label = RECRUITMENT_STATUS_LABELS.get(status, status or "-")
+            reason_label = REASON_CODE_LABELS.get(reason, reason or "-")
+            lines.append(f"- {changed_at}｜{status_label}｜{reason_label}｜{note or '-'}")
+        return "\n".join(lines)
 
     @staticmethod
     def _route_detail(row: dict[str, object]) -> str:

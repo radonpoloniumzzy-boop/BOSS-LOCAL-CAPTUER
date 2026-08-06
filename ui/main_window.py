@@ -754,6 +754,7 @@ class MainWindow(QMainWindow):
             return
         rows = list(result["rows"])
         if kind == "review":
+            self.review_page.set_workbench_summary(dict(result.get("summary") or {}))
             self.review_page.set_page_result(
                 rows,
                 total=int(result["total"]),
@@ -1073,7 +1074,7 @@ class MainWindow(QMainWindow):
                 candidate_id=candidate_id,
                 role_id=int(payload["role_id"]),
                 to_status=str(payload["to_status"]),
-                operator="user",
+                operator=str(payload.get("operator") or "user"),
                 reason_code=str(payload.get("reason_code") or ""),
                 note=str(payload.get("note") or ""),
             )

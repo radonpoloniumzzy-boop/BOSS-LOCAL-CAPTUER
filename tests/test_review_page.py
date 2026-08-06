@@ -21,8 +21,7 @@ class ReviewPageTest(unittest.TestCase):
         self.addCleanup(page.deleteLater)
         emitted: list[dict[str, object]] = []
         page.status_change_requested.connect(lambda payload: emitted.append(dict(payload)))
-        page.set_rows(
-            [
+        rows = [
                 {
                     "candidate_id": 7,
                     "role_id": 3,
@@ -35,7 +34,7 @@ class ReviewPageTest(unittest.TestCase):
                     "recruitment_status": "screened",
                 }
             ]
-        )
+        page.set_rows(rows)
 
         page.table.selectRow(0)
         page.pass_review_button.click()
@@ -69,6 +68,78 @@ class ReviewPageTest(unittest.TestCase):
         self.assertIn("- 证据策略：securities_trader:v1", detail)
         self.assertIn("- 动作证据：交易", detail)
         self.assertIn("- 排除证据：电商交易", detail)
+
+    def test_workbench_shows_todo_summary_filters_and_defers_with_next_action(self) -> None:
+        page = ReviewPage()
+        self.addCleanup(page.deleteLater)
+        page.set_workbench_summary(
+            {
+                "pending_total": 12,
+                "high_priority": 4,
+                "ai_uncertain": 3,
+                "incomplete_profiles": 2,
+                "needs_info": 2,
+                "deferred": 1,
+                "reviewed_today": 5,
+            }
+        )
+        rows = [
+                {
+                    "candidate_id": 7,
+                    "role_id": 3,
+                    "name": "待确认候选人",
+                    "role_title": "Java Engineer",
+                    "latest_rating": "SR",
+                    "latest_confidence": "low",
+                    "review_bucket": "priority",
+                    "priority_reason": "AI 判断不确定",
+                    "review_reason": "模型置信度低",
+                    "recommended_action": "manual_review",
+                    "recruitment_status": "screened",
+                    "review_history_text": (
+                        "2026-08-06T10:00:00｜screened｜manual_review_deferred｜此前暂缓"
+                    ),
+                },
+                {
+                    "candidate_id": 8,
+                    "role_id": 3,
+                    "name": "下一位候选人",
+                    "role_title": "Java Engineer",
+                    "latest_rating": "R",
+                    "latest_confidence": "high",
+                    "review_bucket": "pending",
+                    "priority_reason": "普通待复核",
+                    "review_reason": "需要复核",
+                    "recommended_action": "manual_review",
+                    "recruitment_status": "screened",
+                },
+            ]
+        page.set_rows(rows)
+        emitted: list[dict[str, object]] = []
+        page.status_change_requested.connect(lambda payload: emitted.append(dict(payload)))
+        page.queue_combo.setCurrentIndex(page.queue_combo.findData("needs_info"))
+
+        page.needs_info_button.click()
+
+        self.assertEqual(emitted, [])
+        self.assertIn("请先填写需要补充的具体资料", page.review_feedback_label.text())
+
+        page.status_note_input.setText("请补充最近一段工作经历")
+        page.needs_info_button.click()
+        page.set_rows(rows)
+
+        self.assertIn("待复核 12", page.todo_summary_label.text())
+        self.assertIn("高优先级 4", page.todo_summary_label.text())
+        self.assertIn("今日已复核 5", page.todo_summary_label.text())
+        self.assertEqual(page.current_filters()["queue_category"], "needs_info")
+        self.assertEqual(emitted[0]["to_status"], "screened")
+        self.assertEqual(emitted[0]["reason_code"], "manual_review_needs_info")
+        self.assertEqual(emitted[0]["note"], "请补充最近一段工作经历")
+        self.assertEqual(emitted[0]["operator"], "review_workbench")
+        self.assertTrue(emitted[0]["advance_after_save"])
+        self.assertEqual(page.table.currentRow(), 1)
+        self.assertIn("下一位候选人", page.detail_text.toPlainText())
+        self.assertIn("人工复核记录", page.detail_text.toPlainText())
 
 
 if __name__ == "__main__":

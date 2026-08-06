@@ -37,6 +37,8 @@ USER_REASON_CODES = {
     "priority_candidate",
     "manual_review_passed",
     "manual_review_rejected",
+    "manual_review_needs_info",
+    "manual_review_deferred",
     "salary_mismatch",
     "location_mismatch",
     "experience_gap",
@@ -56,6 +58,47 @@ SYSTEM_REASON_CODES = {
 }
 
 REASON_CODES = USER_REASON_CODES | SYSTEM_REASON_CODES
+
+MANUAL_REVIEW_TRIGGER_CONDITION = """
+    (
+        m.match_status IN ('manual_check', 'hold', 'ai_failed')
+        OR m.latest_confidence = 'low'
+        OR r.recommended_action IN ('manual_check', 'hold')
+        OR TRIM(COALESCE(r.risk_json, '')) NOT IN ('', '[]')
+    )
+"""
+MANUAL_REVIEW_ACTIVE_CONDITION = f"""
+    (
+        m.recruitment_status = 'screened'
+        OR (m.recruitment_status = 'collected' AND {MANUAL_REVIEW_TRIGGER_CONDITION})
+    )
+"""
+MANUAL_REVIEW_NEEDS_INFO_CONDITION = (
+    "COALESCE(le.reason_code, '') = 'manual_review_needs_info'"
+)
+MANUAL_REVIEW_DEFERRED_CONDITION = (
+    "COALESCE(le.reason_code, '') = 'manual_review_deferred'"
+)
+MANUAL_REVIEW_PRIORITY_BASE_CONDITION = f"""
+    (
+        m.latest_rating IN ('SSR', 'SR')
+        OR {MANUAL_REVIEW_TRIGGER_CONDITION}
+    )
+"""
+MANUAL_REVIEW_PRIORITY_CONDITION = f"""
+    (
+        NOT ({MANUAL_REVIEW_NEEDS_INFO_CONDITION})
+        AND NOT ({MANUAL_REVIEW_DEFERRED_CONDITION})
+        AND {MANUAL_REVIEW_PRIORITY_BASE_CONDITION}
+    )
+"""
+MANUAL_REVIEW_PENDING_CONDITION = f"""
+    (
+        NOT ({MANUAL_REVIEW_NEEDS_INFO_CONDITION})
+        AND NOT ({MANUAL_REVIEW_DEFERRED_CONDITION})
+        AND NOT ({MANUAL_REVIEW_PRIORITY_BASE_CONDITION})
+    )
+"""
 
 JOB_PROFILE_STATUS_TRANSITIONS = {
     "draft": {"active", "closed"},
@@ -2841,26 +2884,29 @@ class CandidateRepository:
         self,
         *,
         role_id: int | None = None,
+        queue_category: str = "all",
         limit: int = 300,
         offset: int = 0,
         include_total: bool = False,
     ) -> list[sqlite3.Row]:
         connection = self.db.get_connection()
-        where = [
-            """
-            (
-                m.match_status IN ('manual_check', 'hold', 'ai_failed')
-                OR m.latest_confidence = 'low'
-                OR r.recommended_action IN ('manual_check', 'hold')
-                OR TRIM(COALESCE(r.risk_json, '')) NOT IN ('', '[]')
-            )
-            AND m.recruitment_status IN ('collected', 'screened')
-            """
-        ]
+        where = [MANUAL_REVIEW_ACTIVE_CONDITION]
         params: list[object] = []
         if role_id is not None:
             where.append("m.role_id = ?")
             params.append(role_id)
+        category_conditions = {
+            "all": "",
+            "priority": MANUAL_REVIEW_PRIORITY_CONDITION,
+            "pending": MANUAL_REVIEW_PENDING_CONDITION,
+            "needs_info": MANUAL_REVIEW_NEEDS_INFO_CONDITION,
+            "deferred": MANUAL_REVIEW_DEFERRED_CONDITION,
+        }
+        normalized_category = str(queue_category or "all").strip()
+        if normalized_category not in category_conditions:
+            raise ValueError(f"Unsupported manual review queue category: {queue_category}")
+        if category_conditions[normalized_category]:
+            where.append(category_conditions[normalized_category])
         where_sql = "WHERE " + " AND ".join(where)
         total_select = ", COUNT(*) OVER() AS _page_total" if include_total else ""
         params.extend([max(1, min(int(limit), 1000)), max(0, int(offset))])
@@ -2905,6 +2951,45 @@ class CandidateRepository:
                     t.retry_count,
                     t.max_retry_count,
                     t.updated_at AS task_updated_at,
+                    le.reason_code AS latest_review_reason_code,
+                    le.note AS latest_review_note,
+                    le.changed_at AS latest_review_at,
+                    (
+                        SELECT GROUP_CONCAT(history_line, CHAR(10))
+                        FROM (
+                            SELECT
+                                e.changed_at || '｜' || e.to_status || '｜' ||
+                                e.reason_code || '｜' || COALESCE(e.note, '') AS history_line
+                            FROM candidate_role_status_events e
+                            WHERE e.candidate_id = m.candidate_id
+                              AND e.role_id = m.role_id
+                              AND (
+                                  e.operator = 'review_workbench'
+                                  OR e.reason_code IN (
+                                      'manual_review_passed', 'manual_review_rejected',
+                                      'manual_review_needs_info', 'manual_review_deferred'
+                                  )
+                              )
+                            ORDER BY e.changed_at DESC, e.id DESC
+                            LIMIT 10
+                        )
+                    ) AS review_history_text,
+                    CASE
+                        WHEN {MANUAL_REVIEW_DEFERRED_CONDITION} THEN 'deferred'
+                        WHEN {MANUAL_REVIEW_NEEDS_INFO_CONDITION} THEN 'needs_info'
+                        WHEN {MANUAL_REVIEW_PRIORITY_CONDITION} THEN 'priority'
+                        ELSE 'pending'
+                    END AS review_bucket,
+                    CASE
+                        WHEN {MANUAL_REVIEW_DEFERRED_CONDITION} THEN '已暂缓'
+                        WHEN {MANUAL_REVIEW_NEEDS_INFO_CONDITION} THEN '待补充资料'
+                        WHEN m.latest_rating IN ('SSR', 'SR') THEN '高评级候选人'
+                        WHEN m.match_status = 'ai_failed' THEN 'AI 筛选失败'
+                        WHEN m.latest_confidence = 'low' THEN 'AI 判断不确定'
+                        WHEN TRIM(COALESCE(r.risk_json, '')) NOT IN ('', '[]') THEN '存在风险需确认'
+                        WHEN m.match_status IN ('manual_check', 'hold') THEN '规则要求人工确认'
+                        ELSE '普通待复核'
+                    END AS priority_reason,
                     CASE
                         WHEN m.match_status = 'manual_check' THEN '规则分流：人工确认'
                         WHEN m.match_status = 'hold' THEN '规则分流：暂缓'
@@ -2928,17 +3013,36 @@ class CandidateRepository:
                     WHERE t2.candidate_id = m.candidate_id
                       AND t2.role_id = m.role_id
                     ORDER BY t2.updated_at DESC, t2.id DESC
+                      LIMIT 1
+                  )
+                LEFT JOIN candidate_role_status_events le
+                  ON le.id = (
+                    SELECT e2.id
+                    FROM candidate_role_status_events e2
+                    WHERE e2.candidate_id = m.candidate_id
+                      AND e2.role_id = m.role_id
+                      AND (
+                          e2.operator = 'review_workbench'
+                          OR e2.reason_code IN (
+                              'manual_review_passed', 'manual_review_rejected',
+                              'manual_review_needs_info', 'manual_review_deferred'
+                          )
+                      )
+                    ORDER BY e2.changed_at DESC, e2.id DESC
                     LIMIT 1
                   )
                 {where_sql}
                 ORDER BY
                     CASE
-                        WHEN m.match_status = 'manual_check' THEN 1
-                        WHEN m.match_status = 'ai_failed' THEN 2
-                        WHEN m.latest_confidence = 'low' THEN 3
-                        WHEN TRIM(COALESCE(r.risk_json, '')) NOT IN ('', '[]') THEN 4
-                        WHEN m.match_status = 'hold' THEN 5
-                        ELSE 6
+                        WHEN {MANUAL_REVIEW_PRIORITY_CONDITION} THEN 1
+                        WHEN {MANUAL_REVIEW_PENDING_CONDITION} THEN 2
+                        WHEN {MANUAL_REVIEW_NEEDS_INFO_CONDITION} THEN 3
+                        WHEN {MANUAL_REVIEW_DEFERRED_CONDITION} THEN 4
+                        ELSE 5
+                    END,
+                    CASE m.latest_rating
+                        WHEN 'SSR' THEN 1 WHEN 'SR' THEN 2 WHEN 'R' THEN 3
+                        WHEN 'N' THEN 4 ELSE 5
                     END,
                     m.updated_at DESC
                 LIMIT ? OFFSET ?
@@ -2961,8 +3065,105 @@ class CandidateRepository:
             offset=offset,
             include_total=True,
         )
-        total = int(rows[0]["_page_total"]) if rows else 0
+        if rows:
+            total = int(rows[0]["_page_total"])
+        else:
+            first_row = self.list_manual_review_candidates(
+                **filters,
+                limit=1,
+                offset=0,
+                include_total=True,
+            )
+            total = int(first_row[0]["_page_total"]) if first_row else 0
+            last_page = max(1, (total + page_size - 1) // page_size)
+            if total and page > last_page:
+                page = last_page
+                rows = self.list_manual_review_candidates(
+                    **filters,
+                    limit=page_size,
+                    offset=(page - 1) * page_size,
+                    include_total=True,
+                )
+            elif not total:
+                page = 1
         return {"rows": rows, "total": total, "page": page, "page_size": page_size}
+
+    def get_manual_review_workbench_summary(
+        self,
+        *,
+        role_id: int | None = None,
+    ) -> dict[str, int]:
+        where = [MANUAL_REVIEW_ACTIVE_CONDITION]
+        params: list[object] = []
+        if role_id is not None:
+            where.append("m.role_id = ?")
+            params.append(role_id)
+        row = self.db.get_connection().execute(
+            f"""
+            SELECT
+                COUNT(*) AS pending_total,
+                SUM(CASE WHEN {MANUAL_REVIEW_PRIORITY_CONDITION} THEN 1 ELSE 0 END)
+                    AS high_priority,
+                SUM(CASE WHEN {MANUAL_REVIEW_NEEDS_INFO_CONDITION} THEN 1 ELSE 0 END)
+                    AS needs_info,
+                SUM(CASE WHEN {MANUAL_REVIEW_DEFERRED_CONDITION} THEN 1 ELSE 0 END)
+                    AS deferred,
+                SUM(CASE WHEN COALESCE(cp.profile_completeness, 0) < 60 THEN 1 ELSE 0 END)
+                    AS incomplete_profiles,
+                SUM(CASE WHEN m.match_status IN ('manual_check', 'ai_failed')
+                              OR m.latest_confidence = 'low'
+                         THEN 1 ELSE 0 END)
+                    AS ai_uncertain
+            FROM candidate_role_matches m
+            LEFT JOIN screening_results r ON r.id = m.screening_result_id
+            LEFT JOIN candidate_profiles cp ON cp.candidate_id = m.candidate_id
+            LEFT JOIN candidate_role_status_events le
+              ON le.id = (
+                SELECT e2.id
+                FROM candidate_role_status_events e2
+                WHERE e2.candidate_id = m.candidate_id
+                  AND e2.role_id = m.role_id
+                  AND (
+                      e2.operator = 'review_workbench'
+                      OR e2.reason_code IN (
+                          'manual_review_passed', 'manual_review_rejected',
+                          'manual_review_needs_info', 'manual_review_deferred'
+                      )
+                  )
+                ORDER BY e2.changed_at DESC, e2.id DESC
+                LIMIT 1
+              )
+            WHERE {' AND '.join(where)}
+            """,
+            params,
+        ).fetchone()
+        event_where = [
+            "(operator = 'review_workbench' OR reason_code IN ("
+            "'manual_review_passed', 'manual_review_rejected', "
+            "'manual_review_needs_info', 'manual_review_deferred'))",
+            "SUBSTR(changed_at, 1, 10) = DATE('now', 'localtime')",
+        ]
+        event_params: list[object] = []
+        if role_id is not None:
+            event_where.append("role_id = ?")
+            event_params.append(role_id)
+        reviewed_today = self.db.get_connection().execute(
+            f"""
+            SELECT COUNT(DISTINCT candidate_id || ':' || role_id) AS value
+            FROM candidate_role_status_events
+            WHERE {' AND '.join(event_where)}
+            """,
+            event_params,
+        ).fetchone()
+        return {
+            "pending_total": int(row["pending_total"] or 0),
+            "high_priority": int(row["high_priority"] or 0),
+            "needs_info": int(row["needs_info"] or 0),
+            "deferred": int(row["deferred"] or 0),
+            "incomplete_profiles": int(row["incomplete_profiles"] or 0),
+            "ai_uncertain": int(row["ai_uncertain"] or 0),
+            "reviewed_today": int(reviewed_today["value"] or 0),
+        }
 
     def get_manual_review_quality_summary(
         self,
