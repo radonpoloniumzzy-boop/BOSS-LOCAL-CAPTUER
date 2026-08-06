@@ -632,6 +632,14 @@ class CandidatesPage(QWidget):
             return None
         return int(item.data(Qt.UserRole))
 
+    def select_candidate(self, candidate_id: int) -> bool:
+        for row_index in range(self.table.rowCount()):
+            item = self.table.item(row_index, 0)
+            if item is not None and int(item.data(Qt.UserRole)) == int(candidate_id):
+                self.table.selectRow(row_index)
+                return True
+        return False
+
     def _emit_export(self, export_format: str) -> None:
         payload = self.current_filters()
         payload["export_format"] = export_format

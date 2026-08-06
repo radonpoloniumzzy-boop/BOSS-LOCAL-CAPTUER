@@ -14,6 +14,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from core.config import ConfigService
+from core.models import CandidateRecord
 from ui.main_window import MainWindow
 
 
@@ -74,6 +75,74 @@ class MainWindowSmokeTest(unittest.TestCase):
                     window.product_development_page.feedback_submit_button.click()
                     self.assertTrue((config_service.data_dir / "product_feedback.json").exists())
                     self.assertEqual(window.product_development_page.feedback_table.rowCount(), 1)
+                finally:
+                    window.close()
+                    QTest.qWait(50)
+
+    def test_ai_human_comparison_is_available_and_links_to_candidate_page(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_service = ConfigService(Path(tmp_dir))
+            config = config_service.default_config()
+            config.local_api_port = 0
+            config_service.save(config)
+
+            with patch("ui.main_window.ConfigService", return_value=config_service):
+                window = MainWindow()
+                try:
+                    batch = window.repository.create_batch("产品经理", "https://example.com")
+                    window.repository.upsert_batch_candidates(
+                        int(batch.id),
+                        [
+                            CandidateRecord(
+                                candidate_key="comparison:alpha",
+                                raw_text_hash="comparison-alpha",
+                                job_title="产品经理",
+                                source_url="https://example.com",
+                                capture_time="2026-08-06T10:00:00",
+                                raw_card_text="Alpha 候选人",
+                                name="Alpha 候选人",
+                            ),
+                            CandidateRecord(
+                                candidate_key="comparison:zulu",
+                                raw_text_hash="comparison-zulu",
+                                job_title="产品经理",
+                                source_url="https://example.com",
+                                capture_time="2026-08-06T10:00:01",
+                                raw_card_text="Zulu 目标候选人",
+                                name="Zulu 目标候选人",
+                            ),
+                        ],
+                    )
+                    target = next(
+                        row
+                        for row in window.repository.list_candidates()
+                        if row["name"] == "Zulu 目标候选人"
+                    )
+                    self.assertIn("AI 对照", window._navigation_full_labels)
+                    comparison_index = window._navigation_full_labels.index("AI 对照")
+                    window.navigation.setCurrentRow(comparison_index)
+                    QTest.qWait(20)
+                    self.assertIs(
+                        window._page_scroll_areas[comparison_index].widget(),
+                        window.ai_human_comparison_page,
+                    )
+                    window.ai_human_comparison_page.set_page_result(
+                        [{"candidate_id": int(target["id"]), "name": "Zulu 目标候选人"}],
+                        total=1,
+                        page=1,
+                        page_size=100,
+                    )
+                    window.ai_human_comparison_page.open_candidate_button.click()
+                    self.assertEqual(
+                        window.navigation.currentRow(),
+                        window._navigation_full_labels.index("候选人"),
+                    )
+                    for _attempt in range(20):
+                        QTest.qWait(50)
+                        if window.candidates_page.selected_candidate_id() == int(target["id"]):
+                            break
+                    self.assertIn("Zulu 目标候选人", window.candidates_page.detail_text.toPlainText())
+                    self.assertEqual(window.candidates_page.selected_candidate_id(), int(target["id"]))
                 finally:
                     window.close()
                     QTest.qWait(50)

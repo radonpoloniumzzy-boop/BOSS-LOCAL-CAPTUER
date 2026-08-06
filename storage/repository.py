@@ -100,6 +100,83 @@ MANUAL_REVIEW_PENDING_CONDITION = f"""
     )
 """
 
+AI_HUMAN_COMPARISON_CTE = """
+WITH comparison_samples AS (
+    SELECT
+        m.candidate_id,
+        m.role_id,
+        c.name,
+        c.raw_card_text,
+        p.job_title AS role_title,
+        r.rating AS latest_rating,
+        r.confidence AS latest_confidence,
+        r.recommended_action,
+        r.persona,
+        r.evidence_json,
+        r.gap_json,
+        r.risk_json,
+        r.created_at AS screened_at,
+        m.human_decision,
+        he.note AS human_note,
+        he.changed_at AS human_reviewed_at,
+        CASE
+            WHEN r.recommended_action IN ('manual_check', 'hold') THEN 'uncertain'
+            WHEN r.recommended_action IN ('priority_outreach', 'normal_review')
+                 OR r.rating IN ('UR', 'SSR', 'SR', 'R') THEN 'recommended'
+            WHEN r.rating = 'N' THEN 'not_recommended'
+            ELSE 'uncertain'
+        END AS ai_decision
+    FROM candidate_role_matches m
+    JOIN candidates c ON c.id = m.candidate_id
+    JOIN screening_profiles p ON p.id = m.role_id
+    JOIN candidate_role_status_events he
+      ON he.id = (
+        SELECT e2.id
+        FROM candidate_role_status_events e2
+        WHERE e2.candidate_id = m.candidate_id
+          AND e2.role_id = m.role_id
+          AND e2.reason_code = m.human_decision
+        ORDER BY e2.changed_at DESC, e2.id DESC
+        LIMIT 1
+      )
+    JOIN screening_results r
+      ON r.id = (
+        SELECT r2.id
+        FROM screening_results r2
+        JOIN screening_runs sr2 ON sr2.id = r2.run_id
+        WHERE r2.candidate_id = m.candidate_id
+          AND sr2.profile_id = m.role_id
+          AND r2.created_at <= he.changed_at
+        ORDER BY r2.created_at DESC, r2.id DESC
+        LIMIT 1
+      )
+    WHERE m.human_decision IN ('manual_review_passed', 'manual_review_rejected')
+), classified_comparisons AS (
+    SELECT
+        *,
+        CASE
+            WHEN ai_decision = 'uncertain' THEN 'manual_resolved'
+            WHEN (ai_decision = 'recommended' AND human_decision = 'manual_review_passed')
+              OR (ai_decision = 'not_recommended' AND human_decision = 'manual_review_rejected')
+                THEN 'agreement'
+            ELSE 'disagreement'
+        END AS comparison_status,
+        CASE
+            WHEN ai_decision = 'recommended' AND human_decision = 'manual_review_passed'
+                THEN 'consistent_recommendation'
+            WHEN ai_decision = 'not_recommended' AND human_decision = 'manual_review_rejected'
+                THEN 'consistent_rejection'
+            WHEN ai_decision = 'recommended' AND human_decision = 'manual_review_rejected'
+                THEN 'ai_overestimated'
+            WHEN ai_decision = 'not_recommended' AND human_decision = 'manual_review_passed'
+                THEN 'ai_underestimated'
+            WHEN human_decision = 'manual_review_passed' THEN 'uncertain_human_passed'
+            ELSE 'uncertain_human_rejected'
+        END AS difference_type
+    FROM comparison_samples
+)
+"""
+
 JOB_PROFILE_STATUS_TRANSITIONS = {
     "draft": {"active", "closed"},
     "active": {"paused", "closed"},
@@ -3163,6 +3240,101 @@ class CandidateRepository:
             "incomplete_profiles": int(row["incomplete_profiles"] or 0),
             "ai_uncertain": int(row["ai_uncertain"] or 0),
             "reviewed_today": int(reviewed_today["value"] or 0),
+        }
+
+    def page_ai_human_comparisons(
+        self,
+        *,
+        role_id: int | None = None,
+        comparison_status: str = "all",
+        page: int = 1,
+        page_size: int = 100,
+    ) -> dict[str, object]:
+        normalized_status = str(comparison_status or "all").strip()
+        allowed_statuses = {"all", "agreement", "disagreement", "manual_resolved"}
+        if normalized_status not in allowed_statuses:
+            raise ValueError(f"Unsupported AI-human comparison status: {comparison_status}")
+        page, page_size, _offset = self._normalize_page(page, page_size)
+        where = ["(? IS NULL OR role_id = ?)"]
+        params: list[object] = [role_id, role_id]
+        if normalized_status != "all":
+            where.append("comparison_status = ?")
+            params.append(normalized_status)
+        where_sql = " AND ".join(where)
+        connection = self.db.get_connection()
+        count_row = connection.execute(
+            f"""
+            {AI_HUMAN_COMPARISON_CTE}
+            SELECT COUNT(*) AS value
+            FROM classified_comparisons
+            WHERE {where_sql}
+            """,
+            params,
+        ).fetchone()
+        total = int(count_row["value"] or 0)
+        last_page = max(1, (total + page_size - 1) // page_size)
+        page = min(page, last_page)
+        offset = (page - 1) * page_size
+        rows = list(
+            connection.execute(
+                f"""
+                {AI_HUMAN_COMPARISON_CTE}
+                SELECT *
+                FROM classified_comparisons
+                WHERE {where_sql}
+                ORDER BY
+                    CASE comparison_status
+                        WHEN 'disagreement' THEN 1
+                        WHEN 'manual_resolved' THEN 2
+                        ELSE 3
+                    END,
+                    human_reviewed_at DESC,
+                    candidate_id DESC
+                LIMIT ? OFFSET ?
+                """,
+                [*params, page_size, offset],
+            ).fetchall()
+        )
+        return {"rows": rows, "total": total, "page": page, "page_size": page_size}
+
+    def get_ai_human_comparison_summary(
+        self,
+        *,
+        role_id: int | None = None,
+    ) -> dict[str, int | float]:
+        row = self.db.get_connection().execute(
+            f"""
+            {AI_HUMAN_COMPARISON_CTE}
+            SELECT
+                COUNT(*) AS compared_total,
+                SUM(CASE WHEN comparison_status = 'agreement' THEN 1 ELSE 0 END)
+                    AS agreement_count,
+                SUM(CASE WHEN comparison_status = 'disagreement' THEN 1 ELSE 0 END)
+                    AS disagreement_count,
+                SUM(CASE WHEN comparison_status = 'manual_resolved' THEN 1 ELSE 0 END)
+                    AS manual_resolved_count,
+                SUM(CASE WHEN human_decision = 'manual_review_passed' THEN 1 ELSE 0 END)
+                    AS human_passed_count,
+                SUM(CASE WHEN human_decision = 'manual_review_rejected' THEN 1 ELSE 0 END)
+                    AS human_rejected_count
+            FROM classified_comparisons
+            WHERE (? IS NULL OR role_id = ?)
+            """,
+            (role_id, role_id),
+        ).fetchone()
+        agreement_count = int(row["agreement_count"] or 0)
+        disagreement_count = int(row["disagreement_count"] or 0)
+        decisive_total = agreement_count + disagreement_count
+        return {
+            "compared_total": int(row["compared_total"] or 0),
+            "agreement_count": agreement_count,
+            "disagreement_count": disagreement_count,
+            "manual_resolved_count": int(row["manual_resolved_count"] or 0),
+            "human_passed_count": int(row["human_passed_count"] or 0),
+            "human_rejected_count": int(row["human_rejected_count"] or 0),
+            "agreement_rate": round(agreement_count * 100 / decisive_total, 1)
+            if decisive_total
+            else 0.0,
         }
 
     def get_manual_review_quality_summary(

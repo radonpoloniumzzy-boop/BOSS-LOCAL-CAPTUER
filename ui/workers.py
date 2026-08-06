@@ -173,6 +173,21 @@ class CandidatePageWorker(QObject):
                 result["rows"] = [dict(row) for row in result["rows"]]
                 self.finished.emit(request_id, result)
                 return
+            if kind == "ai_human_comparison":
+                role_id = int(filters["role_id"]) if filters.get("role_id") is not None else None
+                result = self.repository.page_ai_human_comparisons(
+                    role_id=role_id,
+                    comparison_status=str(filters.get("comparison_status") or "all"),
+                    page=page,
+                    page_size=page_size,
+                )
+                result["summary"] = self.repository.get_ai_human_comparison_summary(
+                    role_id=role_id
+                )
+                result["kind"] = kind
+                result["rows"] = [dict(row) for row in result["rows"]]
+                self.finished.emit(request_id, result)
+                return
             if kind == "screening_results":
                 result = self.repository.page_screening_task_results(
                     int(request["run_id"]), page=page, page_size=page_size

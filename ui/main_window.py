@@ -41,6 +41,7 @@ from storage.db import DatabaseManager
 from storage.export_service import ExportService
 from storage.repository import CandidateRepository
 from ui.pages.ai_screen import AIScreenPage
+from ui.pages.ai_human_comparison import AIHumanComparisonPage
 from ui.pages.automation_flow import AutomationFlowPage
 from ui.pages.candidates import CandidatesPage
 from ui.pages.dashboard import DashboardPage
@@ -135,6 +136,7 @@ class MainWindow(QMainWindow):
         self._candidate_request_id = 0
         self._page_request_kind: dict[int, str] = {}
         self._latest_page_request: dict[str, int] = {}
+        self._pending_candidate_focus_id: int | None = None
         self._ai_screening_thread: tuple[QThread, AIScreeningWorker] | None = None
         self._ai_screening_origin = "manual"
         self._ai_test_running = False
@@ -203,6 +205,7 @@ class MainWindow(QMainWindow):
             "候选人",
             "AI 初筛",
             "人工复核",
+            "AI 对照",
             "产品建设",
             "设置",
         ]:
@@ -220,6 +223,7 @@ class MainWindow(QMainWindow):
         self.ai_page = AIScreenPage(self.prompt_manager)
         self.ai_page.set_profile_editing_enabled(False)
         self.review_page = ReviewPage()
+        self.ai_human_comparison_page = AIHumanComparisonPage()
         self.product_development_page = ProductDevelopmentPage()
         self.settings_page = SettingsPage()
 
@@ -232,6 +236,7 @@ class MainWindow(QMainWindow):
             self.candidates_page,
             self.ai_page,
             self.review_page,
+            self.ai_human_comparison_page,
             self.product_development_page,
             self.settings_page,
         ]:
@@ -254,7 +259,7 @@ class MainWindow(QMainWindow):
         self._navigation_full_labels = [
             self.navigation.item(index).text() for index in range(self.navigation.count())
         ]
-        self._navigation_compact_labels = ["概", "岗", "任", "流", "人", "AI", "核", "建", "设"]
+        self._navigation_compact_labels = ["概", "岗", "任", "流", "人", "AI", "核", "对", "建", "设"]
         self.navigation_container = QWidget()
         navigation_layout = QVBoxLayout(self.navigation_container)
         navigation_layout.setContentsMargins(0, 0, 0, 0)
@@ -448,6 +453,12 @@ class MainWindow(QMainWindow):
 
         self.review_page.refresh_requested.connect(self.refresh_review_queue)
         self.review_page.status_change_requested.connect(self._record_recruitment_status_change)
+        self.ai_human_comparison_page.refresh_requested.connect(
+            self.refresh_ai_human_comparison
+        )
+        self.ai_human_comparison_page.candidate_open_requested.connect(
+            self._open_comparison_candidate
+        )
 
         self.product_development_page.feedback_submit_requested.connect(
             self._submit_product_feedback
@@ -763,6 +774,18 @@ class MainWindow(QMainWindow):
             )
             self.statusBar().showMessage(f"人工复核：当前 {len(rows)} 条，共 {result['total']} 条")
             return
+        if kind == "ai_human_comparison":
+            self.ai_human_comparison_page.set_summary(dict(result.get("summary") or {}))
+            self.ai_human_comparison_page.set_page_result(
+                rows,
+                total=int(result["total"]),
+                page=int(result["page"]),
+                page_size=int(result["page_size"]),
+            )
+            self.statusBar().showMessage(
+                f"AI 对照：当前 {len(rows)} 条，共 {result['total']} 条"
+            )
+            return
         if kind == "screening_results":
             self.ai_page.set_result_page(
                 rows,
@@ -780,6 +803,11 @@ class MainWindow(QMainWindow):
             page=int(result["page"]),
             page_size=int(result["page_size"]),
         )
+        if self._pending_candidate_focus_id is not None:
+            candidate_id = self._pending_candidate_focus_id
+            self.candidates_page.select_candidate(candidate_id)
+            self._load_candidate_detail(candidate_id)
+            self._pending_candidate_focus_id = None
         self.statusBar().showMessage(
             f"候选人已加载：当前 {len(rows)} 条，共 {result['total']} 条"
         )
@@ -905,6 +933,31 @@ class MainWindow(QMainWindow):
             }
         )
         self.statusBar().showMessage("正在加载人工复核队列...")
+
+    def refresh_ai_human_comparison(self) -> None:
+        self.ai_human_comparison_page.set_profiles(
+            [dict(profile) for profile in self.repository.list_screening_profiles()]
+        )
+        self._candidate_request_id += 1
+        request_id = self._candidate_request_id
+        self._page_request_kind[request_id] = "ai_human_comparison"
+        self._latest_page_request["ai_human_comparison"] = request_id
+        self.candidate_query_requested.emit(
+            {
+                "request_id": request_id,
+                "kind": "ai_human_comparison",
+                "filters": self.ai_human_comparison_page.current_filters(),
+                "page": self.ai_human_comparison_page.current_page(),
+                "page_size": self.ai_human_comparison_page.page_size(),
+            }
+        )
+        self.statusBar().showMessage("正在加载 AI 与人工结果对照...")
+
+    def _open_comparison_candidate(self, candidate_id: int) -> None:
+        self._pending_candidate_focus_id = int(candidate_id)
+        candidate_index = self._navigation_full_labels.index("候选人")
+        self.navigation.setCurrentRow(candidate_index)
+        self._load_candidate_detail(int(candidate_id))
 
     def _save_settings(self, config) -> None:
         config.automation_flow = self.config.automation_flow
@@ -2086,6 +2139,8 @@ class MainWindow(QMainWindow):
             self.refresh_ai_screen()
         elif page is self.review_page:
             self.refresh_review_queue()
+        elif page is self.ai_human_comparison_page:
+            self.refresh_ai_human_comparison()
         elif page is self.product_development_page:
             self.refresh_product_development()
 
