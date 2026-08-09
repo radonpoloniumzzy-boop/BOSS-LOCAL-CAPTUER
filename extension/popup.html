@@ -177,6 +177,9 @@
       <button id="pauseScroll">暂停滚动</button>
     </div>
 
+    <button id="downloadCurrentBatch" type="button" disabled>下载当前批次 CSV 到 Downloads</button>
+    <div class="hint">采集成功后启用，只下载刚完成的批次，不会误取其他任务的新批次。</div>
+
     <div class="hint">推荐采集支持 Boss 推荐页和猎聘推荐页。自动滚动中点击“暂停滚动”，会停止继续滚动并导入已采集卡片。</div>
 
     <div class="section">
@@ -234,6 +237,7 @@
     <div id="status" class="status-box">就绪。</div>
 
     <script src="pairing.js"></script>
+    <script src="batch_export.js"></script>
     <script src="popup.js"></script>
   </body>
 </html>

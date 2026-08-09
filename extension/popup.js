@@ -15,6 +15,8 @@ const DEFAULTS = {
   batchActionDelaySeconds: 5,
   maxBatchSessions: 50,
   chatAutomationEnabled: false,
+  lastCompletedBatchId: null,
+  lastCompletedBatchConnection: null,
 };
 
 const OLD_DEFAULT_SCROLL_WAIT_MS = 1500;
@@ -63,12 +65,16 @@ const batchLogEl = document.getElementById("batchLog");
 const automationAutoButton = document.getElementById("automationAuto");
 const pairingCodeInput = document.getElementById("pairingCode");
 const applyPairingCodeButton = document.getElementById("applyPairingCode");
+const downloadCurrentBatchButton = document.getElementById("downloadCurrentBatch");
 let batchStatusTimer = null;
 let activeJobProfileId = null;
 let activeRecruitmentTaskId = null;
+let lastCompletedBatchId = null;
+let lastCompletedBatchConnection = null;
 
 automationAutoButton.addEventListener("click", () => runAutomation());
 applyPairingCodeButton.addEventListener("click", () => applyPairingCodeAndTest());
+downloadCurrentBatchButton.addEventListener("click", () => downloadCurrentBatch());
 document.getElementById("scrollWaitDown").addEventListener("click", () => adjustScrollWait(-30));
 document.getElementById("scrollWaitUp").addEventListener("click", () => adjustScrollWait(30));
 document.getElementById("collectCurrent").addEventListener("click", () => runCollection(false));
@@ -97,6 +103,14 @@ async function init() {
   });
   activeJobProfileId = stored.jobProfileId === null ? null : Number(stored.jobProfileId);
   activeRecruitmentTaskId = stored.recruitmentTaskId === null ? null : Number(stored.recruitmentTaskId);
+  lastCompletedBatchId = stored.lastCompletedBatchId === null ? null : Number(stored.lastCompletedBatchId);
+  lastCompletedBatchConnection = stored.lastCompletedBatchConnection || null;
+  if (!BossLocalBatchExport.batchBelongsToConnection(lastCompletedBatchConnection, stored)) {
+    lastCompletedBatchId = null;
+    lastCompletedBatchConnection = null;
+    await chrome.storage.local.set({ lastCompletedBatchId: null, lastCompletedBatchConnection: null });
+  }
+  updateBatchDownloadButton();
   if (stored.scrollWaitDefaultVersion === null && Number(stored.scrollWaitMs) === OLD_DEFAULT_SCROLL_WAIT_MS) {
     stored.scrollWaitMs = DEFAULTS.scrollWaitMs;
     await chrome.storage.local.set({
@@ -158,7 +172,6 @@ async function runAutomation() {
       ].join("\n"),
     );
     await runCollection(true, { automationRequested: true, automation });
-    window.setTimeout(() => window.close(), 1200);
   } catch (error) {
     setStatus(`AUTO 启动失败。\n${error.message || String(error)}`);
   } finally {
@@ -201,10 +214,17 @@ async function applyPairingCodeAndTest() {
     await testLocalApiConnection(verifiedSettings);
     fields.apiBase.value = verifiedSettings.apiBase;
     fields.apiToken.value = verifiedSettings.apiToken;
+    if (!BossLocalBatchExport.batchBelongsToConnection(lastCompletedBatchConnection, verifiedSettings)) {
+      lastCompletedBatchId = null;
+      lastCompletedBatchConnection = null;
+    }
     await chrome.storage.local.set({
       apiBase: fields.apiBase.value,
       apiToken: fields.apiToken.value,
+      lastCompletedBatchId,
+      lastCompletedBatchConnection,
     });
+    updateBatchDownloadButton();
     pairingCodeInput.value = "";
     setStatus(`桌面端已连接。\n接口地址：${fields.apiBase.value}\nToken 验证：通过`);
   } catch (error) {
@@ -303,6 +323,13 @@ async function runCollection(autoScroll, options = {}) {
       merged,
       Boolean(options.automationRequested),
     );
+    lastCompletedBatchId = Number(imported.batch_id) || null;
+    lastCompletedBatchConnection = {
+      apiBase: settings.apiBase,
+      apiToken: settings.apiToken,
+    };
+    await chrome.storage.local.set({ lastCompletedBatchId, lastCompletedBatchConnection });
+    updateBatchDownloadButton();
     setStatus(
       [
         options.automationRequested ? "AUTO 采集完成，已提交 AI 初筛。" : "采集完成。",
@@ -316,6 +343,43 @@ async function runCollection(autoScroll, options = {}) {
     );
   } catch (error) {
     setStatus(`导入本地程序失败。\n${error.message || String(error)}`);
+  }
+}
+
+function updateBatchDownloadButton() {
+  downloadCurrentBatchButton.disabled = !Number.isInteger(lastCompletedBatchId) || lastCompletedBatchId <= 0;
+  downloadCurrentBatchButton.textContent = lastCompletedBatchId
+    ? `下载当前批次 #${lastCompletedBatchId} CSV 到 Downloads`
+    : "下载当前批次 CSV 到 Downloads";
+}
+
+async function downloadCurrentBatch() {
+  if (!lastCompletedBatchId) {
+    setStatus("当前没有可下载的采集批次，请先完成一次采集。");
+    return;
+  }
+  const settings = collectSettings();
+  if (!BossLocalBatchExport.batchBelongsToConnection(lastCompletedBatchConnection, settings)) {
+    lastCompletedBatchId = null;
+    lastCompletedBatchConnection = null;
+    await chrome.storage.local.set({ lastCompletedBatchId: null, lastCompletedBatchConnection: null });
+    updateBatchDownloadButton();
+    setStatus("本地接口连接已变化，旧批次已清除。请先在当前桌面端完成一次采集。");
+    return;
+  }
+  downloadCurrentBatchButton.disabled = true;
+  setStatus(`正在导出批次 #${lastCompletedBatchId} 到 Downloads...`);
+  try {
+    const result = await BossLocalBatchExport.downloadBatchCsv({
+      apiBase: settings.apiBase,
+      apiToken: settings.apiToken,
+      batchId: lastCompletedBatchId,
+    });
+    setStatus(`批次 #${result.batchId} 已提交下载。\n文件：${result.filename}\n位置：Chrome 默认 Downloads 目录`);
+  } catch (error) {
+    setStatus(`下载当前批次失败。\n${error.message || String(error)}`);
+  } finally {
+    updateBatchDownloadButton();
   }
 }
 

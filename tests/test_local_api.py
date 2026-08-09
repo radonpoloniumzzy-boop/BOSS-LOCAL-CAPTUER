@@ -10,8 +10,9 @@ from automation.importer import CardImportService
 from automation.parser import CandidateParser
 from core.local_api import LocalApiServer
 from core.extension_commands import ExtensionCommandBroker
-from core.models import JobProfile
+from core.models import DEFAULT_CSV_COLUMNS, JobProfile
 from storage.db import DatabaseManager
+from storage.export_service import ExportService
 from storage.repository import CandidateRepository
 
 
@@ -24,8 +25,24 @@ class LocalApiServerTest(unittest.TestCase):
         self.db.initialize()
         self.repository = CandidateRepository(self.db)
         self.service = CardImportService(self.repository, CandidateParser())
-        self.server = LocalApiServer("127.0.0.1", 0, self.service, auth_token=self.token)
+        self.export_service = ExportService(self.repository)
+        self.server = LocalApiServer(
+            "127.0.0.1",
+            0,
+            self.service,
+            auth_token=self.token,
+            download_batch_csv=self._download_batch_csv,
+        )
         self.server.start()
+
+    def _download_batch_csv(self, batch_id: int) -> tuple[str, bytes]:
+        try:
+            return self.export_service.build_batch_csv_download(
+                batch_id,
+                columns=list(DEFAULT_CSV_COLUMNS),
+            )
+        finally:
+            self.db.close_thread_connection()
 
     def tearDown(self) -> None:
         self.server.stop()
@@ -194,6 +211,116 @@ class LocalApiServerTest(unittest.TestCase):
         self.assertEqual(response.status, 200)
         self.assertTrue(payload["ok"])
         self.assertEqual(len(self.repository.list_candidates()), 1)
+
+    def test_batch_csv_download_returns_the_exact_requested_batch(self) -> None:
+        profile = self.repository.save_job_profile(
+            JobProfile(
+                job_title="招聘顾问",
+                jd_text="招聘顾问岗位",
+                prompt_text="筛选招聘经验",
+                status="active",
+            )
+        )
+        first = self.service.import_cards(
+            {
+                "job_profile_id": profile.id,
+                "job_title": "招聘顾问",
+                "source_url": "https://www.zhipin.com/web/geek/recommend",
+                "cards": [{"raw_card_text": "Alice first batch", "name": "Alice"}],
+            }
+        )
+        self.service.import_cards(
+            {
+                "job_profile_id": profile.id,
+                "job_title": "招聘顾问",
+                "source_url": "https://www.zhipin.com/web/geek/recommend",
+                "cards": [{"raw_card_text": "Bob later batch", "name": "Bob"}],
+            }
+        )
+
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.port, timeout=5)
+        connection.request(
+            "GET",
+            f"/api/export/batches/{first['batch_id']}.csv",
+            headers={"X-Boss-Local-Token": self.token},
+        )
+        response = connection.getresponse()
+        content = response.read().decode("utf-8-sig")
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.getheader("Content-Type"), "text/csv; charset=utf-8")
+        self.assertIn(f"batch{first['batch_id']}", response.getheader("Content-Disposition") or "")
+        self.assertIn("Alice", content)
+        self.assertNotIn("Bob", content)
+
+    def test_batch_csv_download_preserves_the_historical_card_snapshot(self) -> None:
+        profile = self.repository.save_job_profile(
+            JobProfile(
+                job_title="招聘顾问",
+                jd_text="招聘顾问岗位",
+                prompt_text="筛选招聘经验",
+                status="active",
+            )
+        )
+        first = self.service.import_cards(
+            {
+                "job_profile_id": profile.id,
+                "job_title": "招聘顾问",
+                "source_url": "https://www.zhipin.com/web/geek/recommend",
+                "cards": [
+                    {
+                        "platform_uid": "candidate-7",
+                        "raw_card_text": "Alice old snapshot",
+                        "name": "Alice Old",
+                        "expected_salary": "10k-12k",
+                    }
+                ],
+            }
+        )
+        self.service.import_cards(
+            {
+                "job_profile_id": profile.id,
+                "job_title": "招聘顾问",
+                "source_url": "https://www.zhipin.com/web/geek/recommend",
+                "cards": [
+                    {
+                        "platform_uid": "candidate-7",
+                        "raw_card_text": "Alice updated snapshot",
+                        "name": "Alice Updated",
+                        "expected_salary": "20k-25k",
+                    }
+                ],
+            }
+        )
+
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.port, timeout=5)
+        connection.request(
+            "GET",
+            f"/api/export/batches/{first['batch_id']}.csv",
+            headers={"X-Boss-Local-Token": self.token},
+        )
+        response = connection.getresponse()
+        content = response.read().decode("utf-8-sig")
+
+        self.assertEqual(response.status, 200)
+        self.assertIn("Alice Old", content)
+        self.assertIn("10k-12k", content)
+        self.assertNotIn("Alice Updated", content)
+        self.assertNotIn("20k-25k", content)
+
+    def test_batch_csv_download_rejects_unknown_batch(self) -> None:
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.port, timeout=5)
+        connection.request(
+            "GET",
+            "/api/export/batches/999999.csv",
+            headers={"X-Boss-Local-Token": self.token},
+        )
+        response = connection.getresponse()
+        payload = json.loads(response.read().decode("utf-8"))
+
+        self.assertEqual(response.status, 404)
+        self.assertFalse(payload["ok"])
+        self.assertIn("不存在", payload["error"])
 
     def test_import_rejects_missing_token(self) -> None:
         body = json.dumps({"cards": [{"raw_card_text": "Mallory"}]}).encode("utf-8")

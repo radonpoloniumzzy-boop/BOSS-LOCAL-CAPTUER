@@ -1216,6 +1216,31 @@ class CandidateRepository:
             ).fetchall()
         )
 
+    def get_capture_batch_export_rows(self, batch_id: int) -> list[dict[str, object]]:
+        rows = self.db.get_connection().execute(
+            """
+            SELECT
+                bi.name,
+                bi.active_status,
+                bi.expected_salary,
+                bi.work_experience_text,
+                bi.education_text,
+                bi.tags_text,
+                bi.summary_text,
+                bi.raw_card_text,
+                bi.job_title,
+                bi.source_url,
+                bi.capture_time,
+                bi.detail_url,
+                bi.candidate_key
+            FROM capture_batch_items bi
+            WHERE bi.batch_id = ?
+            ORDER BY bi.id ASC
+            """,
+            (batch_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def get_latest_capture_batch_for_task(self, task_id: int) -> dict[str, object] | None:
         row = self.db.get_connection().execute(
             """

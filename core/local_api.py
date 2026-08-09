@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import re
 import secrets
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable
+from urllib.parse import quote, urlsplit
 
 
 class LocalApiServer:
@@ -20,6 +22,7 @@ class LocalApiServer:
         start_automation: Callable[[dict[str, object]], dict[str, object]] | None = None,
         get_extension_config: Callable[[], dict[str, object]] | None = None,
         extension_command_broker=None,
+        download_batch_csv: Callable[[int], tuple[str, bytes]] | None = None,
         auth_token: str = "",
         max_body_bytes: int = 25_000_000,
     ) -> None:
@@ -33,6 +36,7 @@ class LocalApiServer:
         self.start_automation = start_automation
         self.get_extension_config = get_extension_config
         self.extension_command_broker = extension_command_broker
+        self.download_batch_csv = download_batch_csv
         self.auth_token = str(auth_token or "")
         self.max_body_bytes = max_body_bytes
         self._server: ThreadingHTTPServer | None = None
@@ -53,6 +57,31 @@ class LocalApiServer:
                 self._send_json(204, {})
 
             def do_GET(self) -> None:
+                request_path = urlsplit(self.path).path
+                batch_download_match = re.fullmatch(
+                    r"/api/export/batches/([1-9][0-9]*)\.csv",
+                    request_path,
+                )
+                if batch_download_match:
+                    if not self._is_authorized():
+                        self._send_json(401, {"ok": False, "error": "Unauthorized"})
+                        return
+                    if parent.download_batch_csv is None:
+                        self._send_json(503, {"ok": False, "error": "Batch export is unavailable"})
+                        return
+                    try:
+                        filename, content = parent.download_batch_csv(
+                            int(batch_download_match.group(1))
+                        )
+                    except ValueError as exc:
+                        self._send_json(404, {"ok": False, "error": str(exc)})
+                        return
+                    except Exception as exc:
+                        parent._log("exception", "Local API batch export failed: %s", exc)
+                        self._send_json(400, {"ok": False, "error": str(exc)})
+                        return
+                    self._send_csv(filename, content)
+                    return
                 if self.path == "/":
                     self._send_json(
                         200,
@@ -201,6 +230,25 @@ class LocalApiServer:
                 self.end_headers()
                 if status_code != 204:
                     self.wfile.write(data)
+
+            def _send_csv(self, filename: str, content: bytes) -> None:
+                safe_filename = str(filename).replace("\r", "").replace("\n", "")
+                ascii_stem = re.sub(r"[^A-Za-z0-9._-]+", "_", safe_filename).strip("_.")
+                ascii_fallback = ascii_stem or "batch_export.csv"
+                disposition = (
+                    f'attachment; filename="{ascii_fallback}"; '
+                    f"filename*=UTF-8''{quote(safe_filename)}"
+                )
+                self.send_response(200)
+                self.send_header("Content-Type", "text/csv; charset=utf-8")
+                self.send_header("Content-Disposition", disposition)
+                self.send_header("Content-Length", str(len(content)))
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Boss-Local-Token")
+                self.send_header("Access-Control-Expose-Headers", "Content-Disposition")
+                self.send_header("Access-Control-Allow-Private-Network", "true")
+                self.end_headers()
+                self.wfile.write(content)
 
             def _is_authorized(self) -> bool:
                 if not parent.auth_token:

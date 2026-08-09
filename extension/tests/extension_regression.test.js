@@ -358,7 +358,7 @@ function testAutomationAutoButtonStartsDesktopWorkflow() {
   assert(html.includes('id="apiToken"'));
   assert(popup.includes("automation_requested"));
   assert(popup.includes("AUTO 采集完成，已提交 AI 初筛"));
-  assert.strictEqual(manifest.version, "0.5.0");
+  assert.strictEqual(manifest.version, "0.5.1");
 }
 
 function testChatAutomationIsOptIn() {
@@ -557,7 +557,82 @@ function testCollectionCarriesCanonicalJobProfileId() {
   assert(chatRunner.includes("jobProfileId: payload.result?.job_profile_id"));
   assert(popup.includes("recruitment_task_id: settings.recruitmentTaskId"));
   assert(content.includes("recruitment_task_id: settings.recruitmentTaskId"));
-  assert(popup.includes("window.setTimeout(() => window.close(), 1200)"));
+  assert(!popup.includes("window.setTimeout(() => window.close(), 1200)"));
+}
+
+async function testCompletedCollectionCanDownloadItsExactBatch() {
+  const source = fs.readFileSync(path.join(EXTENSION_DIR, "batch_export.js"), "utf8");
+  const calls = [];
+  const context = {
+    URL: {
+      createObjectURL(blob) {
+        calls.push(["object-url", blob.type]);
+        return "blob:batch-csv";
+      },
+      revokeObjectURL(url) {
+        calls.push(["revoke", url]);
+      },
+    },
+    Blob,
+    globalThis: {},
+  };
+  context.globalThis = context;
+  vm.runInNewContext(source, context, { filename: "batch_export.js" });
+
+  assert(context.BossLocalBatchExport.batchBelongsToConnection(
+    { apiBase: "http://127.0.0.1:17863/", apiToken: "secret-token" },
+    { apiBase: "http://127.0.0.1:17863", apiToken: "secret-token" },
+  ));
+  assert(!context.BossLocalBatchExport.batchBelongsToConnection(
+    { apiBase: "http://127.0.0.1:17863", apiToken: "old-token" },
+    { apiBase: "http://127.0.0.1:17863", apiToken: "new-token" },
+  ));
+  assert(!context.BossLocalBatchExport.batchBelongsToConnection(
+    { apiBase: "http://127.0.0.1:17863", apiToken: "secret-token" },
+    { apiBase: "http://127.0.0.1:19000", apiToken: "secret-token" },
+  ));
+
+  const result = await context.BossLocalBatchExport.downloadBatchCsv({
+    apiBase: "http://127.0.0.1:17863/",
+    apiToken: "secret-token",
+    batchId: 41,
+    fetchImpl: async (url, options) => {
+      calls.push(["fetch", url, options.headers["X-Boss-Local-Token"]]);
+      return {
+        ok: true,
+        headers: { get: () => 'attachment; filename="job_batch_41.csv"' },
+        async blob() {
+          return new Blob(["name\nAlice\n"], { type: "text/csv" });
+        },
+      };
+    },
+    downloadsApi: {
+      async download(options) {
+        calls.push(["download", options.url, options.filename, options.saveAs]);
+        return 73;
+      },
+    },
+    urlApi: context.URL,
+  });
+
+  assert.strictEqual(result.downloadId, 73);
+  assert.deepStrictEqual(calls[0], [
+    "fetch",
+    "http://127.0.0.1:17863/api/export/batches/41.csv",
+    "secret-token",
+  ]);
+  assert.deepStrictEqual(calls[2], ["download", "blob:batch-csv", "job_batch_41.csv", false]);
+  assert.deepStrictEqual(calls[3], ["revoke", "blob:batch-csv"]);
+
+  const popup = fs.readFileSync(path.join(EXTENSION_DIR, "popup.js"), "utf8");
+  const html = fs.readFileSync(path.join(EXTENSION_DIR, "popup.html"), "utf8");
+  assert(html.includes('id="downloadCurrentBatch"'));
+  assert(html.includes('<script src="batch_export.js"></script>'));
+  assert(popup.includes("lastCompletedBatchId"));
+  assert(popup.includes("lastCompletedBatchConnection"));
+  assert(popup.includes("batchBelongsToConnection"));
+  assert(popup.includes("imported.batch_id"));
+  assert(popup.includes("BossLocalBatchExport.downloadBatchCsv"));
 }
 
 function testFilenameTemplatesMatchDesktopFixtures() {
@@ -660,6 +735,7 @@ async function main() {
   testPairingCodeParsesAndRejectsInvalidInput();
   testPopupSupportsPairingAndAuthenticatedConnectionCheck();
   testCollectionCarriesCanonicalJobProfileId();
+  await testCompletedCollectionCanDownloadItsExactBatch();
   testFilenameTemplatesMatchDesktopFixtures();
   testDesktopRemoteControlKeepsPopupControlsAndUsesTaskScopedCommands();
   await testDesktopRemoteAutoExecutesAgainstMatchedTaskTab();

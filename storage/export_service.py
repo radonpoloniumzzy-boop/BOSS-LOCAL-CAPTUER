@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import csv
+import io
 import json
 from pathlib import Path
+from typing import TextIO
 
 from core.filename_templates import DEFAULT_EXPORT_TEMPLATE, render_filename, unique_path
 from core.models import ExportResult
@@ -100,6 +102,25 @@ class ExportService:
             task_id=task_id,
         )
 
+    def build_batch_csv_download(
+        self,
+        batch_id: int,
+        *,
+        columns: list[str],
+        filename_template: str = "",
+    ) -> tuple[str, bytes]:
+        batch = self.repository.get_capture_batch_quality_metrics(batch_id)
+        rows = self.repository.get_capture_batch_export_rows(batch_id)
+        filename = self._build_filename(
+            str(batch.get("job_title") or self._infer_job_title(rows)),
+            batch_id,
+            "csv",
+            filename_template=filename_template,
+        )
+        output = io.StringIO(newline="")
+        self._write_csv(output, rows, columns)
+        return filename, output.getvalue().encode("utf-8-sig")
+
     def export_recruitment_task_report(self, task_id: int, export_dir: Path) -> ExportResult:
         task = self.repository.get_recruitment_task(task_id)
         if task is None:
@@ -196,10 +217,18 @@ class ExportService:
 
     def _export_csv(self, target_path: Path, rows: list[dict[str, object]], columns: list[str]) -> None:
         with target_path.open("w", encoding="utf-8-sig", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=columns, extrasaction="ignore")
-            writer.writeheader()
-            for row in rows:
-                writer.writerow({column: self._stringify_value(row.get(column)) for column in columns})
+            self._write_csv(handle, rows, columns)
+
+    def _write_csv(
+        self,
+        handle: TextIO,
+        rows: list[dict[str, object]],
+        columns: list[str],
+    ) -> None:
+        writer = csv.DictWriter(handle, fieldnames=columns, extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({column: self._stringify_value(row.get(column)) for column in columns})
 
     def _export_jsonl(self, target_path: Path, rows: list[dict[str, object]], batch_id: int | None) -> None:
         with target_path.open("w", encoding="utf-8") as handle:

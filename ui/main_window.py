@@ -552,6 +552,7 @@ class MainWindow(QMainWindow):
             start_automation=self._start_automation_from_extension,
             get_extension_config=self._extension_config_payload,
             extension_command_broker=self.extension_command_broker,
+            download_batch_csv=self._build_batch_csv_download,
             auth_token=self.config.local_api_token,
         )
         try:
@@ -562,6 +563,16 @@ class MainWindow(QMainWindow):
             self.dashboard_page.set_local_api_status("不可用")
             self.logger.exception("Failed to start local API server: %s", exc)
             QMessageBox.critical(self, "本地接口异常", f"扩展接收接口启动失败。\n{exc}")
+
+    def _build_batch_csv_download(self, batch_id: int) -> tuple[str, bytes]:
+        try:
+            return self.export_service.build_batch_csv_download(
+                batch_id,
+                columns=list(self.config.csv_columns),
+                filename_template=self.config.export_filename_template,
+            )
+        finally:
+            self.database.close_thread_connection()
 
     def _extension_config_payload(self) -> dict[str, object]:
         with self._automation_config_lock:
