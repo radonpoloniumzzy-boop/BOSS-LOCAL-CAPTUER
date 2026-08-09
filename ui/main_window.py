@@ -82,13 +82,13 @@ class MainWindow(QMainWindow):
     candidate_query_requested = Signal(object)
     ai_connection_test_requested = Signal(object)
 
-    def __init__(self) -> None:
+    def __init__(self, *, data_dir: Path | None = None) -> None:
         super().__init__()
         self.setWindowTitle("招聘候选人采集与 AI 初筛工具")
         self.resize(920, 720)
         self.setMinimumSize(720, 560)
 
-        self.config_service = ConfigService()
+        self.config_service = ConfigService(data_dir=data_dir)
         self.logging_service = LoggingService(self.config_service.logs_dir, level="INFO")
         self.config_service.logger = self.logging_service.get_logger("core")
         self.config = self.config_service.load()

@@ -94,10 +94,15 @@ REVIEW_CSV_COLUMNS_V2 = [
 
 
 class ConfigService:
-    def __init__(self, app_root: Path | None = None, logger=None) -> None:
+    def __init__(
+        self,
+        app_root: Path | None = None,
+        logger=None,
+        data_dir: Path | None = None,
+    ) -> None:
         self.app_root = app_root or get_app_root()
         self.logger = logger
-        self.data_dir = ensure_directory(self.app_root / "data")
+        self.data_dir = ensure_directory(data_dir or self.app_root / "data")
         self.logs_dir = ensure_directory(self.app_root / "logs")
         self.dist_dir = ensure_directory(self.app_root / "dist")
         self.config_path = self.data_dir / "config.json"

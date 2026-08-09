@@ -3,3 +3,6 @@ playwright>=1.51,<2
 PyInstaller>=6.0,<7
 pypdf>=5.0,<7
 python-docx>=1.1,<2
+fastapi>=0.116,<1
+uvicorn>=0.35,<1
+httpx>=0.28,<1

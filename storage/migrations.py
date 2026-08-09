@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 
 
+LATEST_SCHEMA_VERSION = 16
+
+
 def _json_or_default(value: object, default: object) -> object:
     try:
         decoded = json.loads(str(value or ""))
@@ -871,5 +874,5 @@ def apply_migrations(connection) -> None:
         "ON next_actions(task_id, status)"
     )
     connection.execute("DELETE FROM schema_version")
-    connection.execute("INSERT INTO schema_version(version) VALUES (16)")
+    connection.execute("INSERT INTO schema_version(version) VALUES (?)", (LATEST_SCHEMA_VERSION,))
     connection.commit()
