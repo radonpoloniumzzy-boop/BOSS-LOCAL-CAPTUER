@@ -17,10 +17,17 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from core.app_lock import ApplicationLockError, DatabaseApplicationLock
-from core.bootstrap import BootstrapService, BootstrapSettings, BootstrapStore, DataDirectoryError
+from core.bootstrap import (
+    BootstrapConfigurationError,
+    BootstrapService,
+    BootstrapSettings,
+    BootstrapStore,
+    DataDirectoryError,
+)
 from storage.db import DatabaseManager
 from web.backend.app import create_web_app
 from web.backend.launcher import PortUnavailableError, ensure_port_available, uvicorn_options
+from web_app import main as web_main
 
 
 class BootstrapServiceTest(unittest.TestCase):
@@ -42,6 +49,52 @@ class BootstrapServiceTest(unittest.TestCase):
             d_drive=d_drive or self.root / "missing-d-drive",
             documents_dir=self.root / "Documents",
         )
+
+    def test_missing_bootstrap_is_the_only_unconfigured_state(self) -> None:
+        self.assertIsNone(self.store.load())
+
+    def test_corrupt_bootstrap_is_reported_and_never_overwritten(self) -> None:
+        self.bootstrap_path.parent.mkdir(parents=True)
+        original = "{broken json"
+        self.bootstrap_path.write_text(original, encoding="utf-8")
+
+        with self.assertRaisesRegex(BootstrapConfigurationError, "bootstrap.json"):
+            self.store.load()
+
+        self.assertEqual(self.bootstrap_path.read_text(encoding="utf-8"), original)
+
+    def test_unreadable_bootstrap_is_reported(self) -> None:
+        self.bootstrap_path.parent.mkdir(parents=True)
+        self.bootstrap_path.write_text("{}", encoding="utf-8")
+
+        with patch.object(Path, "read_text", side_effect=PermissionError("denied")):
+            with self.assertRaisesRegex(BootstrapConfigurationError, "无法读取"):
+                self.store.load()
+
+    def test_bootstrap_requires_all_safety_fields(self) -> None:
+        valid = {
+            "data_dir": str((self.root / "data").resolve()),
+            "web_port": 17864,
+            "setup_completed": True,
+        }
+        invalid_payloads = [
+            {key: value for key, value in valid.items() if key != "data_dir"},
+            {key: value for key, value in valid.items() if key != "web_port"},
+            {key: value for key, value in valid.items() if key != "setup_completed"},
+            {**valid, "setup_completed": False},
+            {**valid, "web_port": 1023},
+            {**valid, "web_port": 65536},
+            {**valid, "web_port": "17864"},
+            {**valid, "data_dir": "relative/data"},
+            {**valid, "data_dir": ""},
+        ]
+        self.bootstrap_path.parent.mkdir(parents=True)
+
+        for payload in invalid_payloads:
+            with self.subTest(payload=payload):
+                self.bootstrap_path.write_text(json.dumps(payload), encoding="utf-8")
+                with self.assertRaises(BootstrapConfigurationError):
+                    self.store.load()
 
     def test_status_prefers_existing_project_database_without_reading_secrets(self) -> None:
         data_dir = self.project / "data"
@@ -133,6 +186,33 @@ class BootstrapServiceTest(unittest.TestCase):
 
 
 class DatabaseApplicationLockTest(unittest.TestCase):
+    def test_windows_diagnostic_write_failure_releases_mutex_and_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            db_path = root / "data" / "boss_local_tool.db"
+            lock_root = root / "locks"
+            first = DatabaseApplicationLock(db_path, lock_root=lock_root)
+
+            def fake_acquire(lock):
+                from core.app_lock import _HELD_IDENTITIES, _HELD_IDENTITIES_LOCK
+
+                lock._mutex_handle = 41
+                with _HELD_IDENTITIES_LOCK:
+                    _HELD_IDENTITIES.add(lock.identity)
+
+            with (
+                patch("core.app_lock.os.name", "nt"),
+                patch.object(DatabaseApplicationLock, "_acquire_windows_mutex", fake_acquire),
+                patch.object(DatabaseApplicationLock, "_close_windows_handle") as close_handle,
+                patch.object(Path, "write_text", side_effect=OSError("disk denied")),
+            ):
+                with self.assertRaisesRegex(ApplicationLockError, "诊断文件"):
+                    first.acquire()
+                close_handle.assert_called_once_with(41)
+
+            recovered = DatabaseApplicationLock(db_path, lock_root=lock_root)
+            recovered.acquire()
+            recovered.release()
     def test_lock_is_cross_process_and_recovers_after_process_exit(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -181,7 +261,7 @@ class DatabaseBackupTest(unittest.TestCase):
             real_connect = sqlite3.connect
 
             def fail_backup(path, *args, **kwargs):
-                if str(path).endswith(".bak"):
+                if ".bak.tmp-" in str(path):
                     raise OSError("backup disk unavailable")
                 return real_connect(path, *args, **kwargs)
 
@@ -193,6 +273,53 @@ class DatabaseBackupTest(unittest.TestCase):
             version = check.execute("SELECT version FROM schema_version").fetchone()[0]
             check.close()
             self.assertEqual(version, 14)
+
+    def test_copy_failure_after_target_open_leaves_no_backup_or_temporary_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            db_path = root / "boss_local_tool.db"
+            connection = sqlite3.connect(db_path)
+            connection.execute("CREATE TABLE schema_version (version INTEGER NOT NULL PRIMARY KEY)")
+            connection.execute("INSERT INTO schema_version(version) VALUES (14)")
+            connection.execute("CREATE TABLE sentinel(value TEXT NOT NULL)")
+            connection.execute("INSERT INTO sentinel(value) VALUES ('preserved')")
+            connection.commit()
+            connection.close()
+
+            real_connect = sqlite3.connect
+
+            class FailingSource:
+                def __init__(self, wrapped):
+                    self.wrapped = wrapped
+
+                def __getattr__(self, name):
+                    return getattr(self.wrapped, name)
+
+                def backup(self, target):
+                    target.execute("CREATE TABLE partial(value TEXT)")
+                    target.commit()
+                    raise OSError("copy interrupted")
+
+            calls = 0
+
+            def connect(path, *args, **kwargs):
+                nonlocal calls
+                result = real_connect(path, *args, **kwargs)
+                calls += 1
+                return FailingSource(result) if calls == 1 else result
+
+            with patch("storage.db.sqlite3.connect", side_effect=connect):
+                with self.assertRaisesRegex(RuntimeError, "copy interrupted"):
+                    DatabaseManager(db_path).initialize()
+
+            self.assertEqual(list(root.glob("*.bak")), [])
+            self.assertEqual(list(root.glob("*.tmp-*")), [])
+            check = sqlite3.connect(db_path)
+            try:
+                self.assertEqual(check.execute("SELECT version FROM schema_version").fetchone()[0], 14)
+                self.assertEqual(check.execute("SELECT value FROM sentinel").fetchone()[0], "preserved")
+            finally:
+                check.close()
 
     def test_schema_inspection_failure_always_closes_the_database(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -293,13 +420,120 @@ class WebApiTest(unittest.TestCase):
         broken_data.mkdir()
         (broken_data / "boss_local_tool.db").write_text("not sqlite", encoding="utf-8")
         self.store.save(BootstrapSettings(data_dir=str(broken_data)))
+        database_before = (broken_data / "boss_local_tool.db").read_bytes()
+        bootstrap_before = self.store.path.read_bytes()
 
         app = create_web_app(self.service, lock_root=self.root / "broken-locks")
         with TestClient(app, base_url="http://127.0.0.1:17864") as client:
             self.assertEqual(client.get("/api/health").status_code, 200)
             response = client.get("/api/app/status")
             self.assertEqual(response.status_code, 503)
-            self.assertEqual(response.json()["error"]["code"], "database_not_ready")
+            self.assertEqual(response.json()["error"]["code"], "database_corrupt")
+        self.assertEqual((broken_data / "boss_local_tool.db").read_bytes(), database_before)
+        self.assertEqual(self.store.path.read_bytes(), bootstrap_before)
+
+    def test_configured_missing_database_never_creates_an_empty_file(self) -> None:
+        data_dir = self.root / "missing-database"
+        data_dir.mkdir()
+        self.store.save(BootstrapSettings(data_dir=str(data_dir.resolve())))
+        bootstrap_before = self.store.path.read_bytes()
+
+        app = create_web_app(self.service, lock_root=self.root / "missing-locks")
+        try:
+            with TestClient(app, base_url="http://127.0.0.1:17864") as client:
+                self.assertEqual(client.get("/api/health").status_code, 200)
+                response = client.get("/api/app/status")
+                self.assertEqual(response.status_code, 503)
+                self.assertEqual(
+                    response.json()["error"]["code"], "configured_database_missing"
+                )
+                self.assertIn("从备份恢复", response.json()["error"]["message"])
+        finally:
+            app.state.runtime.close()
+
+        self.assertFalse((data_dir / "boss_local_tool.db").exists())
+        self.assertEqual(self.store.path.read_bytes(), bootstrap_before)
+
+    def test_newer_database_schema_is_not_modified(self) -> None:
+        data_dir = self.root / "newer-schema"
+        db_path = data_dir / "boss_local_tool.db"
+        DatabaseManager(db_path).initialize()
+        connection = sqlite3.connect(db_path)
+        connection.execute("UPDATE schema_version SET version = 999")
+        connection.commit()
+        connection.close()
+        self.store.save(BootstrapSettings(data_dir=str(data_dir.resolve())))
+        database_before = db_path.read_bytes()
+        bootstrap_before = self.store.path.read_bytes()
+
+        app = create_web_app(self.service, lock_root=self.root / "newer-locks")
+        try:
+            with TestClient(app, base_url="http://127.0.0.1:17864") as client:
+                response = client.get("/api/app/status")
+                self.assertEqual(response.status_code, 503)
+                self.assertEqual(response.json()["error"]["code"], "unsupported_schema")
+        finally:
+            app.state.runtime.close()
+
+        self.assertEqual(db_path.read_bytes(), database_before)
+        self.assertEqual(self.store.path.read_bytes(), bootstrap_before)
+
+    def test_upgrade_failure_has_a_safe_stable_error(self) -> None:
+        data_dir = self.root / "upgrade-failure"
+        db_path = data_dir / "boss_local_tool.db"
+        data_dir.mkdir()
+        connection = sqlite3.connect(db_path)
+        connection.execute("CREATE TABLE schema_version(version INTEGER NOT NULL PRIMARY KEY)")
+        connection.execute("INSERT INTO schema_version(version) VALUES (14)")
+        connection.commit()
+        connection.close()
+        self.store.save(BootstrapSettings(data_dir=str(data_dir.resolve())))
+        bootstrap_before = self.store.path.read_bytes()
+
+        with patch.object(
+            DatabaseManager,
+            "_create_upgrade_backup",
+            side_effect=RuntimeError("secret raw failure"),
+        ):
+            app = create_web_app(self.service, lock_root=self.root / "upgrade-locks")
+        try:
+            with TestClient(app, base_url="http://127.0.0.1:17864") as client:
+                response = client.get("/api/app/status")
+                self.assertEqual(response.status_code, 503)
+                self.assertEqual(response.json()["error"]["code"], "database_upgrade_failed")
+                self.assertNotIn("secret raw failure", response.text)
+        finally:
+            app.state.runtime.close()
+        check = sqlite3.connect(db_path)
+        try:
+            self.assertEqual(check.execute("SELECT version FROM schema_version").fetchone()[0], 14)
+        finally:
+            check.close()
+        self.assertEqual(self.store.path.read_bytes(), bootstrap_before)
+        self.assertIn(
+            "secret raw failure",
+            (self.store.path.parent / "logs" / "web-runtime.log").read_text(encoding="utf-8"),
+        )
+
+    def test_configured_database_in_use_keeps_health_available(self) -> None:
+        data_dir = self.root / "locked-data"
+        db_path = data_dir / "boss_local_tool.db"
+        DatabaseManager(db_path).initialize()
+        self.store.save(BootstrapSettings(data_dir=str(data_dir.resolve())))
+        held = DatabaseApplicationLock(db_path, lock_root=self.root / "configured-locks")
+        held.acquire()
+        try:
+            app = create_web_app(self.service, lock_root=self.root / "configured-locks")
+            try:
+                with TestClient(app, base_url="http://127.0.0.1:17864") as client:
+                    self.assertEqual(client.get("/api/health").status_code, 200)
+                    response = client.get("/api/app/status")
+                    self.assertEqual(response.status_code, 503)
+                    self.assertEqual(response.json()["error"]["code"], "database_in_use")
+            finally:
+                app.state.runtime.close()
+        finally:
+            held.release()
 
     def test_concurrent_setup_is_serialized_and_keeps_the_winning_lock(self) -> None:
         class SlowBootstrapService(BootstrapService):
@@ -351,6 +585,16 @@ class WebApiTest(unittest.TestCase):
 
 
 class WebLauncherTest(unittest.TestCase):
+    def test_entrypoint_reports_bootstrap_recovery_message(self) -> None:
+        error = BootstrapConfigurationError("配置文件：C:\\broken\\bootstrap.json")
+        with (
+            patch("web_app.run_web_app", side_effect=error),
+            patch("builtins.print") as output,
+        ):
+            self.assertEqual(web_main(), 1)
+
+        self.assertIn("bootstrap.json", output.call_args.args[0])
+
     def test_uvicorn_is_loopback_only_and_port_conflict_is_clear(self) -> None:
         options = uvicorn_options(17864)
         self.assertEqual(options["host"], "127.0.0.1")

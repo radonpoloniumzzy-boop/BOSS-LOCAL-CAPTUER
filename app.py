@@ -25,7 +25,7 @@ except ImportError as exc:
 from ui.main_window import MainWindow
 from ui.theme import apply_application_theme
 from core.app_lock import ApplicationLockError, DatabaseApplicationLock
-from core.bootstrap import BootstrapStore
+from core.bootstrap import BootstrapConfigurationError, BootstrapStore
 from core.utils import get_app_root
 
 
@@ -40,7 +40,11 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("Boss 本地候选人采集工具")
     apply_application_theme(app)
-    data_dir = resolve_desktop_data_dir(get_app_root())
+    try:
+        data_dir = resolve_desktop_data_dir(get_app_root())
+    except BootstrapConfigurationError as exc:
+        QMessageBox.critical(None, "启动配置需要恢复", str(exc))
+        return 1
     database_path = data_dir / "boss_local_tool.db"
     lock = DatabaseApplicationLock(database_path)
     try:

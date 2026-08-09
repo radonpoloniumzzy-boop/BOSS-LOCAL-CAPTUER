@@ -141,6 +141,32 @@ describe("local workbench shell", () => {
     expect(screen.queryByText("本地服务暂时不可用")).not.toBeInTheDocument();
   });
 
+  it("shows dedicated recovery guidance when a configured database is missing", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockImplementationOnce(() => response({ ...setupRequired, setup_required: false }))
+        .mockImplementationOnce(() =>
+          response(
+            {
+              error: {
+                code: "configured_database_missing",
+                message: "已配置的人才库文件不存在，请检查磁盘、数据目录，或从备份恢复。",
+              },
+            },
+            false,
+            503,
+          ),
+        ),
+    );
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "找不到已配置的人才库" })).toBeInTheDocument();
+    expect(screen.getByText(/从备份恢复/)).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "选择数据目录" })).not.toBeInTheDocument();
+  });
+
   it("labels an initialized database with no batches as empty", async () => {
     vi.stubGlobal(
       "fetch",

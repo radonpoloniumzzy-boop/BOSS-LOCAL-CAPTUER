@@ -34,10 +34,25 @@ class DatabaseApplicationLock:
         self.lock_path.parent.mkdir(parents=True, exist_ok=True)
         if os.name == "nt":
             self._acquire_windows_mutex()
-            self.lock_path.write_text(
-                json.dumps({"pid": os.getpid(), "database": str(self.database_path)}),
-                encoding="utf-8",
-            )
+            try:
+                self.lock_path.write_text(
+                    json.dumps({"pid": os.getpid(), "database": str(self.database_path)}),
+                    encoding="utf-8",
+                )
+            except Exception as exc:
+                handle = self._mutex_handle
+                self._mutex_handle = None
+                if handle is not None:
+                    self._close_windows_handle(handle)
+                with _HELD_IDENTITIES_LOCK:
+                    _HELD_IDENTITIES.discard(self.identity)
+                try:
+                    self.lock_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                raise ApplicationLockError(
+                    f"无法写入数据库锁诊断文件：{self.lock_path}"
+                ) from exc
             return
         handle = self.lock_path.open("a+b")
         if self.lock_path.stat().st_size == 0:

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -11,11 +10,10 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from core.app_lock import ApplicationLockError, DatabaseApplicationLock
-from core.bootstrap import BootstrapService, DATABASE_NAME, DataDirectoryError
+from core.app_lock import ApplicationLockError
+from core.bootstrap import BootstrapService, DataDirectoryError
 from core.version import APP_VERSION
-from storage.db import DatabaseManager
-from storage.repository import CandidateRepository
+from web.backend.runtime import WebRuntime
 
 
 SERVICE_NAME = "recruiting-talent-workbench"
@@ -30,81 +28,6 @@ class ApiError(RuntimeError):
 
 class SetupRequest(BaseModel):
     data_dir: str
-
-
-class WebRuntime:
-    def __init__(self, bootstrap: BootstrapService, lock_root: Path | None = None) -> None:
-        self.bootstrap = bootstrap
-        self.lock_root = lock_root
-        self.database: DatabaseManager | None = None
-        self.repository: CandidateRepository | None = None
-        self.lock: DatabaseApplicationLock | None = None
-        self.database_error = ""
-        self._state_lock = threading.RLock()
-        configured = bootstrap.store.load()
-        if configured is not None:
-            try:
-                self.connect(Path(configured.data_dir), initialize=True)
-            except ApplicationLockError:
-                raise
-            except Exception:
-                self.database_error = "数据库初始化失败。"
-        elif (bootstrap.project_data_dir / DATABASE_NAME).is_file():
-            self.reserve(bootstrap.project_data_dir)
-
-    def reserve(self, data_dir: Path) -> None:
-        with self._state_lock:
-            lock = DatabaseApplicationLock(data_dir / DATABASE_NAME, lock_root=self.lock_root)
-            lock.acquire()
-            self.lock = lock
-
-    def connect(self, data_dir: Path, *, initialize: bool) -> None:
-        with self._state_lock:
-            database_path = data_dir / DATABASE_NAME
-            lock = DatabaseApplicationLock(database_path, lock_root=self.lock_root)
-            lock.acquire()
-            database = DatabaseManager(database_path)
-            try:
-                if initialize:
-                    database.initialize()
-                self.lock = lock
-                self.database = database
-                self.repository = CandidateRepository(database)
-                self.database_error = ""
-            except Exception:
-                database.close_all_connections()
-                lock.release()
-                raise
-
-    def setup(self, data_dir: str) -> dict[str, object]:
-        with self._state_lock:
-            if self.bootstrap.store.load() is not None:
-                raise DataDirectoryError("首次设置已经完成，运行中不能更换数据目录。")
-            selected = self.bootstrap.validate_data_dir(data_dir)
-            selected_database = (selected / DATABASE_NAME).resolve()
-            if self.lock is not None and self.lock.database_path != selected_database:
-                self.close()
-            if self.lock is None:
-                self.reserve(selected)
-            try:
-                result = self.bootstrap.setup(selected)
-                self.database = DatabaseManager(selected / DATABASE_NAME)
-                self.repository = CandidateRepository(self.database)
-                self.database_error = ""
-                return result
-            except Exception:
-                self.close()
-                raise
-
-    def close(self) -> None:
-        with self._state_lock:
-            if self.database is not None:
-                self.database.close_all_connections()
-            if self.lock is not None:
-                self.lock.release()
-            self.database = None
-            self.repository = None
-            self.lock = None
 
 
 def error_response(status_code: int, code: str, message: str) -> JSONResponse:
@@ -186,6 +109,12 @@ def create_web_app(
     @app.get("/api/app/status")
     def app_status() -> dict[str, object]:
         if runtime.repository is None:
+            if runtime.database_fault is not None:
+                raise ApiError(
+                    503,
+                    runtime.database_fault.code,
+                    runtime.database_fault.message,
+                )
             raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。")
         stats = runtime.repository.get_dashboard_stats()
         configured = bootstrap.store.load()

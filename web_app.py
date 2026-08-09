@@ -3,13 +3,14 @@ from __future__ import annotations
 from pathlib import Path
 
 from core.app_lock import ApplicationLockError
+from core.bootstrap import BootstrapConfigurationError
 from web.backend.launcher import PortUnavailableError, run_web_app
 
 
 def main() -> int:
     try:
         return run_web_app(Path(__file__).resolve().parent)
-    except (ApplicationLockError, PortUnavailableError) as exc:
+    except (ApplicationLockError, BootstrapConfigurationError, PortUnavailableError) as exc:
         print(str(exc))
         return 1
 

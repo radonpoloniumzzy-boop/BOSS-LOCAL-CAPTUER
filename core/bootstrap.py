@@ -19,6 +19,10 @@ class DataDirectoryError(ValueError):
     pass
 
 
+class BootstrapConfigurationError(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class BootstrapSettings:
     data_dir: str
@@ -33,20 +37,48 @@ class BootstrapStore:
         self.path = path or local_app_data / BOOTSTRAP_DIR_NAME / "bootstrap.json"
 
     def load(self) -> BootstrapSettings | None:
-        if not self.path.exists():
+        try:
+            exists = self.path.exists()
+        except OSError as exc:
+            raise BootstrapConfigurationError(self._recovery_message("无法访问配置文件")) from exc
+        if not exists:
             return None
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
-            if not raw.get("setup_completed") or not raw.get("data_dir"):
-                return None
-            return BootstrapSettings(
-                data_dir=str(raw["data_dir"]),
-                web_port=int(raw.get("web_port", 17864)),
-                setup_completed=True,
-                app_version=str(raw.get("app_version") or APP_VERSION),
+        except OSError as exc:
+            raise BootstrapConfigurationError(self._recovery_message("无法读取配置文件")) from exc
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            raise BootstrapConfigurationError(self._recovery_message("配置文件不是有效 JSON")) from exc
+        if not isinstance(raw, dict):
+            raise BootstrapConfigurationError(self._recovery_message("配置内容格式不正确"))
+        missing = {"data_dir", "web_port", "setup_completed"} - raw.keys()
+        if missing:
+            raise BootstrapConfigurationError(
+                self._recovery_message(f"配置缺少字段：{', '.join(sorted(missing))}")
             )
-        except (OSError, ValueError, TypeError, json.JSONDecodeError):
-            return None
+        data_dir = raw["data_dir"]
+        if not isinstance(data_dir, str) or not data_dir.strip() or not Path(data_dir).is_absolute():
+            raise BootstrapConfigurationError(self._recovery_message("data_dir 必须是非空绝对路径"))
+        web_port = raw["web_port"]
+        if isinstance(web_port, bool) or not isinstance(web_port, int) or not 1024 <= web_port <= 65535:
+            raise BootstrapConfigurationError(
+                self._recovery_message("web_port 必须是 1024–65535 之间的整数")
+            )
+        if raw["setup_completed"] is not True:
+            raise BootstrapConfigurationError(self._recovery_message("setup_completed 必须明确为 true"))
+        return BootstrapSettings(
+            data_dir=data_dir.strip(),
+            web_port=web_port,
+            setup_completed=True,
+            app_version=str(raw.get("app_version") or APP_VERSION),
+        )
+
+    def _recovery_message(self, reason: str) -> str:
+        return (
+            f"本地工作台启动配置损坏或不可用：{reason}。\n"
+            f"配置文件：{self.path}\n"
+            "请检查该文件以及其中的数据目录是否仍指向原有人才库；修复或从备份恢复后再启动。"
+        )
 
     def save(self, settings: BootstrapSettings) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
