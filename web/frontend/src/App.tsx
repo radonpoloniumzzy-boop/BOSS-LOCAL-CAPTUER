@@ -14,6 +14,8 @@ import {
   Users,
 } from "lucide-react";
 
+import { CountUp } from "./components/CountUp";
+
 type SetupStatus = {
   setup_required: boolean;
   suggested_data_dir: string;
@@ -179,40 +181,49 @@ function Workbench({ status }: { status: AppStatus }) {
 
   return (
     <div className="app-shell">
-      <aside className="sidebar">
-        <div className="brand">
-          <div className="product-mark"><Users size={20} aria-hidden="true" /></div>
-          <div><strong>人才工作台</strong><span>本地安全模式</span></div>
-        </div>
-        <nav aria-label="主导航">
-          <button className={view === "home" ? "nav-item active" : "nav-item"} onClick={() => setView("home")}>
-            <Home size={18} aria-hidden="true" /><span>首页</span>
-          </button>
-          {futureNavigation.map(({ label, icon: Icon }) => (
-            <button className="nav-item" disabled key={label} aria-label={`${label}，待开发`}>
-              <Icon size={18} aria-hidden="true" /><span>{label}</span><small>待开发</small>
+      <header className="shell-chrome">
+        <div className="shell-header">
+          <div className="brand">
+            <div className="product-mark"><Users size={19} aria-hidden="true" /></div>
+            <div><strong>人才工作台</strong><span>本地招聘工作空间</span></div>
+          </div>
+          <div className="shell-meta">
+            <div className="service-health"><span className="status-dot" />本地服务正常</div>
+            <span className="version">{status.version}</span>
+            <button
+              className={view === "settings" ? "icon-button active" : "icon-button"}
+              onClick={() => setView("settings")}
+              aria-label="设置"
+              title="设置"
+            >
+              <Settings size={17} aria-hidden="true" />
             </button>
-          ))}
-          <button className={view === "settings" ? "nav-item active" : "nav-item"} onClick={() => setView("settings")}>
-            <Settings size={18} aria-hidden="true" /><span>设置</span>
-          </button>
+          </div>
+        </div>
+        <nav className="workflow-nav" aria-label="主导航">
+          <div className="workflow-scroll">
+            <button className={view === "home" ? "nav-item active" : "nav-item"} onClick={() => setView("home")}>
+              <Home size={16} aria-hidden="true" /><span>概览</span>
+            </button>
+            {futureNavigation.map(({ label, icon: Icon }) => (
+              <button className="nav-item" disabled key={label} aria-label={`${label}，待开发`}>
+                <Icon size={16} aria-hidden="true" /><span>{label}</span><small>待开发</small>
+              </button>
+            ))}
+          </div>
         </nav>
-      </aside>
+      </header>
       <main className="workspace">
-        <header className="topbar">
-          <div className="service-health"><span className="status-dot" />本地服务正常</div>
-          <span className="version">版本 {status.version}</span>
-        </header>
         {view === "home" ? (
           <div className="page-content">
             <div className="page-heading">
-              <div><p className="eyebrow">阶段 1</p><h1>招聘人才 Mapping 工作台</h1></div>
+              <div><p className="eyebrow">工作空间概览</p><h1>招聘人才 Mapping 工作台</h1></div>
               <div className="database-badge"><Database size={17} aria-hidden="true" />数据库已就绪</div>
             </div>
             <section className="metrics" aria-label="工作台统计">
-              <article><span>候选人总数</span><strong>{status.candidate_count.toLocaleString("zh-CN")}</strong><small>当前人才库</small></article>
-              <article><span>采集批次</span><strong>{status.batch_count}</strong><small>{status.batch_count} 个批次</small></article>
-              <article><span>最新批次</span><strong>{latestLabel}</strong><small>{statusLabel}</small></article>
+              <article><span>候选人总数</span><strong><CountUp to={status.candidate_count} /></strong><small>当前人才库</small></article>
+              <article><span>采集批次</span><strong><CountUp to={status.batch_count} /></strong><small>{status.batch_count} 个批次</small></article>
+              <article><span>最新批次</span><strong>{status.latest_batch_id ? <CountUp to={status.latest_batch_id} prefix="#" /> : latestLabel}</strong><small>{statusLabel}</small></article>
             </section>
             <section className="status-band">
               <div><CheckCircle2 size={21} aria-hidden="true" /><div><strong>本地网页基础已启用</strong><p>当前阶段提供安全启动、数据读取与运行状态；招聘业务页面将在后续阶段接入。</p></div></div>

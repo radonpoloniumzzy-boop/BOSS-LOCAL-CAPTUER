@@ -106,6 +106,9 @@ describe("local workbench shell", () => {
     render(<App />);
 
     expect(await screen.findByText("数据库已就绪")).toBeInTheDocument();
+    expect(screen.getByRole("navigation", { name: "主导航" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "概览" })).toHaveClass("active");
+    expect(screen.getByRole("button", { name: "设置" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /候选人.*待开发/ })).toBeDisabled();
     expect(screen.getByRole("button", { name: /Mapping 与报告.*待开发/ })).toBeDisabled();
   });
