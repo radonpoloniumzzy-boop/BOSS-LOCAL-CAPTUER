@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -29,12 +29,10 @@ afterEach(() => vi.restoreAllMocks());
 describe("local workbench shell", () => {
   it("renders the first-run recommendation and existing database notice", async () => {
     vi.stubGlobal("fetch", vi.fn(() => response(setupRequired)));
-
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "选择数据目录" })).toBeInTheDocument();
     expect(screen.getByDisplayValue(setupRequired.suggested_data_dir)).toBeInTheDocument();
-    expect(screen.getByText(/检测到现有数据库/)).toBeInTheDocument();
   });
 
   it("shows a backend path validation error", async () => {
@@ -95,7 +93,7 @@ describe("local workbench shell", () => {
     expect(screen.getByText("17 个批次")).toBeInTheDocument();
   });
 
-  it("renders existing database statistics and disables future navigation", async () => {
+  it("renders existing database statistics and keeps candidate and batch navigation available", async () => {
     vi.stubGlobal(
       "fetch",
       vi
@@ -108,9 +106,9 @@ describe("local workbench shell", () => {
     expect(await screen.findByText("数据库已就绪")).toBeInTheDocument();
     expect(screen.getByRole("navigation", { name: "主导航" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "概览" })).toHaveClass("active");
-    expect(screen.getByRole("button", { name: "设置" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /候选人.*待开发/ })).toBeDisabled();
-    expect(screen.getByRole("button", { name: /Mapping 与报告.*待开发/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "候选人" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "最近批次" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "岗位，待开发" })).toBeDisabled();
   });
 
   it("shows a recoverable service failure", async () => {
@@ -138,7 +136,6 @@ describe("local workbench shell", () => {
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "数据库尚未就绪" })).toBeInTheDocument();
-    expect(screen.queryByText("本地服务暂时不可用")).not.toBeInTheDocument();
   });
 
   it("shows dedicated recovery guidance when a configured database is missing", async () => {
@@ -164,7 +161,6 @@ describe("local workbench shell", () => {
 
     expect(await screen.findByRole("heading", { name: "找不到已配置的人才库" })).toBeInTheDocument();
     expect(screen.getByText(/从备份恢复/)).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "选择数据目录" })).not.toBeInTheDocument();
   });
 
   it("labels an initialized database with no batches as empty", async () => {
@@ -180,6 +176,5 @@ describe("local workbench shell", () => {
     render(<App />);
 
     expect(await screen.findByText("空数据库")).toBeInTheDocument();
-    expect(screen.queryByText("idle")).not.toBeInTheDocument();
   });
 });

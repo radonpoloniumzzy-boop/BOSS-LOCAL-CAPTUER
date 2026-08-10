@@ -15,6 +15,38 @@ export type AppStatus = {
   latest_batch_status: string;
 };
 
+export type CandidateRow = {
+  id: number;
+  name: string;
+  source_platform: string;
+  latest_source_platform: string;
+  latest_source_job_title: string;
+  latest_batch_id: number;
+  latest_capture_time: string;
+  latest_ingest_status: string;
+  latest_batch_role_id: number | null;
+};
+
+export type CaptureBatchRow = {
+  id: number;
+  start_time: string;
+  source_platform: string;
+  total_collected: number;
+  total_new: number;
+  total_updated: number;
+  total_skipped: number;
+  total_failed: number;
+  status: string;
+  role_id: number | null;
+};
+
+export type PagedResponse<T> = {
+  rows: T[];
+  total: number;
+  page: number;
+  page_size: number;
+};
+
 type ApiError = { error?: { code?: string; message?: string } };
 
 export class ApiRequestError extends Error {
@@ -34,7 +66,7 @@ export async function requestJson<T>(path: string, init?: RequestInit): Promise<
   if (!response.ok) {
     throw new ApiRequestError(
       payload.error?.code || "request_failed",
-      payload.error?.message || "本地服务请求失败。请稍后重试。",
+      payload.error?.message || "本地服务请求失败，请稍后重试。",
     );
   }
   return payload;

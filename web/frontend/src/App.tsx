@@ -17,7 +17,7 @@ const databaseRecoveryTitles: Record<string, string> = {
 };
 
 function Loading() {
-  return <main className="center-state" aria-live="polite"><span className="loader" aria-hidden="true" /><p>正在连接本地工作台...</p></main>;
+  return <main className="center-state" aria-live="polite"><span className="loader" aria-hidden="true" /><p>正在连接本地工作台…</p></main>;
 }
 
 function ServiceError({ retry }: { retry: () => void }) {
@@ -56,7 +56,9 @@ export default function App() {
     try {
       const setupStatus = await requestJson<SetupStatus>("/api/setup/status");
       setSetup(setupStatus);
-      if (!setupStatus.setup_required) setStatus(await requestJson<AppStatus>("/api/app/status"));
+      if (!setupStatus.setup_required) {
+        setStatus(await requestJson<AppStatus>("/api/app/status"));
+      }
     } catch (caught) {
       if (caught instanceof ApiRequestError && databaseRecoveryTitles[caught.code]) {
         setDatabaseFault({ code: caught.code, message: caught.message });

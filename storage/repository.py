@@ -207,6 +207,9 @@ class CandidateRepository:
         job_title: str,
         source_url: str,
         note: str = "",
+        source_platform: str = "",
+        request_id: str = "",
+        request_payload_hash: str = "",
         role_id: int | None = None,
         task_id: int | None = None,
     ) -> CaptureBatch:
@@ -229,19 +232,36 @@ class CandidateRepository:
         cursor = connection.execute(
             """
             INSERT INTO capture_batches(
-                job_title, source_url, start_time, status, note, role_id, task_id, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                job_title, source_url, source_platform, request_id, request_payload_hash,
+                start_time, status, note, role_id, task_id, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (job_title, source_url, timestamp, "running", note, role_id, task_id, timestamp, timestamp),
+            (
+                job_title,
+                source_url,
+                source_platform,
+                request_id,
+                request_payload_hash,
+                timestamp,
+                "running",
+                note,
+                role_id,
+                task_id,
+                timestamp,
+                timestamp,
+            ),
         )
         connection.commit()
         batch = CaptureBatch(
             id=cursor.lastrowid,
             job_title=job_title,
             source_url=source_url,
+            source_platform=source_platform,
             start_time=timestamp,
             status="running",
             note=note,
+            request_id=request_id,
+            request_payload_hash=request_payload_hash,
             role_id=role_id,
             task_id=task_id,
             created_at=timestamp,
@@ -734,6 +754,9 @@ class CandidateRepository:
         status: str,
         total_collected: int,
         total_new: int,
+        total_updated: int = 0,
+        total_skipped: int = 0,
+        total_failed: int = 0,
         note: str = "",
     ) -> None:
         connection = self.db.get_connection()
@@ -741,29 +764,51 @@ class CandidateRepository:
         connection.execute(
             """
             UPDATE capture_batches
-            SET end_time = ?, total_collected = ?, total_new = ?, status = ?, note = ?, updated_at = ?
+            SET end_time = ?, total_collected = ?, total_new = ?, total_updated = ?,
+                total_skipped = ?, total_failed = ?, status = ?, note = ?, updated_at = ?
             WHERE id = ?
             """,
-            (timestamp, total_collected, total_new, status, note, timestamp, batch_id),
+            (
+                timestamp,
+                total_collected,
+                total_new,
+                total_updated,
+                total_skipped,
+                total_failed,
+                status,
+                note,
+                timestamp,
+                batch_id,
+            ),
         )
         connection.commit()
         self._log(
             "info",
-            "Finalized batch %s with status=%s total_collected=%s total_new=%s",
+            "Finalized batch %s with status=%s total_collected=%s total_new=%s total_updated=%s total_skipped=%s total_failed=%s",
             batch_id,
             status,
             total_collected,
             total_new,
+            total_updated,
+            total_skipped,
+            total_failed,
         )
 
     def upsert_batch_candidates(self, batch_id: int, candidates: Iterable[CandidateRecord]) -> dict[str, int]:
         connection = self.db.get_connection()
         inserted_candidates = 0
+        updated_candidates = 0
+        skipped_candidates = 0
         inserted_batch_items = 0
         processed = 0
+        seen_keys: set[str] = set()
         with connection:
             for candidate in candidates:
                 processed += 1
+                if candidate.candidate_key in seen_keys:
+                    skipped_candidates += 1
+                    continue
+                seen_keys.add(candidate.candidate_key)
                 existing = connection.execute(
                     "SELECT * FROM candidates WHERE candidate_key = ?",
                     (candidate.candidate_key,),
@@ -772,11 +817,14 @@ class CandidateRepository:
                     candidate_id = self._insert_candidate(connection, candidate)
                     inserted_candidates += 1
                     profile_candidate = candidate
+                    ingest_status = "new"
                 else:
                     candidate_id = int(existing["id"])
                     merged = self._merge_candidate(existing, candidate)
                     self._update_candidate(connection, candidate_id, merged)
                     profile_candidate = merged
+                    updated_candidates += 1
+                    ingest_status = "updated"
                 profile_candidate.id = candidate_id
                 self._upsert_candidate_profile(connection, profile_candidate)
 
@@ -789,6 +837,9 @@ class CandidateRepository:
                     job_title=candidate.job_title,
                     source_url=candidate.source_url,
                     raw_card_text=candidate.raw_card_text,
+                    source_platform=candidate.source_platform,
+                    platform_uid=candidate.platform_uid,
+                    ingest_status=ingest_status,
                     name=candidate.name,
                     active_status=candidate.active_status,
                     expected_salary=candidate.expected_salary,
@@ -802,9 +853,10 @@ class CandidateRepository:
                     """
                     INSERT OR IGNORE INTO capture_batch_items(
                         batch_id, candidate_id, candidate_key, raw_text_hash, capture_time, job_title,
-                        source_url, name, active_status, expected_salary, work_experience_text,
+                        source_url, source_platform, platform_uid, ingest_status, name,
+                        active_status, expected_salary, work_experience_text,
                         education_text, tags_text, summary_text, raw_card_text, detail_url, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         snapshot.batch_id,
@@ -814,6 +866,9 @@ class CandidateRepository:
                         snapshot.capture_time,
                         snapshot.job_title,
                         snapshot.source_url,
+                        snapshot.source_platform,
+                        snapshot.platform_uid,
+                        snapshot.ingest_status,
                         snapshot.name,
                         snapshot.active_status,
                         snapshot.expected_salary,
@@ -839,6 +894,9 @@ class CandidateRepository:
         return {
             "processed": processed,
             "inserted_candidates": inserted_candidates,
+            "updated_candidates": updated_candidates,
+            "skipped_candidates": skipped_candidates,
+            "failed_candidates": 0,
             "inserted_batch_items": inserted_batch_items,
         }
 
@@ -847,6 +905,8 @@ class CandidateRepository:
         keyword: str = "",
         job_title: str = "",
         batch_id: int | None = None,
+        source_platform: str = "",
+        unbound_only: bool = False,
         city: str = "",
         years_min: int | str | None = None,
         years_max: int | str | None = None,
@@ -862,6 +922,8 @@ class CandidateRepository:
             keyword=keyword,
             job_title=job_title,
             batch_id=batch_id,
+            source_platform=source_platform,
+            unbound_only=unbound_only,
             city=city,
             years_min=years_min,
             years_max=years_max,
@@ -905,9 +967,25 @@ class CandidateRepository:
             cp.skill_tags_json,
             cp.last_active_at,
             cp.profile_completeness,
+            lbi.batch_id AS latest_batch_id,
+            lbi.capture_time AS latest_capture_time,
+            lbi.job_title AS latest_source_job_title,
+            lbi.source_platform AS latest_source_platform,
+            lbi.ingest_status AS latest_ingest_status,
+            lb.role_id AS latest_batch_role_id,
+            lb.total_new AS latest_batch_total_new,
+            lb.total_updated AS latest_batch_total_updated,
             COUNT(DISTINCT bi2.batch_id) AS batch_count
         FROM candidates c
         LEFT JOIN capture_batch_items bi2 ON bi2.candidate_id = c.id
+        LEFT JOIN capture_batch_items lbi ON lbi.id = (
+            SELECT bi3.id
+            FROM capture_batch_items bi3
+            WHERE bi3.candidate_id = c.id
+            ORDER BY bi3.capture_time DESC, bi3.id DESC
+            LIMIT 1
+        )
+        LEFT JOIN capture_batches lb ON lb.id = lbi.batch_id
         LEFT JOIN candidate_role_matches lm ON lm.id = (
             SELECT m2.id
             FROM candidate_role_matches m2
@@ -1025,6 +1103,8 @@ class CandidateRepository:
         keyword: str = "",
         job_title: str = "",
         batch_id: int | None = None,
+        source_platform: str = "",
+        unbound_only: bool = False,
         city: str = "",
         years_min: int | str | None = None,
         years_max: int | str | None = None,
@@ -1041,6 +1121,13 @@ class CandidateRepository:
             joins += " JOIN capture_batch_items bi ON bi.candidate_id = c.id "
             filters.append("bi.batch_id = ?")
             params.append(batch_id)
+        if source_platform:
+            filters.append("c.source_platform = ?")
+            params.append(source_platform.strip())
+        if unbound_only:
+            filters.append(
+                "NOT EXISTS (SELECT 1 FROM candidate_role_matches mx WHERE mx.candidate_id = c.id)"
+            )
         if keyword:
             token = f"%{keyword}%"
             filters.append(
@@ -1189,6 +1276,7 @@ class CandidateRepository:
             candidate_key=str(row["candidate_key"]),
             raw_text_hash=str(row["raw_text_hash"]),
             platform_uid=str(row["platform_uid"] or ""),
+            source_platform=str(row["source_platform"] or ""),
             job_title=str(row["job_title"] or ""),
             source_url=str(row["source_url"] or ""),
             capture_time=str(row["capture_time"] or ""),
@@ -1210,11 +1298,92 @@ class CandidateRepository:
         return list(
             connection.execute(
                 """
-                SELECT * FROM capture_batches
-                ORDER BY start_time DESC
+                SELECT *
+                FROM capture_batches
+                ORDER BY start_time DESC, id DESC
                 """
             ).fetchall()
         )
+
+    def get_batch_by_request_id(self, request_id: str) -> dict[str, object] | None:
+        row = self.db.get_connection().execute(
+            "SELECT * FROM capture_batches WHERE request_id = ?",
+            (request_id,),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def get_capture_batch(self, batch_id: int) -> dict[str, object] | None:
+        row = self.db.get_connection().execute(
+            "SELECT * FROM capture_batches WHERE id = ?",
+            (batch_id,),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def page_capture_batches(
+        self,
+        *,
+        source_platform: str = "",
+        page: int = 1,
+        page_size: int = 20,
+    ) -> dict[str, object]:
+        page, page_size, offset = self._normalize_page(page, page_size)
+        filters: list[str] = []
+        params: list[object] = []
+        if source_platform.strip():
+            filters.append("source_platform = ?")
+            params.append(source_platform.strip())
+        where_sql = f"WHERE {' AND '.join(filters)}" if filters else ""
+        total = int(
+            self.db.get_connection().execute(
+                f"SELECT COUNT(*) FROM capture_batches {where_sql}",
+                params,
+            ).fetchone()[0]
+        )
+        rows = self.db.get_connection().execute(
+            f"""
+            SELECT *
+            FROM capture_batches
+            {where_sql}
+            ORDER BY start_time DESC, id DESC
+            LIMIT ? OFFSET ?
+            """,
+            [*params, page_size, offset],
+        ).fetchall()
+        return {"rows": [dict(row) for row in rows], "total": total, "page": page, "page_size": page_size}
+
+    def page_capture_batch_candidates(
+        self,
+        batch_id: int,
+        *,
+        page: int = 1,
+        page_size: int = 100,
+    ) -> dict[str, object]:
+        page, page_size, offset = self._normalize_page(page, page_size)
+        total = int(
+            self.db.get_connection().execute(
+                "SELECT COUNT(*) FROM capture_batch_items WHERE batch_id = ?",
+                (batch_id,),
+            ).fetchone()[0]
+        )
+        rows = self.db.get_connection().execute(
+            """
+            SELECT
+                bi.*,
+                c.source_platform AS candidate_source_platform,
+                CASE
+                    WHEN EXISTS (
+                        SELECT 1 FROM candidate_role_matches m WHERE m.candidate_id = bi.candidate_id
+                    ) THEN 1 ELSE 0
+                END AS has_role_binding
+            FROM capture_batch_items bi
+            JOIN candidates c ON c.id = bi.candidate_id
+            WHERE bi.batch_id = ?
+            ORDER BY bi.id ASC
+            LIMIT ? OFFSET ?
+            """,
+            (batch_id, page_size, offset),
+        ).fetchall()
+        return {"rows": [dict(row) for row in rows], "total": total, "page": page, "page_size": page_size}
 
     def get_capture_batch_export_rows(self, batch_id: int) -> list[dict[str, object]]:
         rows = self.db.get_connection().execute(
@@ -4147,15 +4316,16 @@ class CandidateRepository:
         cursor = connection.execute(
             """
             INSERT INTO candidates(
-                candidate_key, raw_text_hash, platform_uid, job_title, source_url, capture_time, name,
+                candidate_key, raw_text_hash, platform_uid, source_platform, job_title, source_url, capture_time, name,
                 active_status, expected_salary, work_experience_text, education_text, tags_text,
                 summary_text, raw_card_text, detail_url, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 candidate.candidate_key,
                 candidate.raw_text_hash,
                 candidate.platform_uid,
+                candidate.source_platform,
                 candidate.job_title,
                 candidate.source_url,
                 candidate.capture_time,
@@ -4178,7 +4348,7 @@ class CandidateRepository:
         connection.execute(
             """
             UPDATE candidates
-            SET raw_text_hash = ?, platform_uid = ?, job_title = ?, source_url = ?, capture_time = ?,
+            SET raw_text_hash = ?, platform_uid = ?, source_platform = ?, job_title = ?, source_url = ?, capture_time = ?,
                 name = ?, active_status = ?, expected_salary = ?, work_experience_text = ?, education_text = ?,
                 tags_text = ?, summary_text = ?, raw_card_text = ?, detail_url = ?, updated_at = ?
             WHERE id = ?
@@ -4186,6 +4356,7 @@ class CandidateRepository:
             (
                 candidate.raw_text_hash,
                 candidate.platform_uid,
+                candidate.source_platform,
                 candidate.job_title,
                 candidate.source_url,
                 candidate.capture_time,
@@ -4212,6 +4383,7 @@ class CandidateRepository:
             candidate_key=candidate.candidate_key,
             raw_text_hash=prefer(candidate.raw_text_hash, existing["raw_text_hash"]),
             platform_uid=prefer(candidate.platform_uid, existing["platform_uid"]),
+            source_platform=prefer(candidate.source_platform, existing["source_platform"]),
             job_title=prefer(candidate.job_title, existing["job_title"]),
             source_url=prefer(candidate.source_url, existing["source_url"]),
             capture_time=prefer(candidate.capture_time, existing["capture_time"]),

@@ -7,8 +7,11 @@ from dataclasses import dataclass
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
+from automation.importer import CardImportService
+from automation.parser import CandidateParser
 from core.app_lock import ApplicationLockError, DatabaseApplicationLock
 from core.bootstrap import BootstrapService, DATABASE_NAME, DataDirectoryError
+from core.config import ConfigService
 from storage.db import (
     DatabaseCorruptError,
     DatabaseManager,
@@ -69,6 +72,9 @@ class WebRuntime:
         self.bootstrap = bootstrap
         self.lock_root = lock_root
         self.log_dir = bootstrap.store.path.parent / "logs"
+        self.data_dir: Path | None = None
+        self.config_service: ConfigService | None = None
+        self.import_service: CardImportService | None = None
         self.database: DatabaseManager | None = None
         self.repository: CandidateRepository | None = None
         self.lock: DatabaseApplicationLock | None = None
@@ -163,8 +169,14 @@ class WebRuntime:
                 else:
                     database.initialize()
                 self.lock = lock
+                self.data_dir = data_dir
                 self.database = database
                 self.repository = CandidateRepository(database)
+                self.config_service = ConfigService(data_dir=data_dir)
+                self.import_service = CardImportService(
+                    self.repository,
+                    CandidateParser(),
+                )
                 self.database_fault = None
             except Exception:
                 database.close_all_connections()
@@ -185,6 +197,12 @@ class WebRuntime:
                 result = self.bootstrap.setup(selected)
                 self.database = DatabaseManager(selected_database)
                 self.repository = CandidateRepository(self.database)
+                self.data_dir = selected
+                self.config_service = ConfigService(data_dir=selected)
+                self.import_service = CardImportService(
+                    self.repository,
+                    CandidateParser(),
+                )
                 self.database_fault = None
                 return result
             except Exception:
@@ -199,4 +217,7 @@ class WebRuntime:
                 self.lock.release()
             self.database = None
             self.repository = None
+            self.data_dir = None
+            self.config_service = None
+            self.import_service = None
             self.lock = None

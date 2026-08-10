@@ -29,6 +29,10 @@ class CandidateParser:
         summary_text = normalize_text(str(raw_card.get("summary_text") or ""))
         detail_url = normalize_text(str(raw_card.get("detail_url") or ""))
         platform_uid = normalize_text(str(raw_card.get("platform_uid") or ""))
+        source_platform = self.normalize_source_platform(
+            str(raw_card.get("platform") or ""),
+            source_url,
+        )
         tags = raw_card.get("tags_text") or []
         if isinstance(tags, list):
             tags_text = " | ".join(filter(None, [normalize_text(str(item)) for item in tags]))
@@ -52,6 +56,7 @@ class CandidateParser:
             source_url=normalize_text(source_url),
             capture_time=capture_time,
             raw_card_text=raw_text,
+            source_platform=source_platform,
             name=name,
             active_status=active_status,
             expected_salary=expected_salary,
@@ -88,6 +93,18 @@ class CandidateParser:
         if fingerprint.strip("|"):
             return f"fingerprint:{short_hash(fingerprint)}"
         return f"raw:{raw_text_hash}"
+
+    @staticmethod
+    def normalize_source_platform(platform: str, source_url: str) -> str:
+        normalized = normalize_text(platform).lower()
+        if normalized:
+            return normalized
+        url = normalize_text(source_url).lower()
+        if "liepin" in url:
+            return "liepin"
+        if "zhipin" in url or "boss" in url:
+            return "boss"
+        return "unknown"
 
     def _log(self, level: str, message: str, *args) -> None:
         if not self.logger:

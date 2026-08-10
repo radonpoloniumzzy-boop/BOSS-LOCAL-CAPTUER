@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 
 
-LATEST_SCHEMA_VERSION = 16
+LATEST_SCHEMA_VERSION = 17
 
 
 def _json_or_default(value: object, default: object) -> object:
@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS candidates (
     candidate_key TEXT NOT NULL UNIQUE,
     raw_text_hash TEXT NOT NULL,
     platform_uid TEXT,
+    source_platform TEXT NOT NULL DEFAULT '',
     job_title TEXT NOT NULL,
     source_url TEXT NOT NULL,
     capture_time TEXT NOT NULL,
@@ -51,10 +52,16 @@ CREATE TABLE IF NOT EXISTS capture_batches (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     job_title TEXT NOT NULL,
     source_url TEXT NOT NULL,
+    source_platform TEXT NOT NULL DEFAULT '',
+    request_id TEXT NOT NULL DEFAULT '',
+    request_payload_hash TEXT NOT NULL DEFAULT '',
     start_time TEXT NOT NULL,
     end_time TEXT,
     total_collected INTEGER NOT NULL DEFAULT 0,
     total_new INTEGER NOT NULL DEFAULT 0,
+    total_updated INTEGER NOT NULL DEFAULT 0,
+    total_skipped INTEGER NOT NULL DEFAULT 0,
+    total_failed INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL,
     note TEXT,
     created_at TEXT NOT NULL,
@@ -73,6 +80,9 @@ CREATE TABLE IF NOT EXISTS capture_batch_items (
     capture_time TEXT NOT NULL,
     job_title TEXT NOT NULL,
     source_url TEXT NOT NULL,
+    source_platform TEXT NOT NULL DEFAULT '',
+    platform_uid TEXT NOT NULL DEFAULT '',
+    ingest_status TEXT NOT NULL DEFAULT 'new',
     name TEXT,
     active_status TEXT,
     expected_salary TEXT,
@@ -90,6 +100,7 @@ CREATE TABLE IF NOT EXISTS capture_batch_items (
 
 CREATE INDEX IF NOT EXISTS idx_capture_batch_items_batch_id ON capture_batch_items(batch_id);
 CREATE INDEX IF NOT EXISTS idx_capture_batch_items_candidate_id ON capture_batch_items(candidate_id);
+CREATE INDEX IF NOT EXISTS idx_capture_batch_items_platform_capture ON capture_batch_items(source_platform, capture_time DESC);
 
 CREATE TABLE IF NOT EXISTS candidate_profiles (
     candidate_id INTEGER PRIMARY KEY,
@@ -747,11 +758,73 @@ def apply_migrations(connection) -> None:
     batch_columns = {
         str(row[1]) for row in connection.execute("PRAGMA table_info(capture_batches)").fetchall()
     }
+    if "source_platform" not in batch_columns:
+        connection.execute(
+            "ALTER TABLE capture_batches ADD COLUMN source_platform TEXT NOT NULL DEFAULT ''"
+        )
+    if "request_id" not in batch_columns:
+        connection.execute(
+            "ALTER TABLE capture_batches ADD COLUMN request_id TEXT NOT NULL DEFAULT ''"
+        )
+    if "request_payload_hash" not in batch_columns:
+        connection.execute(
+            "ALTER TABLE capture_batches ADD COLUMN request_payload_hash TEXT NOT NULL DEFAULT ''"
+        )
+    if "total_updated" not in batch_columns:
+        connection.execute(
+            "ALTER TABLE capture_batches ADD COLUMN total_updated INTEGER NOT NULL DEFAULT 0"
+        )
+    if "total_skipped" not in batch_columns:
+        connection.execute(
+            "ALTER TABLE capture_batches ADD COLUMN total_skipped INTEGER NOT NULL DEFAULT 0"
+        )
+    if "total_failed" not in batch_columns:
+        connection.execute(
+            "ALTER TABLE capture_batches ADD COLUMN total_failed INTEGER NOT NULL DEFAULT 0"
+        )
     if "role_id" not in batch_columns:
         connection.execute("ALTER TABLE capture_batches ADD COLUMN role_id INTEGER")
     connection.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_capture_batches_request_id "
+        "ON capture_batches(request_id) WHERE request_id <> ''"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_capture_batches_platform_start "
+        "ON capture_batches(source_platform, start_time DESC)"
+    )
+    connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_capture_batches_role_start "
         "ON capture_batches(role_id, start_time DESC)"
+    )
+    candidate_columns = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(candidates)").fetchall()
+    }
+    if "source_platform" not in candidate_columns:
+        connection.execute(
+            "ALTER TABLE candidates ADD COLUMN source_platform TEXT NOT NULL DEFAULT ''"
+        )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_candidates_source_platform_updated "
+        "ON candidates(source_platform, updated_at DESC)"
+    )
+    batch_item_columns = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(capture_batch_items)").fetchall()
+    }
+    if "source_platform" not in batch_item_columns:
+        connection.execute(
+            "ALTER TABLE capture_batch_items ADD COLUMN source_platform TEXT NOT NULL DEFAULT ''"
+        )
+    if "platform_uid" not in batch_item_columns:
+        connection.execute(
+            "ALTER TABLE capture_batch_items ADD COLUMN platform_uid TEXT NOT NULL DEFAULT ''"
+        )
+    if "ingest_status" not in batch_item_columns:
+        connection.execute(
+            "ALTER TABLE capture_batch_items ADD COLUMN ingest_status TEXT NOT NULL DEFAULT 'new'"
+        )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_capture_batch_items_platform_capture "
+        "ON capture_batch_items(source_platform, capture_time DESC)"
     )
     run_columns = {
         str(row[1]) for row in connection.execute("PRAGMA table_info(screening_runs)").fetchall()

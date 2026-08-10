@@ -120,6 +120,7 @@ class CandidateRecord:
     source_url: str
     capture_time: str
     raw_card_text: str
+    source_platform: str = ""
     name: str = ""
     active_status: str = ""
     expected_salary: str = ""
@@ -143,13 +144,19 @@ class CaptureBatch:
     source_url: str
     start_time: str
     status: str
+    source_platform: str = ""
     note: str = ""
+    request_id: str = ""
+    request_payload_hash: str = ""
     role_id: int | None = None
     task_id: int | None = None
     id: int | None = None
     end_time: str = ""
     total_collected: int = 0
     total_new: int = 0
+    total_updated: int = 0
+    total_skipped: int = 0
+    total_failed: int = 0
     created_at: str = ""
     updated_at: str = ""
 
@@ -167,6 +174,9 @@ class CaptureBatchItem:
     job_title: str
     source_url: str
     raw_card_text: str
+    source_platform: str = ""
+    platform_uid: str = ""
+    ingest_status: str = "new"
     name: str = ""
     active_status: str = ""
     expected_salary: str = ""

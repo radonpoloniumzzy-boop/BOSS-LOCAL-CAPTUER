@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import secrets
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -28,6 +29,15 @@ class ApiError(RuntimeError):
 
 class SetupRequest(BaseModel):
     data_dir: str
+
+
+class IntakeCandidatesRequest(BaseModel):
+    source_platform: str = ""
+    source_url: str = ""
+    source_job_title: str = ""
+    job_profile_id: int | None = None
+    idempotency_key: str = ""
+    candidates: list[dict[str, object]]
 
 
 def error_response(status_code: int, code: str, message: str) -> JSONResponse:
@@ -127,6 +137,75 @@ def create_web_app(
             "latest_batch_id": int(stats["latest_batch_id"]),
             "latest_batch_status": str(stats["latest_batch_status"]),
         }
+
+    def require_local_api_token(x_boss_local_token: str = Header(default="")) -> None:
+        if runtime.config_service is None:
+            raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。")
+        config = runtime.config_service.load()
+        supplied = str(x_boss_local_token or "")
+        if not supplied or not secrets.compare_digest(supplied, config.local_api_token):
+            raise ApiError(401, "unauthorized", "本地写入鉴权失败。")
+
+    @app.post("/api/intake/candidates")
+    def intake_candidates(
+        payload: IntakeCandidatesRequest,
+        _auth: None = Depends(require_local_api_token),
+    ) -> dict[str, object]:
+        if runtime.import_service is None:
+            raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。")
+        try:
+            return runtime.import_service.import_candidates(payload.model_dump())
+        except ValueError as exc:
+            raise ApiError(400, "invalid_request", str(exc)) from exc
+
+    @app.get("/api/candidates")
+    def list_candidates(
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=100, ge=1, le=500),
+        source_platform: str = "",
+        unbound_only: bool = False,
+    ) -> dict[str, object]:
+        if runtime.repository is None:
+            raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。")
+        result = runtime.repository.page_candidates(
+            page=page,
+            page_size=page_size,
+            source_platform=source_platform,
+            unbound_only=unbound_only,
+        )
+        result["rows"] = [dict(row) for row in result["rows"]]
+        return result
+
+    @app.get("/api/capture-batches")
+    def list_capture_batches(
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=20, ge=1, le=200),
+        source_platform: str = "",
+    ) -> dict[str, object]:
+        if runtime.repository is None:
+            raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。")
+        return runtime.repository.page_capture_batches(
+            source_platform=source_platform,
+            page=page,
+            page_size=page_size,
+        )
+
+    @app.get("/api/capture-batches/{batch_id}/candidates")
+    def list_capture_batch_candidates(
+        batch_id: int,
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=100, ge=1, le=500),
+    ) -> dict[str, object]:
+        if runtime.repository is None:
+            raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。")
+        batch = runtime.repository.get_capture_batch(batch_id)
+        if batch is None:
+            raise ApiError(404, "batch_not_found", "采集批次不存在。")
+        return runtime.repository.page_capture_batch_candidates(
+            batch_id,
+            page=page,
+            page_size=page_size,
+        )
 
     dist = frontend_dist or bootstrap.project_root / "web" / "frontend" / "dist"
     if (dist / "assets").is_dir():
