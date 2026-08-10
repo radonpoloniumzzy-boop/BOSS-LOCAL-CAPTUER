@@ -42,32 +42,33 @@ class CardImportService:
         request_id = normalize_text(str(payload.get("idempotency_key") or ""))
         request_payload_hash = self._payload_hash(payload)
         task_id = self._optional_int(payload.get("recruitment_task_id"))
-        batch, reused = self.repository.claim_intake_batch(
-            job_title,
-            source_url,
-            note="; ".join(note_parts),
-            source_platform=source_platform,
-            request_id=request_id,
-            request_payload_hash=request_payload_hash,
-            role_id=(int(job_profile["id"]) if job_profile is not None else None),
-            task_id=task_id,
-        )
-        if reused:
-            return self._batch_result(
-                self.repository.get_capture_batch(int(batch.id)) or batch.to_dict(),
-                {
-                    "source": "chrome_extension",
-                    "job_profile_id": batch.role_id,
-                },
-            )
 
-        seen_keys: set[str] = set()
+        batch = None
         parsed_records: list[CandidateRecord] = []
         parse_failures = 0
         status = "completed"
         message = "已从 Chrome 扩展导入候选人卡片。"
 
         try:
+            batch, reused = self.repository.claim_intake_batch(
+                job_title,
+                source_url,
+                note="; ".join(note_parts),
+                source_platform=source_platform,
+                request_id=request_id,
+                request_payload_hash=request_payload_hash,
+                role_id=(int(job_profile["id"]) if job_profile is not None else None),
+                task_id=task_id,
+            )
+            if reused:
+                return self._batch_result(
+                    self.repository.get_capture_batch(int(batch.id)) or batch.to_dict(),
+                    {
+                        "source": "chrome_extension",
+                        "job_profile_id": batch.role_id,
+                    },
+                )
+
             for raw_card in cards:
                 if not isinstance(raw_card, dict):
                     parse_failures += 1
@@ -81,19 +82,15 @@ class CardImportService:
                 if record is None:
                     parse_failures += 1
                     continue
-                if record.candidate_key in seen_keys:
-                    continue
-                seen_keys.add(record.candidate_key)
                 if not record.source_platform:
                     record.source_platform = source_platform
                 parsed_records.append(record)
 
-            repo_result = self.repository.upsert_batch_candidates(batch.id, parsed_records)
-            if explicit_job_profile and job_profile is not None:
-                self._bind_candidates_to_role(
-                    role_id=int(job_profile["id"]),
-                    candidate_results=repo_result["candidate_results"],
-                )
+            repo_result = self.repository.upsert_batch_candidates(
+                batch.id,
+                parsed_records,
+                role_id=(int(job_profile["id"]) if explicit_job_profile and job_profile is not None else None),
+            )
             failed_candidates = parse_failures + int(repo_result["failed_candidates"])
             result = CaptureRunResult(
                 batch_id=batch.id,
@@ -119,6 +116,7 @@ class CardImportService:
                 {
                     "received_cards": len(cards),
                     "parsed_cards": len(parsed_records),
+                    "inserted_candidates": repo_result["inserted_candidates"],
                     "source": "chrome_extension",
                     "source_platform": source_platform,
                     "job_title": job_title,
@@ -135,17 +133,23 @@ class CardImportService:
         except Exception as exc:
             status = "failed"
             message = str(exc)
-            self.repository.finalize_batch(
-                batch_id=batch.id,
-                status=status,
-                total_collected=len(cards),
-                total_new=0,
-                total_updated=0,
-                total_skipped=0,
-                total_failed=max(1, parse_failures),
-                note=message,
+            if batch is not None:
+                self.repository.finalize_batch(
+                    batch_id=batch.id,
+                    status=status,
+                    total_collected=len(cards),
+                    total_new=0,
+                    total_updated=0,
+                    total_skipped=0,
+                    total_failed=len(cards),
+                    note=message,
+                )
+            self._log(
+                "exception",
+                "Failed to import extension batch=%s: %s",
+                getattr(batch, "id", "unclaimed"),
+                exc,
             )
-            self._log("exception", "Failed to import extension batch=%s: %s", batch.id, exc)
             raise
         finally:
             self.repository.db.close_thread_connection()
@@ -171,29 +175,30 @@ class CardImportService:
         if job_profile is not None and str(job_profile.get("status") or "") != "active":
             raise ValueError("所选岗位档案不是招聘中状态，不能用于自动入库。")
 
-        batch, reused = self.repository.claim_intake_batch(
-            job_title,
-            source_url,
-            note="web_candidate_intake",
-            source_platform=source_platform,
-            request_id=request_id,
-            request_payload_hash=request_payload_hash,
-            role_id=role_id,
-            task_id=task_id,
-        )
-        if reused:
-            return self._batch_result(
-                self.repository.get_capture_batch(int(batch.id)) or batch.to_dict(),
-                {
-                    "source": "web_intake",
-                    "job_profile_id": batch.role_id,
-                },
-            )
-
+        batch = None
         records: list[CandidateRecord] = []
         failures: list[dict[str, object]] = []
 
         try:
+            batch, reused = self.repository.claim_intake_batch(
+                job_title,
+                source_url,
+                note="web_candidate_intake",
+                source_platform=source_platform,
+                request_id=request_id,
+                request_payload_hash=request_payload_hash,
+                role_id=role_id,
+                task_id=task_id,
+            )
+            if reused:
+                return self._batch_result(
+                    self.repository.get_capture_batch(int(batch.id)) or batch.to_dict(),
+                    {
+                        "source": "web_intake",
+                        "job_profile_id": batch.role_id,
+                    },
+                )
+
             for index, item in enumerate(candidates):
                 if not isinstance(item, dict):
                     failures.append(
@@ -222,12 +227,11 @@ class CardImportService:
                         }
                     )
 
-            repo_result = self.repository.upsert_batch_candidates(batch.id, records)
-            if role_id is not None:
-                self._bind_candidates_to_role(
-                    role_id=role_id,
-                    candidate_results=repo_result["candidate_results"],
-                )
+            repo_result = self.repository.upsert_batch_candidates(
+                batch.id,
+                records,
+                role_id=role_id,
+            )
             failed_candidates = len(failures) + int(repo_result["failed_candidates"])
             batch_status = "completed" if failed_candidates == 0 else "partial"
             self.repository.finalize_batch(
@@ -252,16 +256,17 @@ class CardImportService:
                 },
             )
         except Exception:
-            self.repository.finalize_batch(
-                batch_id=batch.id,
-                status="failed",
-                total_collected=len(candidates),
-                total_new=0,
-                total_updated=0,
-                total_skipped=0,
-                total_failed=max(1, len(failures)),
-                note="web_candidate_intake",
-            )
+            if batch is not None:
+                self.repository.finalize_batch(
+                    batch_id=batch.id,
+                    status="failed",
+                    total_collected=len(candidates),
+                    total_new=0,
+                    total_updated=0,
+                    total_skipped=0,
+                    total_failed=len(candidates),
+                    note="web_candidate_intake",
+                )
             raise
         finally:
             self.repository.db.close_thread_connection()
@@ -304,7 +309,10 @@ class CardImportService:
         )
         source_candidate_id = normalize_text(str(item.get("source_candidate_id") or ""))
         detail_url = normalize_text(str(item.get("detail_url") or ""))
-        platform_uid = self.parser.canonicalize_platform_uid(source_platform, source_candidate_id)
+        platform_uid = self.parser.canonicalize_source_candidate_id(
+            source_platform,
+            source_candidate_id,
+        )
         name = normalize_text(str(item.get("name") or ""))
         expected_salary = normalize_text(str(item.get("expected_salary") or ""))
         work_experience_text = normalize_text(str(item.get("work_experience_text") or ""))
@@ -338,20 +346,6 @@ class CardImportService:
             detail_url=detail_url,
             platform_uid=platform_uid,
         )
-
-    def _bind_candidates_to_role(
-        self,
-        *,
-        role_id: int,
-        candidate_results: list[dict[str, object]],
-    ) -> None:
-        for candidate_result in candidate_results:
-            self.repository.upsert_candidate_role_match(
-                candidate_id=int(candidate_result["candidate_id"]),
-                role_id=role_id,
-                match_status="collected",
-                recruitment_status="collected",
-            )
 
     @staticmethod
     def _tags_text(value: object) -> str:

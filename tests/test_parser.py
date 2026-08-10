@@ -36,13 +36,28 @@ class CandidateParserTest(unittest.TestCase):
             job_title="招聘专员",
             source_url="https://example.com",
         )
+        assert record is not None
         self.assertTrue(record.candidate_key.startswith("fingerprint:"))
 
     def test_parse_card_returns_none_for_empty_raw_text(self) -> None:
         record = self.parser.parse_card({}, job_title="招聘专员", source_url="https://example.com")
         self.assertIsNone(record)
 
+    def test_parse_card_platform_uid_prefix_mismatch_is_renamespaced(self) -> None:
+        record = self.parser.parse_card(
+            {
+                "platform": "boss",
+                "platform_uid": "liepin:123",
+                "raw_card_text": "Alice card",
+            },
+            job_title="Trader",
+            source_url="https://www.zhipin.com/web/geek/recommend",
+        )
+
+        assert record is not None
+        self.assertEqual(record.platform_uid, "boss:liepin:123")
+        self.assertEqual(record.candidate_key, "platform:boss:liepin:123")
+
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -100,15 +100,29 @@ class CandidateParser:
         normalized_uid = normalize_text(platform_uid)
         if not normalized_uid:
             return ""
+        normalized_platform = normalize_text(source_platform).lower()
         if ":" in normalized_uid:
             prefix = normalize_text(normalized_uid.split(":", 1)[0]).lower()
+            if normalized_platform and normalized_platform != "unknown":
+                if prefix == normalized_platform:
+                    return normalized_uid
+                return f"{normalized_platform}:{normalized_uid}"
             if prefix and prefix != "unknown":
                 return normalized_uid
+            return ""
+        if not normalized_platform or normalized_platform == "unknown":
+            return ""
+        return f"{normalized_platform}:{normalized_uid}"
+
+    @staticmethod
+    def canonicalize_source_candidate_id(source_platform: str, source_candidate_id: str) -> str:
+        normalized_candidate_id = normalize_text(source_candidate_id)
+        if not normalized_candidate_id:
             return ""
         normalized_platform = normalize_text(source_platform).lower()
         if not normalized_platform or normalized_platform == "unknown":
             return ""
-        return f"{normalized_platform}:{normalized_uid}"
+        return f"{normalized_platform}:{normalized_candidate_id}"
 
     @staticmethod
     def normalize_source_platform(platform: str, source_url: str) -> str:

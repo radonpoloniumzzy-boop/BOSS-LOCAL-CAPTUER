@@ -66,11 +66,19 @@ class CardImportServiceTest(unittest.TestCase):
             }
         )
 
-        self.assertEqual(result["parsed_cards"], 1)
+        self.assertEqual(result["parsed_cards"], 2)
         self.assertEqual(result["total_batch_items"], 1)
+        self.assertEqual(result["skipped_candidates"], 1)
         self.assertEqual(result["job_title"], "Recruiting Intern")
         self.assertEqual(result["source_url"], "https://www.zhipin.com/web/geek/recommend")
         self.assertTrue(result["automation_requested"])
+        self.assertEqual(
+            result["received_cards"],
+            result["inserted_candidates"]
+            + result["updated_candidates"]
+            + result["skipped_candidates"]
+            + result["failed_candidates"],
+        )
         self.assertEqual(len(self.repository.list_candidates()), 1)
 
     def test_import_liepin_cards_reuses_existing_candidate_model(self) -> None:
@@ -116,8 +124,9 @@ class CardImportServiceTest(unittest.TestCase):
         )
 
         candidates = self.repository.list_candidates()
-        self.assertEqual(result["parsed_cards"], 1)
+        self.assertEqual(result["parsed_cards"], 2)
         self.assertEqual(result["total_batch_items"], 1)
+        self.assertEqual(result["skipped_candidates"], 1)
         self.assertEqual(len(candidates), 1)
         self.assertEqual(candidates[0]["source_url"], "https://lpt.liepin.com/recommend")
         self.assertEqual(candidates[0]["candidate_key"], "platform:liepin:resume-1")
@@ -463,6 +472,228 @@ class CardImportServiceTest(unittest.TestCase):
         self.assertEqual(len(successes), 1)
         self.assertEqual(len(conflicts), 1)
         self.assertEqual(len(self.repository.list_batches()), 1)
+
+    def test_repeated_explicit_role_intake_does_not_roll_back_existing_progress(self) -> None:
+        profile = self.repository.save_job_profile(
+            JobProfile(job_title="Trader", jd_text="", prompt_text="", status="active")
+        )
+        self.service.import_candidates(
+            {
+                "source_platform": "boss",
+                "job_profile_id": profile.id,
+                "candidates": [
+                    {"source_candidate_id": "boss-1", "raw_card_text": "Alice first card", "name": "Alice"}
+                ],
+            }
+        )
+        candidate = dict(self.repository.list_candidates()[0])
+        self.repository.upsert_candidate_role_match(
+            candidate_id=int(candidate["id"]),
+            role_id=int(profile.id),
+            match_status="screened",
+            recruitment_status="contacted",
+        )
+
+        self.service.import_candidates(
+            {
+                "source_platform": "boss",
+                "job_profile_id": profile.id,
+                "candidates": [
+                    {"source_candidate_id": "boss-1", "raw_card_text": "Alice second card", "name": "Alice Updated"}
+                ],
+            }
+        )
+
+        match = self.repository.list_candidate_role_matches(role_id=int(profile.id))[0]
+        self.assertEqual(match["match_status"], "screened")
+        self.assertEqual(match["recruitment_status"], "contacted")
+
+    def test_atomic_role_binding_failure_rolls_back_candidates_snapshots_and_matches(self) -> None:
+        profile = self.repository.save_job_profile(
+            JobProfile(job_title="Atomic Trader", jd_text="", prompt_text="", status="active")
+        )
+        original = self.repository._ensure_candidate_role_match_exists
+        calls = 0
+
+        def fail_on_second(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError("bind failed")
+            return original(*args, **kwargs)
+
+        with unittest.mock.patch.object(
+            self.repository,
+            "_ensure_candidate_role_match_exists",
+            side_effect=fail_on_second,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "bind failed"):
+                self.service.import_candidates(
+                    {
+                        "source_platform": "boss",
+                        "job_profile_id": profile.id,
+                        "candidates": [
+                            {"source_candidate_id": "boss-1", "raw_card_text": "Alice card"},
+                            {"source_candidate_id": "boss-2", "raw_card_text": "Bob card"},
+                        ],
+                    }
+                )
+
+        self.assertEqual(len(self.repository.list_candidates()), 0)
+        self.assertEqual(len(self.repository.list_candidate_role_matches()), 0)
+        batches = self.repository.list_batches()
+        self.assertEqual(len(batches), 1)
+        batch_id = int(batches[0]["id"])
+        self.assertEqual(batches[0]["status"], "failed")
+        self.assertEqual(int(batches[0]["total_failed"]), 2)
+        self.assertEqual(self.repository.page_capture_batch_candidates(batch_id)["total"], 0)
+
+    def test_source_candidate_id_with_colon_is_namespaced_per_platform(self) -> None:
+        self.service.import_candidates(
+            {
+                "source_platform": "boss",
+                "candidates": [{"source_candidate_id": "user:123", "raw_card_text": "boss card"}],
+            }
+        )
+        self.service.import_candidates(
+            {
+                "source_platform": "liepin",
+                "candidates": [{"source_candidate_id": "user:123", "raw_card_text": "liepin card"}],
+            }
+        )
+
+        self.assertEqual(len(self.repository.list_candidates()), 2)
+
+    def test_mismatched_prefixed_source_candidate_id_does_not_cross_merge(self) -> None:
+        self.service.import_candidates(
+            {
+                "source_platform": "liepin",
+                "candidates": [{"source_candidate_id": "123", "raw_card_text": "liepin card"}],
+            }
+        )
+        self.service.import_candidates(
+            {
+                "source_platform": "boss",
+                "candidates": [{"source_candidate_id": "liepin:123", "raw_card_text": "boss card"}],
+            }
+        )
+
+        self.assertEqual(len(self.repository.list_candidates()), 2)
+
+    def test_same_platform_prefixed_source_candidate_id_still_deduplicates(self) -> None:
+        self.service.import_candidates(
+            {
+                "source_platform": "boss",
+                "candidates": [{"source_candidate_id": "boss:123", "raw_card_text": "first card"}],
+            }
+        )
+        result = self.service.import_candidates(
+            {
+                "source_platform": "boss",
+                "candidates": [{"source_candidate_id": "boss:123", "raw_card_text": "second card"}],
+            }
+        )
+
+        self.assertEqual(len(self.repository.list_candidates()), 1)
+        self.assertEqual(result["updated_candidates"], 1)
+
+    def test_structured_source_candidate_id_does_not_mix_with_explicit_platform_uid(self) -> None:
+        self.service.import_cards(
+            {
+                "job_title": "Boss 推荐牛人",
+                "source_url": "https://www.zhipin.com/web/geek/recommend",
+                "cards": [{"platform": "boss", "platform_uid": "boss:123", "raw_card_text": "extension card"}],
+            }
+        )
+        self.service.import_candidates(
+            {
+                "source_platform": "boss",
+                "candidates": [{"source_candidate_id": "boss:123", "raw_card_text": "web card"}],
+            }
+        )
+
+        self.assertEqual(len(self.repository.list_candidates()), 2)
+
+    def test_import_cards_statistics_are_conserved_for_new_update_skip_and_fail(self) -> None:
+        self.service.import_cards(
+            {
+                "job_title": "Recruiting Intern",
+                "source_url": "https://www.zhipin.com/web/geek/recommend",
+                "cards": [{"platform": "boss", "platform_uid": "seed-1", "raw_card_text": "seed card"}],
+            }
+        )
+        result = self.service.import_cards(
+            {
+                "job_title": "Recruiting Intern",
+                "source_url": "https://www.zhipin.com/web/geek/recommend",
+                "cards": [
+                    {"platform": "boss", "platform_uid": "new-1", "raw_card_text": "new card"},
+                    {"platform": "boss", "platform_uid": "new-1", "raw_card_text": "new card duplicate"},
+                    "invalid",
+                    {"platform": "boss", "platform_uid": "seed-1", "raw_card_text": "seed updated"},
+                ],
+            }
+        )
+
+        self.assertEqual(result["received_cards"], 4)
+        self.assertEqual(result["inserted_candidates"], 1)
+        self.assertEqual(result["updated_candidates"], 1)
+        self.assertEqual(result["skipped_candidates"], 1)
+        self.assertEqual(result["failed_candidates"], 1)
+        self.assertEqual(
+            result["received_cards"],
+            result["inserted_candidates"]
+            + result["updated_candidates"]
+            + result["skipped_candidates"]
+            + result["failed_candidates"],
+        )
+        batch = self.repository.get_capture_batch(int(result["batch_id"]))
+        assert batch is not None
+        self.assertEqual(int(batch["total_collected"]), 4)
+        self.assertEqual(int(batch["total_new"]), 1)
+        self.assertEqual(int(batch["total_updated"]), 1)
+        self.assertEqual(int(batch["total_skipped"]), 1)
+        self.assertEqual(int(batch["total_failed"]), 1)
+
+    def test_idempotent_reuse_closes_thread_connection(self) -> None:
+        payload = {
+            "source_platform": "boss",
+            "idempotency_key": "reuse-request",
+            "candidates": [{"source_candidate_id": "boss-1", "raw_card_text": "Alice card"}],
+        }
+
+        self.service.import_candidates(payload)
+        self.assertIsNone(getattr(self.db._local, "connection", None))
+        self.service.import_candidates(payload)
+        self.assertIsNone(getattr(self.db._local, "connection", None))
+
+    def test_idempotency_conflict_rolls_back_transaction_and_allows_followup_write(self) -> None:
+        connection = self.db.get_connection()
+        self.repository.claim_intake_batch(
+            "Trader",
+            "https://example.test/boss",
+            request_id="conflict-key",
+            request_payload_hash="hash-one",
+            source_platform="boss",
+        )
+
+        with self.assertRaises(IdempotencyConflictError):
+            self.repository.claim_intake_batch(
+                "Trader",
+                "https://example.test/boss",
+                request_id="conflict-key",
+                request_payload_hash="hash-two",
+                source_platform="boss",
+            )
+
+        self.assertFalse(connection.in_transaction)
+        self.db.close_thread_connection()
+
+        second_db = DatabaseManager(Path(self.temp_dir.name) / "test.db")
+        second_repository = CandidateRepository(second_db)
+        created = second_repository.create_batch("Followup", "https://example.test/next")
+        self.assertGreater(int(created.id), 0)
+        second_db.close_all_connections()
 
 
 if __name__ == "__main__":

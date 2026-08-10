@@ -334,6 +334,7 @@ class CandidateRepository:
                 False,
             )
         except sqlite3.IntegrityError:
+            connection.rollback()
             row = connection.execute(
                 "SELECT * FROM capture_batches WHERE request_id = ?",
                 (normalized_request_id,),
@@ -908,7 +909,13 @@ class CandidateRepository:
             total_failed,
         )
 
-    def upsert_batch_candidates(self, batch_id: int, candidates: Iterable[CandidateRecord]) -> dict[str, object]:
+    def upsert_batch_candidates(
+        self,
+        batch_id: int,
+        candidates: Iterable[CandidateRecord],
+        *,
+        role_id: int | None = None,
+    ) -> dict[str, object]:
         connection = self.db.get_connection()
         inserted_candidates = 0
         updated_candidates = 0
@@ -942,6 +949,12 @@ class CandidateRepository:
                     ingest_status = "updated"
                 profile_candidate.id = candidate_id
                 self._upsert_candidate_profile(connection, profile_candidate)
+                if role_id is not None:
+                    self._ensure_candidate_role_match_exists(
+                        connection,
+                        candidate_id=candidate_id,
+                        role_id=role_id,
+                    )
 
                 snapshot = CaptureBatchItem(
                     batch_id=batch_id,
@@ -1022,6 +1035,36 @@ class CandidateRepository:
             "inserted_batch_items": inserted_batch_items,
             "candidate_results": candidate_results,
         }
+
+    def _ensure_candidate_role_match_exists(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        candidate_id: int,
+        role_id: int,
+        timestamp: str | None = None,
+    ) -> None:
+        created_at = timestamp or now_iso()
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO candidate_role_matches(
+                candidate_id,
+                role_id,
+                latest_confidence,
+                match_status,
+                recruitment_status,
+                human_decision,
+                created_at,
+                updated_at
+            ) VALUES (?, ?, '', 'collected', 'collected', '', ?, ?)
+            """,
+            (
+                candidate_id,
+                role_id,
+                created_at,
+                created_at,
+            ),
+        )
 
     def list_candidates(
         self,
