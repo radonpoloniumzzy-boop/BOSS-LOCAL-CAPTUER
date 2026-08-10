@@ -288,6 +288,25 @@ function buildCollectionRunId() {
   return BossLocalWebIntake.createClientBatchId();
 }
 
+function createWebIntakeError(response, fallbackMessage) {
+  const error = new Error(response?.error || fallbackMessage);
+  error.code = String(response?.code || "");
+  return error;
+}
+
+function formatWebIntakeError(error) {
+  switch (String(error?.code || "")) {
+    case "storage_quota_exceeded":
+      return "网页入库缓存空间已满，请先清理或完成旧批次后再试。";
+    case "pending_limit_exceeded":
+      return "待发送批次已达到上限，请先完成发送或清理旧批次后再继续。";
+    case "network_error":
+      return "无法连接网页工作台，请确认本地网页工作台已启动。";
+    default:
+      return error?.message || String(error);
+  }
+}
+
 function syncModeHints(settings = collectSettings()) {
   const webMode = isWebWorkbenchMode(settings);
   automationAutoButton.textContent = webMode ? "AUTO：桌面兼容模式专用" : "AUTO：滚动采集 + AI 初筛";
@@ -322,7 +341,7 @@ async function queueAndSendWebBatch(settings, sourceUrl, merged, runId) {
     idempotencyKey: runId,
   });
   if (!response?.ok) {
-    throw new Error(response?.error || "网页工作台发送失败。");
+    throw createWebIntakeError(response, "网页工作台发送失败。");
   }
   await refreshWebIntakeStatus(settings);
   return response.record || null;
@@ -336,7 +355,7 @@ async function retryWebIntake() {
       settings: collectSettings(),
     });
     if (!response?.ok) {
-      throw new Error(response?.error || "网页入库重试失败。");
+      throw createWebIntakeError(response, "网页入库重试失败。");
     }
     const result = response.record || null;
     if (result?.message) {
@@ -460,9 +479,7 @@ async function runCollection(autoScroll, options = {}) {
       ].join("\n"),
     );
   } catch (error) {
-    setStatus(
-      `${webMode ? "发送到网页工作台失败" : "导入本地程序失败"}。\n${error.message || String(error)}`,
-    );
+    setStatus(`${webMode ? "发送到网页工作台失败" : "导入本地程序失败"}。\n${formatWebIntakeError(error)}`);
   }
 }
 

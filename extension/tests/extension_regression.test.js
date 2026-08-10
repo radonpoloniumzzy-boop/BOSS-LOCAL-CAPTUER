@@ -46,6 +46,11 @@ function createChromeMock() {
         existing.push({ name, options });
         this.__owner.__alarms = existing;
       },
+      async clear(name) {
+        const before = this.__owner.__alarms.length;
+        this.__owner.__alarms = this.__owner.__alarms.filter((item) => item.name !== name);
+        return before !== this.__owner.__alarms.length;
+      },
       __owner: null,
     },
     tabs: {
@@ -105,6 +110,16 @@ function createChromeMock() {
       },
     },
   };
+}
+
+function createDeferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
 }
 
 function createFetchMock(contentTypeByUrl = {}) {
@@ -1201,6 +1216,8 @@ async function testWebIntakeSameRunIdDoesNotDuplicatePendingBatch() {
 async function testWebIntakeConcurrentCompletionDoesNotOverwriteQueuedBatch() {
   const popup = createPopupTestContext({ apiBase: "http://127.0.0.1:17864", apiToken: "web-token" });
   const settings = { apiBase: "http://127.0.0.1:17864", apiToken: "web-token", jobTitle: "Boss ????" };
+  const fetchStarted = createDeferred();
+  const releaseFetch = createDeferred();
   const queuedA = await popup.context.BossLocalWebIntake.queueCapturedBatch({
     settings,
     merged: { platform: "boss", cards: [{ source_candidate_id: "boss-1", raw_card_text: "???A" }] },
@@ -1213,12 +1230,12 @@ async function testWebIntakeConcurrentCompletionDoesNotOverwriteQueuedBatch() {
     settings,
     batchKey: queuedA.batchKey,
     storageArea: popup.chrome.storage.local,
-    fetchImpl: () =>
-      new Promise((resolve) => {
-        resolveFetch = resolve;
-      }),
+    fetchImpl: () => {
+      fetchStarted.resolve();
+      return releaseFetch.promise;
+    },
   });
-  await Promise.resolve();
+  await fetchStarted.promise;
   const queuedB = await popup.context.BossLocalWebIntake.queueCapturedBatch({
     settings,
     merged: { platform: "boss", cards: [{ source_candidate_id: "boss-2", raw_card_text: "???B" }] },
@@ -1226,7 +1243,7 @@ async function testWebIntakeConcurrentCompletionDoesNotOverwriteQueuedBatch() {
     idempotencyKey: "concurrent-b",
     storageArea: popup.chrome.storage.local,
   });
-  resolveFetch({
+  releaseFetch.resolve({
     ok: true,
     status: 200,
     async json() {
@@ -1245,6 +1262,268 @@ async function testWebIntakeConcurrentCompletionDoesNotOverwriteQueuedBatch() {
   const state = await popup.context.BossLocalWebIntake.loadState(popup.chrome.storage.local);
   assert(state.pendingBatches[queuedB.batchKey]);
   assert.strictEqual(state.completedOrder.length, 1);
+}
+
+async function testSendingLeaseExpiryRecoversOnAlarm() {
+  const settings = { apiBase: "http://127.0.0.1:17864", apiToken: "lease-token", jobTitle: "Lease Test" };
+  const first = loadServiceWorker(async () => {
+    throw new Error("worker terminated before completion");
+  });
+  const queued = await first.context.BossLocalWebIntake.queueCapturedBatch({
+    settings,
+    merged: { platform: "boss", cards: [{ source_candidate_id: "lease-1", raw_card_text: "candidate-lease" }] },
+    sourceUrl: "https://www.zhipin.com/web/geek/recommend",
+    idempotencyKey: "lease-batch",
+    storageArea: first.chrome.storage.local,
+  });
+  await first.context.BossLocalWebIntake.upsertPendingRecord(
+    {
+      ...(await first.context.BossLocalWebIntake.readPendingRecord(queued.batchKey, first.chrome.storage.local)),
+      status: "sending",
+      attemptCount: 1,
+      sendingStartedAt: new Date(Date.now() - 120000).toISOString(),
+      leaseOwner: "dead-worker",
+      leaseExpiresAt: new Date(Date.now() - 60000).toISOString(),
+    },
+    first.chrome.storage.local,
+  );
+
+  const second = loadServiceWorker(async () => ({
+    ok: true,
+    status: 200,
+    async json() {
+      return {
+        batch_id: 601,
+        status: "completed",
+        received_count: 1,
+        inserted_candidates: 1,
+        updated_candidates: 0,
+        skipped_candidates: 0,
+        failed_candidates: 0,
+      };
+    },
+  }));
+  Object.assign(second.chrome.__store, first.chrome.__store, settings);
+  await second.chrome.__alarmListeners[0]({ name: second.context.BossLocalWebIntake.RETRY_ALARM_NAME });
+  await second.api.restorePendingWebIntake();
+  const state = await second.context.BossLocalWebIntake.loadState(second.chrome.storage.local);
+  assert.strictEqual(state.pendingOrder.length, 0);
+  assert.strictEqual(state.completedOrder.length, 1);
+}
+
+async function testSameBatchConcurrentSendLockTwentyTimes() {
+  for (let index = 0; index < 20; index += 1) {
+    let fetchCalls = 0;
+    const fetchStarted = createDeferred();
+    const releaseFetch = createDeferred();
+    const worker = loadServiceWorker(async () => {
+      fetchCalls += 1;
+      fetchStarted.resolve();
+      await releaseFetch.promise;
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {
+            batch_id: 700 + index,
+            status: "completed",
+            received_count: 1,
+            inserted_candidates: 1,
+            updated_candidates: 0,
+            skipped_candidates: 0,
+            failed_candidates: 0,
+          };
+        },
+      };
+    });
+    const settings = { apiBase: "http://127.0.0.1:17864", apiToken: "lock-token", jobTitle: "Lock Test" };
+    const payload = {
+      settings,
+      sourceUrl: "https://www.zhipin.com/web/geek/recommend",
+      merged: {
+        platform: "boss",
+        cards: [
+          {
+            source_candidate_id: `lock-${index}`,
+            detail_url: `https://www.zhipin.com/candidate/${index}`,
+            raw_card_text: `candidate-lock-${index}`,
+            name: `candidate-${index}`,
+          },
+        ],
+      },
+      idempotencyKey: `lock-batch-${index}`,
+    };
+
+    const firstSend = worker.api.enqueueAndSendWebIntake(payload);
+    await fetchStarted.promise;
+    const secondSend = worker.api.retryWebIntake(settings);
+    releaseFetch.resolve();
+    await Promise.all([firstSend, secondSend]);
+
+    const state = await worker.context.BossLocalWebIntake.loadState(worker.chrome.storage.local);
+    assert.strictEqual(fetchCalls, 1);
+    assert.strictEqual(state.pendingOrder.length, 0);
+    assert.strictEqual(state.completedOrder.length, 1);
+    const serialized = JSON.stringify(worker.chrome.__store);
+    assert(!serialized.includes(`candidate-lock-${index}`));
+    assert(!serialized.includes(`https://www.zhipin.com/candidate/${index}`));
+  }
+}
+
+async function testAutomaticRetryStopsAtMaxAndManualRetryStillWorks() {
+  let fetchCalls = 0;
+  const failingWorker = loadServiceWorker(async () => {
+    fetchCalls += 1;
+    throw new Error("network down");
+  });
+  const settings = { apiBase: "http://127.0.0.1:17864", apiToken: "retry-token", jobTitle: "Retry Test" };
+  Object.assign(failingWorker.chrome.__store, settings);
+  await failingWorker.api.enqueueAndSendWebIntake({
+    settings,
+    sourceUrl: "https://www.zhipin.com/web/geek/recommend",
+    merged: { platform: "boss", cards: [{ source_candidate_id: "retry-1", raw_card_text: "retry-candidate" }] },
+    idempotencyKey: "retry-batch",
+  });
+  await failingWorker.api.restorePendingWebIntake();
+  await failingWorker.api.restorePendingWebIntake();
+  await failingWorker.api.restorePendingWebIntake();
+  await failingWorker.api.restorePendingWebIntake();
+  assert.strictEqual(fetchCalls, 3);
+  assert(
+    !failingWorker.chrome.__alarms.some(
+      (alarm) => alarm.name === failingWorker.context.BossLocalWebIntake.RETRY_ALARM_NAME,
+    ),
+  );
+
+  const pendingBeforeManual = await failingWorker.context.BossLocalWebIntake.currentRecordForConnection(
+    settings,
+    failingWorker.chrome.storage.local,
+  );
+  assert.strictEqual(pendingBeforeManual.status, "failed");
+
+  const recoveredWorker = loadServiceWorker(async () => ({
+    ok: true,
+    status: 200,
+    async json() {
+      return {
+        batch_id: 801,
+        status: "completed",
+        received_count: 1,
+        inserted_candidates: 1,
+        updated_candidates: 0,
+        skipped_candidates: 0,
+        failed_candidates: 0,
+      };
+    },
+  }));
+  Object.assign(recoveredWorker.chrome.__store, failingWorker.chrome.__store, settings);
+  await recoveredWorker.api.retryWebIntake(settings);
+  const state = await recoveredWorker.context.BossLocalWebIntake.loadState(recoveredWorker.chrome.storage.local);
+  assert.strictEqual(state.pendingOrder.length, 0);
+  assert.strictEqual(state.completedOrder.length, 1);
+}
+
+async function testLegacyV2MigrationSanitizesSensitiveData() {
+  const worker = loadServiceWorker();
+  worker.chrome.__store[worker.context.BossLocalWebIntake.LEGACY_STATE_KEY] = {
+    pendingBatches: {
+      "legacy-pending": {
+        batchKey: "legacy-pending",
+        idempotencyKey: "legacy-idem-1",
+        connection: { mode: "web", apiBase: "http://127.0.0.1:17864", webApiBase: "http://127.0.0.1:17864" },
+        payload: {
+          candidates: [
+            {
+              name: "Legacy Name",
+              raw_card_text: "Legacy Raw Card",
+              detail_url: "https://www.zhipin.com/candidate/legacy",
+            },
+          ],
+        },
+      },
+    },
+    completedBatches: {
+      "legacy-completed": {
+        batchKey: "legacy-completed",
+        idempotencyKey: "legacy-idem-2",
+        payload: {
+          candidates: [
+            {
+              name: "Completed Name",
+              raw_card_text: "Completed Raw Card",
+              detail_url: "https://www.zhipin.com/candidate/completed",
+            },
+          ],
+        },
+        webResult: { batch_id: 901, status: "completed", received_count: 1 },
+      },
+    },
+  };
+  const state = await worker.context.BossLocalWebIntake.loadState(worker.chrome.storage.local);
+  const pending = state.pendingBatches["legacy-pending"];
+  assert.strictEqual(Boolean(pending), true);
+  assert.strictEqual(pending.statusLabel, "等待原连接");
+  assert.strictEqual(worker.chrome.__store[worker.context.BossLocalWebIntake.LEGACY_STATE_KEY], undefined);
+  const serialized = JSON.stringify(worker.chrome.__store);
+  assert(!serialized.includes("Legacy Name"));
+  assert(!serialized.includes("Legacy Raw Card"));
+  assert(!serialized.includes("Completed Name"));
+  assert(!serialized.includes("Completed Raw Card"));
+  assert(!serialized.includes("candidate/completed"));
+}
+
+async function testPendingLimitConcurrentEnqueueStaysWithinTen() {
+  const settings = { apiBase: "http://127.0.0.1:17864", apiToken: "limit-token", jobTitle: "Limit Test" };
+  const fetchStarted = createDeferred();
+  const releaseFetch = createDeferred();
+  const worker = loadServiceWorker(async () => {
+    fetchStarted.resolve();
+    await releaseFetch.promise;
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return {
+          batch_id: 951,
+          status: "completed",
+          received_count: 1,
+          inserted_candidates: 1,
+          updated_candidates: 0,
+          skipped_candidates: 0,
+          failed_candidates: 0,
+        };
+      },
+    };
+  });
+  for (let index = 0; index < 9; index += 1) {
+    await worker.context.BossLocalWebIntake.queueCapturedBatch({
+      settings,
+      merged: { platform: "boss", cards: [{ source_candidate_id: `base-${index}`, raw_card_text: `base-${index}` }] },
+      sourceUrl: "https://www.zhipin.com/web/geek/recommend",
+      idempotencyKey: `base-batch-${index}`,
+      storageArea: worker.chrome.storage.local,
+    });
+  }
+
+  const firstPromise = worker.api.enqueueAndSendWebIntake({
+    settings,
+    sourceUrl: "https://www.zhipin.com/web/geek/recommend",
+    merged: { platform: "boss", cards: [{ source_candidate_id: "limit-a", raw_card_text: "limit-a" }] },
+    idempotencyKey: "limit-a",
+  });
+  await fetchStarted.promise;
+  const secondResult = await worker.api.enqueueAndSendWebIntake({
+    settings,
+    sourceUrl: "https://www.zhipin.com/web/geek/recommend",
+    merged: { platform: "boss", cards: [{ source_candidate_id: "limit-b", raw_card_text: "limit-b" }] },
+    idempotencyKey: "limit-b",
+  });
+  const midState = await worker.context.BossLocalWebIntake.loadState(worker.chrome.storage.local);
+  assert(midState.pendingOrder.length <= 10);
+  assert.strictEqual(secondResult.ok, false);
+  assert.strictEqual(secondResult.code, "pending_limit_exceeded");
+  releaseFetch.resolve();
+  await firstPromise;
 }
 
 async function testWebIntakeSuccessSanitizesCompletedPayload() {
@@ -1620,6 +1899,11 @@ async function main() {
   await testWebIntakeConnectionChangeDoesNotResendOldPendingBatch();
   await testWebIntakeSameRunIdDoesNotDuplicatePendingBatch();
   await testWebIntakeConcurrentCompletionDoesNotOverwriteQueuedBatch();
+  await testSendingLeaseExpiryRecoversOnAlarm();
+  await testSameBatchConcurrentSendLockTwentyTimes();
+  await testAutomaticRetryStopsAtMaxAndManualRetryStillWorks();
+  await testLegacyV2MigrationSanitizesSensitiveData();
+  await testPendingLimitConcurrentEnqueueStaysWithinTen();
   await testWebIntakeSuccessSanitizesCompletedPayload();
   await testWebIntakeQuotaFailureIsReportedSeparately();
   await testServiceWorkerRestoresPendingBatchViaAlarm();

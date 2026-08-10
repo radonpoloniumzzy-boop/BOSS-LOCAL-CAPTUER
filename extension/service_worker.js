@@ -42,6 +42,7 @@ const DEFAULT_BATCH_STATUS = {
 };
 const STOP_GUARD_MS = 10 * 60 * 1000;
 const stoppedBatchTabs = new Map();
+let webIntakeOperationQueue = Promise.resolve();
 
 chrome.runtime.onInstalled.addListener(() => {
   void ensureBatchStatus();
@@ -57,7 +58,7 @@ chrome.runtime.onStartup.addListener(() => {
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm?.name === globalThis.BossLocalWebIntake?.RETRY_ALARM_NAME) {
-    void restorePendingWebIntake();
+    void withWebIntakeQueue(() => restorePendingWebIntake());
   }
 });
 
@@ -1055,14 +1056,37 @@ async function scheduleWebIntakeRetryAlarm() {
   });
 }
 
+async function clearWebIntakeRetryAlarm() {
+  const alarmName = globalThis.BossLocalWebIntake?.RETRY_ALARM_NAME;
+  if (!alarmName || typeof chrome.alarms.clear !== "function") {
+    return;
+  }
+  await chrome.alarms.clear(alarmName);
+}
+
+function withWebIntakeQueue(work) {
+  const next = webIntakeOperationQueue.then(work, work);
+  webIntakeOperationQueue = next.then(
+    () => undefined,
+    () => undefined,
+  );
+  return next;
+}
+
 async function restorePendingWebIntake() {
   if (!globalThis.BossLocalWebIntake?.processPendingBatches) {
     return [];
   }
   try {
-    return await globalThis.BossLocalWebIntake.processPendingBatches({
+    const processed = await globalThis.BossLocalWebIntake.processPendingBatches({
       storageArea: chrome.storage.local,
     });
+    if (await globalThis.BossLocalWebIntake.hasAutoRetryablePending(chrome.storage.local)) {
+      await scheduleWebIntakeRetryAlarm();
+    } else {
+      await clearWebIntakeRetryAlarm();
+    }
+    return processed;
   } catch (_error) {
     return [];
   }
@@ -1088,13 +1112,15 @@ async function enqueueAndSendWebIntake(message) {
     return { ok: false, error: "web intake unavailable" };
   }
   try {
-    const queued = await globalThis.BossLocalWebIntake.queueCapturedBatch({
-      settings: message.settings || {},
-      merged: message.merged || {},
-      sourceUrl: message.sourceUrl || "",
-      idempotencyKey: message.idempotencyKey || "",
-      storageArea: chrome.storage.local,
-    });
+    const queued = await withWebIntakeQueue(async () =>
+      globalThis.BossLocalWebIntake.queueCapturedBatch({
+        settings: message.settings || {},
+        merged: message.merged || {},
+        sourceUrl: message.sourceUrl || "",
+        idempotencyKey: message.idempotencyKey || "",
+        storageArea: chrome.storage.local,
+      }),
+    );
     if (!queued) {
       return { ok: true, record: null };
     }
@@ -1103,12 +1129,20 @@ async function enqueueAndSendWebIntake(message) {
       batchKey: queued.batchKey,
       storageArea: chrome.storage.local,
     });
-    if (String(sent?.status || "") === "waiting_retry") {
-      await scheduleWebIntakeRetryAlarm();
-    }
+    await withWebIntakeQueue(async () => {
+      if (await globalThis.BossLocalWebIntake.hasAutoRetryablePending(chrome.storage.local)) {
+        await scheduleWebIntakeRetryAlarm();
+      } else {
+        await clearWebIntakeRetryAlarm();
+      }
+    });
     return { ok: true, record: sent };
   } catch (error) {
-    return { ok: false, error: error?.message || String(error) };
+    return {
+      ok: false,
+      code: String(error?.code || ""),
+      error: error?.message || String(error),
+    };
   }
 }
 
@@ -1121,12 +1155,20 @@ async function retryWebIntake(settings) {
       settings,
       storageArea: chrome.storage.local,
     });
-    if (String(record?.status || "") === "waiting_retry") {
-      await scheduleWebIntakeRetryAlarm();
-    }
+    await withWebIntakeQueue(async () => {
+      if (await globalThis.BossLocalWebIntake.hasAutoRetryablePending(chrome.storage.local)) {
+        await scheduleWebIntakeRetryAlarm();
+      } else {
+        await clearWebIntakeRetryAlarm();
+      }
+    });
     return { ok: true, record };
   } catch (error) {
-    return { ok: false, error: error?.message || String(error) };
+    return {
+      ok: false,
+      code: String(error?.code || ""),
+      error: error?.message || String(error),
+    };
   }
 }
 

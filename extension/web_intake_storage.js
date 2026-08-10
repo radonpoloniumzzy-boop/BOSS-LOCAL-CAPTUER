@@ -1,9 +1,7 @@
 (function (globalThis) {
-  const {
-    sameConnectionIdentity,
-    connectionIdentity,
-  } = globalThis.BossLocalWebIntakeIdentity;
+  const { sameConnectionIdentity, connectionIdentity } = globalThis.BossLocalWebIntakeIdentity;
 
+  const LEGACY_STATE_KEY = "boss_web_intake_state_v2";
   const PENDING_PREFIX = "boss_web_intake_pending_v4:";
   const COMPLETED_PREFIX = "boss_web_intake_completed_v4:";
   const MAX_PENDING_BATCHES = 10;
@@ -30,8 +28,13 @@
   }
 
   function isQuotaError(error) {
-    const message = String(error?.message || error || "").toLowerCase();
-    return message.includes("quota") || message.includes("max") || message.includes("space");
+    const message = String(error?.message || error || "");
+    return (
+      /QUOTA_BYTES/i.test(message)
+      || /MAX_ITEMS/i.test(message)
+      || /quota exceeded/i.test(message)
+      || /exceeds the quota/i.test(message)
+    );
   }
 
   async function withStorageWrite(operation) {
@@ -41,7 +44,7 @@
       if (isQuotaError(error)) {
         throw new WebIntakeStorageError(
           "storage_quota_exceeded",
-          "扩展本地缓存空间已满，无法继续暂存待发送批次。请完成发送或清理历史记录后再试。",
+          "扩展本地缓存空间已满，无法继续暂存待发送批次。请先完成发送或清理历史记录后再试。",
         );
       }
       throw error;
@@ -73,24 +76,6 @@
     };
   }
 
-  async function loadState(storageArea) {
-    const area = storageArea || chrome.storage.local;
-    const entries = await area.get(null);
-    return parseStoredEntries(entries);
-  }
-
-  async function enforcePendingLimit(storageArea, state, batchKey) {
-    if (state.pendingBatches[batchKey]) {
-      return;
-    }
-    if (state.pendingOrder.length >= MAX_PENDING_BATCHES) {
-      throw new WebIntakeStorageError(
-        "pending_limit_exceeded",
-        `待发送批次已达到上限 ${MAX_PENDING_BATCHES}，请先完成发送或清理旧批次后再继续。`,
-      );
-    }
-  }
-
   function sanitizeCompletedRecord(record) {
     const safeResult = record?.webResult || {};
     return {
@@ -119,10 +104,119 @@
     };
   }
 
+  function sanitizeLegacyCompletedRecord(record, fallbackBatchKey) {
+    return sanitizeCompletedRecord({
+      batchKey: String(record?.batchKey || fallbackBatchKey || ""),
+      idempotencyKey: String(record?.idempotencyKey || record?.idempotency_key || ""),
+      connection: record?.connection || null,
+      status: String(record?.status || ""),
+      statusLabel: String(record?.statusLabel || ""),
+      message: String(record?.message || ""),
+      errorCode: String(record?.errorCode || ""),
+      createdAt: String(record?.createdAt || nowIso()),
+      updatedAt: String(record?.updatedAt || nowIso()),
+      webResult: record?.webResult || record?.result || {},
+    });
+  }
+
+  function sanitizeLegacyPendingRecord(record, fallbackBatchKey) {
+    const connection = record?.connection || null;
+    const safe = {
+      ...record,
+      batchKey: String(record?.batchKey || fallbackBatchKey || ""),
+      idempotencyKey: String(record?.idempotencyKey || record?.idempotency_key || ""),
+      createdAt: String(record?.createdAt || nowIso()),
+      updatedAt: String(record?.updatedAt || nowIso()),
+      attemptCount: Number(record?.attemptCount || 0),
+      status: String(record?.status || "pending"),
+      statusLabel: String(record?.statusLabel || "等待发送"),
+      message: String(record?.message || "采集批次已完成，等待发送到网页工作台。"),
+      errorCode: String(record?.errorCode || ""),
+      connection,
+    };
+    if (
+      !connection
+      || !String(connection.mode || "")
+      || !String(connection.apiBase || "")
+      || !String(connection.webApiBase || "")
+      || !String(connection.tokenDigest || "")
+    ) {
+      safe.status = "failed";
+      safe.statusLabel = "等待原连接";
+      safe.message = "该旧批次缺少可验证的连接身份，已阻止自动重发，请切回原连接后手动处理。";
+      safe.payload = null;
+    }
+    return safe;
+  }
+
+  async function migrateLegacyState(storageArea) {
+    const area = storageArea || chrome.storage.local;
+    const allEntries = await area.get(null);
+    const legacy = allEntries[LEGACY_STATE_KEY];
+    if (!legacy || typeof legacy !== "object") {
+      return;
+    }
+
+    const state = parseStoredEntries(allEntries);
+    const pendingWrites = {};
+    const completedWrites = {};
+    const completedRemovals = [];
+
+    for (const [batchKey, record] of Object.entries(legacy.pendingBatches || {})) {
+      const finalBatchKey = String(record?.batchKey || batchKey);
+      if (state.pendingBatches[finalBatchKey] || state.completedBatches[finalBatchKey]) {
+        continue;
+      }
+      pendingWrites[pendingStorageKey(finalBatchKey)] = sanitizeLegacyPendingRecord(record, finalBatchKey);
+    }
+
+    for (const [batchKey, record] of Object.entries(legacy.completedBatches || {})) {
+      const finalBatchKey = String(record?.batchKey || batchKey);
+      if (state.completedBatches[finalBatchKey]) {
+        continue;
+      }
+      completedWrites[completedStorageKey(finalBatchKey)] = sanitizeLegacyCompletedRecord(record, finalBatchKey);
+    }
+
+    const writes = { ...pendingWrites, ...completedWrites };
+    if (Object.keys(writes).length) {
+      await withStorageWrite(() => area.set(writes));
+    }
+    await area.remove(LEGACY_STATE_KEY);
+
+    const migrated = parseStoredEntries(await area.get(null));
+    const overflow = migrated.completedOrder.slice(MAX_COMPLETED_BATCHES);
+    if (overflow.length) {
+      completedRemovals.push(...overflow.map((batchKey) => completedStorageKey(batchKey)));
+    }
+    if (completedRemovals.length) {
+      await area.remove(completedRemovals);
+    }
+  }
+
+  async function loadState(storageArea) {
+    const area = storageArea || chrome.storage.local;
+    await migrateLegacyState(area);
+    const entries = await area.get(null);
+    return parseStoredEntries(entries);
+  }
+
+  async function enforcePendingLimit(state, batchKey) {
+    if (state.pendingBatches[batchKey] || state.completedBatches[batchKey]) {
+      return;
+    }
+    if (state.pendingOrder.length >= MAX_PENDING_BATCHES) {
+      throw new WebIntakeStorageError(
+        "pending_limit_exceeded",
+        `待发送批次已达到上限 ${MAX_PENDING_BATCHES}，请先完成发送或清理旧批次后再继续。`,
+      );
+    }
+  }
+
   async function upsertPendingRecord(record, storageArea) {
     const area = storageArea || chrome.storage.local;
     const state = await loadState(area);
-    await enforcePendingLimit(area, state, record.batchKey);
+    await enforcePendingLimit(state, record.batchKey);
     await withStorageWrite(() => area.set({ [pendingStorageKey(record.batchKey)]: record }));
     return record;
   }
@@ -174,6 +268,7 @@
   }
 
   globalThis.BossLocalWebIntakeStorage = {
+    LEGACY_STATE_KEY,
     PENDING_PREFIX,
     COMPLETED_PREFIX,
     MAX_PENDING_BATCHES,
@@ -181,6 +276,7 @@
     WebIntakeStorageError,
     pendingStorageKey,
     completedStorageKey,
+    sanitizeCompletedRecord,
     loadState,
     upsertPendingRecord,
     removePendingRecord,
@@ -188,6 +284,6 @@
     readPendingRecord,
     readCompletedRecord,
     currentRecordForConnection,
-    sanitizeCompletedRecord,
+    migrateLegacyState,
   };
 })(globalThis);
