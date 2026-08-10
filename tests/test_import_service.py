@@ -5,10 +5,11 @@ import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import patch
 
 from automation.importer import CardImportService
 from automation.parser import CandidateParser
-from core.models import JobProfile
+from core.models import JobProfile, RecruitmentTask
 from storage.db import DatabaseManager
 from storage.repository import CandidateRepository, IdempotencyConflictError
 
@@ -25,6 +26,20 @@ class CardImportServiceTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.db.close_all_connections()
         self.temp_dir.cleanup()
+
+    def _assert_thread_connection_closed_and_db_writable(self) -> None:
+        self.assertIsNone(getattr(self.db._local, "connection", None))
+        batch = self.repository.create_batch("Followup", "https://example.test/followup")
+        self.assertGreater(int(batch.id), 0)
+        self.db.close_thread_connection()
+
+    def _assert_batch_count(self, expected: int) -> None:
+        probe_db = DatabaseManager(self.db.db_path)
+        try:
+            probe_repository = CandidateRepository(probe_db)
+            self.assertEqual(len(probe_repository.list_batches()), expected)
+        finally:
+            probe_db.close_all_connections()
 
     def test_import_cards_creates_batch_and_candidates(self) -> None:
         profile = self.repository.save_job_profile(
@@ -522,7 +537,7 @@ class CardImportServiceTest(unittest.TestCase):
                 raise RuntimeError("bind failed")
             return original(*args, **kwargs)
 
-        with unittest.mock.patch.object(
+        with patch.object(
             self.repository,
             "_ensure_candidate_role_match_exists",
             side_effect=fail_on_second,
@@ -694,6 +709,188 @@ class CardImportServiceTest(unittest.TestCase):
         created = second_repository.create_batch("Followup", "https://example.test/next")
         self.assertGreater(int(created.id), 0)
         second_db.close_all_connections()
+
+    def test_import_cards_invalid_job_profile_id_releases_connection_and_creates_no_batch(self) -> None:
+        with self.assertRaises(ValueError):
+            self.service.import_cards(
+                {
+                    "job_profile_id": 999999,
+                    "job_title": "Missing Role",
+                    "source_url": "https://www.zhipin.com/web/geek/recommend",
+                    "cards": [{"raw_card_text": "Alice card", "name": "Alice"}],
+                }
+            )
+
+        self._assert_batch_count(0)
+        self._assert_thread_connection_closed_and_db_writable()
+
+    def test_import_cards_paused_matching_title_releases_connection_and_creates_no_batch(self) -> None:
+        profile = self.repository.save_job_profile(
+            JobProfile(job_title="Paused Role", jd_text="", prompt_text="", status="active")
+        )
+        self.repository.set_job_profile_status(int(profile.id), "paused")
+
+        with self.assertRaises(ValueError):
+            self.service.import_cards(
+                {
+                    "job_title": "Paused Role",
+                    "source_url": "https://www.zhipin.com/web/geek/recommend",
+                    "cards": [{"raw_card_text": "Alice card", "name": "Alice"}],
+                }
+            )
+
+        self._assert_batch_count(0)
+        self._assert_thread_connection_closed_and_db_writable()
+
+    def test_import_candidates_missing_job_profile_releases_connection_and_creates_no_batch(self) -> None:
+        with self.assertRaises(ValueError):
+            self.service.import_candidates(
+                {
+                    "source_platform": "boss",
+                    "job_profile_id": 999999,
+                    "candidates": [{"source_candidate_id": "boss-1", "raw_card_text": "Alice card"}],
+                }
+            )
+
+        self._assert_batch_count(0)
+        self._assert_thread_connection_closed_and_db_writable()
+
+    def test_import_candidates_paused_job_profile_releases_connection_and_creates_no_batch(self) -> None:
+        profile = self.repository.save_job_profile(
+            JobProfile(job_title="Paused Candidate Role", jd_text="", prompt_text="", status="active")
+        )
+        self.repository.set_job_profile_status(int(profile.id), "paused")
+
+        with self.assertRaises(ValueError):
+            self.service.import_candidates(
+                {
+                    "source_platform": "boss",
+                    "job_profile_id": profile.id,
+                    "candidates": [{"source_candidate_id": "boss-1", "raw_card_text": "Alice card"}],
+                }
+            )
+
+        self._assert_batch_count(0)
+        self._assert_thread_connection_closed_and_db_writable()
+
+    def test_import_candidates_task_mismatch_releases_connection_and_creates_no_batch(self) -> None:
+        first_role = self.repository.save_job_profile(
+            JobProfile(job_title="First Role", jd_text="", prompt_text="", status="active")
+        )
+        second_role = self.repository.save_job_profile(
+            JobProfile(job_title="Second Role", jd_text="", prompt_text="", status="active")
+        )
+        task = self.repository.save_recruitment_task(
+            RecruitmentTask(
+                name="Role Task",
+                role_id=int(first_role.id),
+                platform="boss",
+                source_url="https://www.zhipin.com/web/geek/recommend",
+            )
+        )
+        self.repository.set_recruitment_task_status(int(task.id), "running")
+
+        with self.assertRaises(ValueError):
+            self.service.import_candidates(
+                {
+                    "source_platform": "boss",
+                    "job_profile_id": second_role.id,
+                    "recruitment_task_id": task.id,
+                    "candidates": [{"source_candidate_id": "boss-1", "raw_card_text": "Alice card"}],
+                }
+            )
+
+        self._assert_batch_count(0)
+        self._assert_thread_connection_closed_and_db_writable()
+
+    def test_raw_source_candidate_id_and_explicit_platform_uid_merge_when_semantically_same(self) -> None:
+        self.service.import_cards(
+            {
+                "job_title": "Boss 推荐牛人",
+                "source_url": "https://www.zhipin.com/web/geek/recommend",
+                "cards": [{"platform": "boss", "platform_uid": "boss:123", "raw_card_text": "extension card"}],
+            }
+        )
+        result = self.service.import_candidates(
+            {
+                "source_platform": "boss",
+                "candidates": [{"source_candidate_id": "123", "raw_card_text": "web card"}],
+            }
+        )
+
+        self.assertEqual(len(self.repository.list_candidates()), 1)
+        self.assertEqual(result["updated_candidates"], 1)
+
+    def test_import_cards_reports_partial_status_and_unique_candidates(self) -> None:
+        self.service.import_cards(
+            {
+                "job_title": "Recruiting Intern",
+                "source_url": "https://www.zhipin.com/web/geek/recommend",
+                "cards": [{"platform": "boss", "platform_uid": "seed-1", "raw_card_text": "seed card"}],
+            }
+        )
+        result = self.service.import_cards(
+            {
+                "job_title": "Recruiting Intern",
+                "source_url": "https://www.zhipin.com/web/geek/recommend",
+                "cards": [
+                    {"platform": "boss", "platform_uid": "new-1", "raw_card_text": "new card"},
+                    {"platform": "boss", "platform_uid": "new-1", "raw_card_text": "new card duplicate"},
+                    "invalid",
+                    {"platform": "boss", "platform_uid": "seed-1", "raw_card_text": "seed updated"},
+                ],
+            }
+        )
+
+        self.assertEqual(result["received_cards"], 4)
+        self.assertEqual(result["inserted_candidates"], 1)
+        self.assertEqual(result["updated_candidates"], 1)
+        self.assertEqual(result["skipped_candidates"], 1)
+        self.assertEqual(result["failed_candidates"], 1)
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["total_unique"], 2)
+        self.assertEqual(result["total_batch_items"], 2)
+        batch = self.repository.get_capture_batch(int(result["batch_id"]))
+        assert batch is not None
+        self.assertEqual(str(batch["status"]), "partial")
+
+    def test_import_cards_all_valid_records_finish_completed(self) -> None:
+        result = self.service.import_cards(
+            {
+                "job_title": "Recruiting Intern",
+                "source_url": "https://www.zhipin.com/web/geek/recommend",
+                "cards": [
+                    {"platform": "boss", "platform_uid": "boss:1", "raw_card_text": "first card"},
+                    {"platform": "boss", "platform_uid": "boss:2", "raw_card_text": "second card"},
+                ],
+            }
+        )
+
+        batch = self.repository.get_capture_batch(int(result["batch_id"]))
+        assert batch is not None
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(str(batch["status"]), "completed")
+        self.assertEqual(result["failed_candidates"], 0)
+        self.assertEqual(result["total_unique"], 2)
+
+    def test_import_cards_unhandled_exception_marks_batch_failed(self) -> None:
+        with patch.object(
+            self.repository,
+            "upsert_batch_candidates",
+            side_effect=RuntimeError("boom"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "boom"):
+                self.service.import_cards(
+                    {
+                        "job_title": "Recruiting Intern",
+                        "source_url": "https://www.zhipin.com/web/geek/recommend",
+                        "cards": [{"platform": "boss", "platform_uid": "boss:1", "raw_card_text": "first card"}],
+                    }
+                )
+
+        batches = self.repository.list_batches()
+        self.assertEqual(len(batches), 1)
+        self.assertEqual(str(batches[0]["status"]), "failed")
 
 
 if __name__ == "__main__":

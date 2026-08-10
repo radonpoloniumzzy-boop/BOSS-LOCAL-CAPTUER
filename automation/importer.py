@@ -37,8 +37,6 @@ class CardImportService:
             str(meta.get("platform") or ""),
             source_url,
         )
-        job_profile = self._resolve_job_profile(payload, job_title)
-        explicit_job_profile = payload.get("job_profile_id") not in (None, "")
         request_id = normalize_text(str(payload.get("idempotency_key") or ""))
         request_payload_hash = self._payload_hash(payload)
         task_id = self._optional_int(payload.get("recruitment_task_id"))
@@ -46,10 +44,11 @@ class CardImportService:
         batch = None
         parsed_records: list[CandidateRecord] = []
         parse_failures = 0
-        status = "completed"
         message = "已从 Chrome 扩展导入候选人卡片。"
 
         try:
+            job_profile = self._resolve_job_profile(payload, job_title)
+            explicit_job_profile = payload.get("job_profile_id") not in (None, "")
             batch, reused = self.repository.claim_intake_batch(
                 job_title,
                 source_url,
@@ -92,10 +91,23 @@ class CardImportService:
                 role_id=(int(job_profile["id"]) if explicit_job_profile and job_profile is not None else None),
             )
             failed_candidates = parse_failures + int(repo_result["failed_candidates"])
+            succeeded_or_skipped = (
+                int(repo_result["inserted_candidates"])
+                + int(repo_result["updated_candidates"])
+                + int(repo_result["skipped_candidates"])
+            )
+            if failed_candidates == 0:
+                status = "completed"
+            elif succeeded_or_skipped > 0:
+                status = "partial"
+            else:
+                status = "failed"
+
+            total_unique = int(repo_result["inserted_candidates"]) + int(repo_result["updated_candidates"])
             result = CaptureRunResult(
                 batch_id=batch.id,
                 status=status,
-                total_unique=len(parsed_records),
+                total_unique=total_unique,
                 total_inserted_candidates=repo_result["inserted_candidates"],
                 total_batch_items=repo_result["inserted_batch_items"],
                 rounds_completed=int(meta.get("rounds_completed") or 0),
@@ -117,6 +129,9 @@ class CardImportService:
                     "received_cards": len(cards),
                     "parsed_cards": len(parsed_records),
                     "inserted_candidates": repo_result["inserted_candidates"],
+                    "updated_candidates": repo_result["updated_candidates"],
+                    "skipped_candidates": repo_result["skipped_candidates"],
+                    "failed_candidates": failed_candidates,
                     "source": "chrome_extension",
                     "source_platform": source_platform,
                     "job_title": job_title,
@@ -124,25 +139,20 @@ class CardImportService:
                     "recruitment_task_id": batch.task_id,
                     "source_url": source_url,
                     "automation_requested": bool(meta.get("automation_requested")),
-                    "updated_candidates": repo_result["updated_candidates"],
-                    "skipped_candidates": repo_result["skipped_candidates"],
-                    "failed_candidates": failed_candidates,
                 }
             )
             return response
         except Exception as exc:
-            status = "failed"
-            message = str(exc)
             if batch is not None:
                 self.repository.finalize_batch(
                     batch_id=batch.id,
-                    status=status,
+                    status="failed",
                     total_collected=len(cards),
                     total_new=0,
                     total_updated=0,
                     total_skipped=0,
                     total_failed=len(cards),
-                    note=message,
+                    note=str(exc),
                 )
             self._log(
                 "exception",
@@ -169,17 +179,18 @@ class CardImportService:
         request_payload_hash = self._payload_hash(payload)
         role_id = self._optional_int(payload.get("job_profile_id"))
         task_id = self._optional_int(payload.get("recruitment_task_id"))
-        job_profile = self.repository.get_job_profile(role_id) if role_id is not None else None
-        if role_id is not None and job_profile is None:
-            raise ValueError("岗位档案不存在。")
-        if job_profile is not None and str(job_profile.get("status") or "") != "active":
-            raise ValueError("所选岗位档案不是招聘中状态，不能用于自动入库。")
 
         batch = None
         records: list[CandidateRecord] = []
         failures: list[dict[str, object]] = []
 
         try:
+            job_profile = self.repository.get_job_profile(role_id) if role_id is not None else None
+            if role_id is not None and job_profile is None:
+                raise ValueError("岗位档案不存在。")
+            if job_profile is not None and str(job_profile.get("status") or "") != "active":
+                raise ValueError("所选岗位档案不是招聘中状态，不能用于自动入库。")
+
             batch, reused = self.repository.claim_intake_batch(
                 job_title,
                 source_url,
@@ -309,10 +320,7 @@ class CardImportService:
         )
         source_candidate_id = normalize_text(str(item.get("source_candidate_id") or ""))
         detail_url = normalize_text(str(item.get("detail_url") or ""))
-        platform_uid = self.parser.canonicalize_source_candidate_id(
-            source_platform,
-            source_candidate_id,
-        )
+        platform_uid = self.parser.canonicalize_source_candidate_id(source_platform, source_candidate_id)
         name = normalize_text(str(item.get("name") or ""))
         expected_salary = normalize_text(str(item.get("expected_salary") or ""))
         work_experience_text = normalize_text(str(item.get("work_experience_text") or ""))
