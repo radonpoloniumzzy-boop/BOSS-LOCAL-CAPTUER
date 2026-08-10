@@ -234,10 +234,16 @@
       <div id="batchLog" class="status-box">No runtime log yet.</div>
     </div>
 
+    <div class="row" style="margin-top: 8px;">
+      <button id="retryWebIntake" type="button">重新发送到网页工作台</button>
+      <button id="openWebWorkbench" type="button">打开网页工作台</button>
+    </div>
+    <div id="webIntakeStatus" class="status-box">网页入库：等待发送。</div>
     <div id="status" class="status-box">就绪。</div>
 
     <script src="pairing.js"></script>
     <script src="batch_export.js"></script>
+    <script src="web_intake.js"></script>
     <script src="popup.js"></script>
   </body>
 </html>

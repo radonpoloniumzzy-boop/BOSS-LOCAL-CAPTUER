@@ -166,6 +166,56 @@ class CandidateIntakeWebApiTest(unittest.TestCase):
         self.assertEqual(len(unbound_rows), 1)
         self.assertFalse(bool(unbound_rows[0]["has_role_binding"]))
 
+    def test_candidate_intake_accepts_explicit_platform_uid_without_raw_source_id(self) -> None:
+        first = self.client.post(
+            "/api/intake/candidates",
+            json={
+                "source_platform": "boss",
+                "idempotency_key": "platform-uid-intake",
+                "candidates": [{"platform_uid": "boss:123", "raw_card_text": "Alice card"}],
+            },
+            headers=self._headers(),
+        )
+        second = self.client.post(
+            "/api/intake/candidates",
+            json={
+                "source_platform": "boss",
+                "idempotency_key": "platform-uid-intake-update",
+                "candidates": [{"platform_uid": "boss:123", "raw_card_text": "Alice updated card"}],
+            },
+            headers=self._headers(),
+        )
+
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(second.status_code, 200, second.text)
+        self.assertEqual(first.json()["inserted_candidates"], 1)
+        self.assertEqual(second.json()["updated_candidates"], 1)
+
+    def test_candidate_intake_keeps_prefixed_raw_source_id_separate_from_explicit_platform_uid(self) -> None:
+        first = self.client.post(
+            "/api/intake/candidates",
+            json={
+                "source_platform": "boss",
+                "idempotency_key": "explicit-platform-uid",
+                "candidates": [{"platform_uid": "boss:123", "raw_card_text": "Alice card"}],
+            },
+            headers=self._headers(),
+        )
+        second = self.client.post(
+            "/api/intake/candidates",
+            json={
+                "source_platform": "boss",
+                "idempotency_key": "raw-prefixed-id",
+                "candidates": [{"source_candidate_id": "boss:123", "raw_card_text": "Alice raw id card"}],
+            },
+            headers=self._headers(),
+        )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        rows = self.client.get("/api/candidates?page=1&page_size=100").json()["rows"]
+        self.assertEqual(len(rows), 2)
+
     def test_idempotency_conflict_returns_stable_business_error(self) -> None:
         first = self.client.post(
             "/api/intake/candidates",

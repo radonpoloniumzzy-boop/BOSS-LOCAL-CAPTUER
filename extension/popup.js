@@ -62,10 +62,13 @@ const fields = {
 const statusEl = document.getElementById("status");
 const batchStatusEl = document.getElementById("batchStatus");
 const batchLogEl = document.getElementById("batchLog");
+const webIntakeStatusEl = document.getElementById("webIntakeStatus");
 const automationAutoButton = document.getElementById("automationAuto");
 const pairingCodeInput = document.getElementById("pairingCode");
 const applyPairingCodeButton = document.getElementById("applyPairingCode");
 const downloadCurrentBatchButton = document.getElementById("downloadCurrentBatch");
+const retryWebIntakeButton = document.getElementById("retryWebIntake");
+const openWebWorkbenchButton = document.getElementById("openWebWorkbench");
 let batchStatusTimer = null;
 let activeJobProfileId = null;
 let activeRecruitmentTaskId = null;
@@ -75,6 +78,8 @@ let lastCompletedBatchConnection = null;
 automationAutoButton.addEventListener("click", () => runAutomation());
 applyPairingCodeButton.addEventListener("click", () => applyPairingCodeAndTest());
 downloadCurrentBatchButton.addEventListener("click", () => downloadCurrentBatch());
+retryWebIntakeButton.addEventListener("click", () => retryWebIntake());
+openWebWorkbenchButton.addEventListener("click", () => openWebWorkbench());
 document.getElementById("scrollWaitDown").addEventListener("click", () => adjustScrollWait(-30));
 document.getElementById("scrollWaitUp").addEventListener("click", () => adjustScrollWait(30));
 document.getElementById("collectCurrent").addEventListener("click", () => runCollection(false));
@@ -111,6 +116,7 @@ async function init() {
     await chrome.storage.local.set({ lastCompletedBatchId: null, lastCompletedBatchConnection: null });
   }
   updateBatchDownloadButton();
+  await refreshWebIntakeStatus(stored);
   if (stored.scrollWaitDefaultVersion === null && Number(stored.scrollWaitMs) === OLD_DEFAULT_SCROLL_WAIT_MS) {
     stored.scrollWaitMs = DEFAULTS.scrollWaitMs;
     await chrome.storage.local.set({
@@ -225,6 +231,7 @@ async function applyPairingCodeAndTest() {
       lastCompletedBatchConnection,
     });
     updateBatchDownloadButton();
+    const webIntake = await sendImportedBatchToWeb(settings, tab.url, merged, imported);
     pairingCodeInput.value = "";
     setStatus(`桌面端已连接。\n接口地址：${fields.apiBase.value}\nToken 验证：通过`);
   } catch (error) {
@@ -266,6 +273,59 @@ async function adjustScrollWait(deltaMs) {
   fields.scrollWaitMs.value = String(next);
   await chrome.storage.local.set({ scrollWaitMs: next });
   setStatus(`滚动等待毫秒已设置为 ${next}ms。`);
+}
+
+async function refreshWebIntakeStatus(settingsOverride = null) {
+  const settings = settingsOverride ? { ...DEFAULTS, ...settingsOverride } : collectSettings();
+  const state = await BossLocalWebIntake.loadState(chrome.storage.local);
+  const record = BossLocalWebIntake.currentRecordForConnection(state, settings);
+  const view = BossLocalWebIntake.formatStatus(record, settings);
+  webIntakeStatusEl.textContent = `${view.title}\n${view.message}`;
+  retryWebIntakeButton.disabled = !view.canRetry;
+}
+
+async function sendImportedBatchToWeb(settings, sourceUrl, merged, imported) {
+  const queued = await BossLocalWebIntake.queueImportedBatch({
+    settings,
+    imported,
+    merged,
+    sourceUrl,
+    storageArea: chrome.storage.local,
+  });
+  if (!queued) {
+    await refreshWebIntakeStatus(settings);
+    return null;
+  }
+  const sent = await BossLocalWebIntake.sendQueuedBatch({
+    settings,
+    batchKey: queued.batchKey,
+    storageArea: chrome.storage.local,
+  });
+  await refreshWebIntakeStatus(settings);
+  return sent;
+}
+
+async function retryWebIntake() {
+  retryWebIntakeButton.disabled = true;
+  try {
+    const result = await BossLocalWebIntake.retryPendingForCurrentConnection({
+      settings: collectSettings(),
+      storageArea: chrome.storage.local,
+    });
+    await refreshWebIntakeStatus();
+    if (result?.message) {
+      setStatus(`缃戦〉鍏ュ簱鐘舵€佸凡鏇存柊銆俓n${result.message}`);
+    }
+  } catch (error) {
+    setStatus(`閲嶈瘯缃戦〉鍏ュ簱澶辫触銆俓n${error.message || String(error)}`);
+  } finally {
+    await refreshWebIntakeStatus();
+  }
+}
+
+async function openWebWorkbench() {
+  const url = `${BossLocalWebIntake.deriveWebApiBase(collectSettings().apiBase)}/`;
+  await chrome.tabs.create({ url });
 }
 
 async function runCollection(autoScroll, options = {}) {

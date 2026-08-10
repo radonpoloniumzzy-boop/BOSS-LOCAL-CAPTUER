@@ -1,4 +1,4 @@
-const assert = require("assert");
+﻿const assert = require("assert");
 const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
@@ -207,7 +207,7 @@ function testChatRunnerHandlesTwoResumeRequestButtons() {
   assert(source.includes("isLikelyRequestResumeAction"));
   assert(source.includes("isRequestResumeButtonUsable"));
   assert(source.includes("messageOnly"));
-  assert(source.includes("双方回复后可用"));
+  assert(source.includes("页面求简历按钮当前需双方回复后才可用"));
 }
 
 function testBatchModesAreSeparated() {
@@ -216,7 +216,7 @@ function testBatchModesAreSeparated() {
   assert(source.includes("async function requestAndDownload"));
   assert(source.includes("async function processDownloadOnlySession"));
   assert(!source.includes("request flow download ok"));
-  assert(!source.includes("开始等待附件简历"));
+  assert(!source.includes("start waiting attachment resume"));
 }
 
 function testPreviewClickAvoidsAttachmentCardFalsePositive() {
@@ -457,7 +457,7 @@ function loadRemoteControlForBehaviorTest() {
           return [
             {
               result: {
-                cards: [{ platform_uid: "boss-1", raw_card_text: "候选人 A" }],
+                cards: [{ platform_uid: "boss-1", raw_card_text: "鍊欓€変汉 A" }],
                 meta: { platform: "boss", rounds_completed: 2 },
                 frameUrl: "https://www.zhipin.com/web/geek/recommend",
               },
@@ -482,7 +482,7 @@ function loadRemoteControlForBehaviorTest() {
               task_id: 12,
               platform: "boss",
               source_url: "https://www.zhipin.com/web/geek/recommend",
-              job_title: "招聘顾问",
+              job_title: "鎷涜仒椤鹃棶",
             },
           };
         },
@@ -493,6 +493,22 @@ function loadRemoteControlForBehaviorTest() {
         ok: true,
         async json() {
           return { ok: true, result: { batch_id: 88 } };
+        },
+      };
+    }
+    if (textUrl.endsWith("/api/intake/candidates")) {
+      return {
+        ok: true,
+        async json() {
+          return {
+            batch_id: 201,
+            status: "completed",
+            received_count: 1,
+            inserted_candidates: 1,
+            updated_candidates: 0,
+            skipped_candidates: 0,
+            failed_candidates: 0,
+          };
         },
       };
     }
@@ -510,6 +526,8 @@ function loadRemoteControlForBehaviorTest() {
     __bossLocalRemoteControlTestMode: true,
   };
   context.globalThis = context;
+  const intakeSource = fs.readFileSync(path.join(EXTENSION_DIR, "web_intake.js"), "utf8");
+  vm.runInNewContext(intakeSource, context, { filename: "web_intake.js" });
   const source = fs.readFileSync(path.join(EXTENSION_DIR, "remote_control.js"), "utf8");
   vm.runInNewContext(source, context, { filename: "remote_control.js" });
   return context.BossLocalRemoteControl;
@@ -662,7 +680,7 @@ function testDesktopRemoteControlKeepsPopupControlsAndUsesTaskScopedCommands() {
   const remote = fs.readFileSync(path.join(EXTENSION_DIR, "remote_control.js"), "utf8");
   const popup = fs.readFileSync(path.join(EXTENSION_DIR, "popup.html"), "utf8");
 
-  assert(worker.includes('importScripts("remote_control.js")'));
+  assert(worker.includes('importScripts("web_intake.js", "remote_control.js")'));
   for (const action of [
     "automation_auto",
     "collect_current",
@@ -686,6 +704,8 @@ function testDesktopRemoteControlKeepsPopupControlsAndUsesTaskScopedCommands() {
   assert(popup.includes('id="collectCurrent"'));
   assert(popup.includes('id="collectAuto"'));
   assert(popup.includes('id="pauseScroll"'));
+  assert(popup.includes('id="retryWebIntake"'));
+  assert(popup.includes('id="openWebWorkbench"'));
 }
 
 async function testDesktopRemoteAutoExecutesAgainstMatchedTaskTab() {
@@ -708,7 +728,7 @@ async function testDesktopRemoteAutoExecutesAgainstMatchedTaskTab() {
       noNewStopRounds: 2,
     },
   );
-  assert.strictEqual(message, "采集完成：识别 1 人，导入批次 #88");
+  assert.strictEqual(message, "采集完成：识别 1 人，导入批次 #88，Web 入库：网页工作台已接收批次 #201");
 }
 
 async function main() {

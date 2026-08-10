@@ -319,8 +319,15 @@ class CardImportService:
             source_url,
         )
         source_candidate_id = normalize_text(str(item.get("source_candidate_id") or ""))
+        explicit_platform_uid = self.parser.canonicalize_platform_uid(
+            source_platform,
+            str(item.get("platform_uid") or ""),
+        )
         detail_url = normalize_text(str(item.get("detail_url") or ""))
-        platform_uid = self.parser.canonicalize_source_candidate_id(source_platform, source_candidate_id)
+        platform_uid = explicit_platform_uid or self.parser.canonicalize_source_candidate_id(
+            source_platform,
+            source_candidate_id,
+        )
         name = normalize_text(str(item.get("name") or ""))
         expected_salary = normalize_text(str(item.get("expected_salary") or ""))
         work_experience_text = normalize_text(str(item.get("work_experience_text") or ""))
