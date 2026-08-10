@@ -12,7 +12,7 @@ from app import (
     resolve_desktop_startup,
 )
 from core.bootstrap import BootstrapConfigurationError, BootstrapSettings, BootstrapStore
-from core.config import ConfigService
+from core.config import ConfigService, DataDirectoryAccessError
 from storage.db import DatabaseManager, DatabaseMissingError
 from ui.main_window import initialize_database_for_startup
 
@@ -179,7 +179,25 @@ class DesktopWebTransitionTest(unittest.TestCase):
             self.assertFalse((data_dir / "boss_local_tool.db").exists())
             self.assertEqual(store.path.read_bytes(), bootstrap_before)
 
-    def test_permission_denied_configured_directory_shows_recovery_message(self) -> None:
+    def test_permission_denied_from_config_service_becomes_data_directory_access_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            blocked = root / "blocked"
+
+            def fail_on_blocked(path: Path) -> Path:
+                if path == blocked:
+                    raise PermissionError("denied")
+                path.mkdir(parents=True, exist_ok=True)
+                return path
+
+            with patch("core.config.ensure_directory", side_effect=fail_on_blocked):
+                with self.assertRaises(DataDirectoryAccessError) as caught:
+                    ConfigService(app_root=root, data_dir=blocked)
+
+            self.assertEqual(caught.exception.path, blocked)
+            self.assertIsInstance(caught.exception.cause, PermissionError)
+
+    def test_configured_data_directory_access_error_shows_fixed_recovery_message(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             project = root / "project"
@@ -192,23 +210,76 @@ class DesktopWebTransitionTest(unittest.TestCase):
             startup = resolve_desktop_startup(project, store)
             lock = SimpleNamespace(acquire=unittest.mock.Mock(), release=unittest.mock.Mock())
 
+            def open_window(*, data_dir, require_existing_database):
+                self.assertTrue(require_existing_database)
+
+                def fail_on_path(path: Path) -> Path:
+                    if path == data_dir:
+                        raise PermissionError("denied")
+                    path.mkdir(parents=True, exist_ok=True)
+                    return path
+
+                with patch("core.config.ensure_directory", side_effect=fail_on_path):
+                    ConfigService(app_root=project, data_dir=data_dir)
+                self.fail("configured startup should stop on inaccessible data directory")
+
             with (
                 patch("app.QApplication"),
                 patch("app.apply_application_theme"),
                 patch("app.resolve_desktop_startup", return_value=startup),
                 patch("app.DatabaseApplicationLock", return_value=lock),
-                patch("app.MainWindow", side_effect=PermissionError("denied")),
+                patch("app.MainWindow", side_effect=open_window),
                 patch("app.QMessageBox.critical") as critical,
             ):
                 self.assertEqual(desktop_main(), 1)
 
             lock.acquire.assert_called_once_with()
             lock.release.assert_called_once_with()
-            self.assertIn("目录权限", critical.call_args.args[2])
-            self.assertIn("不会创建或切换到空人才库", critical.call_args.args[2])
+            self.assertIn("已配置的数据目录无法访问", critical.call_args.args[2])
+            self.assertIn("不会创建或切换空人才库", critical.call_args.args[2])
+            self.assertNotIn("denied", critical.call_args.args[2])
             self.assertEqual(store.path.read_bytes(), bootstrap_before)
+            self.assertFalse((data_dir / "boss_local_tool.db").exists())
 
-    def test_os_error_configured_directory_shows_recovery_message(self) -> None:
+    def test_legacy_data_directory_access_error_shows_startup_failure_message(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            project = root / "project"
+            project.mkdir()
+            store = BootstrapStore(root / "local" / "bootstrap.json")
+            startup = resolve_desktop_startup(project, store)
+            lock = SimpleNamespace(acquire=unittest.mock.Mock(), release=unittest.mock.Mock())
+
+            def open_window(*, data_dir, require_existing_database):
+                self.assertFalse(require_existing_database)
+
+                def fail_on_path(path: Path) -> Path:
+                    if path == data_dir:
+                        raise PermissionError("denied")
+                    path.mkdir(parents=True, exist_ok=True)
+                    return path
+
+                with patch("core.config.ensure_directory", side_effect=fail_on_path):
+                    ConfigService(app_root=project, data_dir=data_dir)
+                self.fail("legacy startup should stop on inaccessible data directory")
+
+            with (
+                patch("app.QApplication"),
+                patch("app.apply_application_theme"),
+                patch("app.resolve_desktop_startup", return_value=startup),
+                patch("app.DatabaseApplicationLock", return_value=lock),
+                patch("app.MainWindow", side_effect=open_window),
+                patch("app.QMessageBox.critical") as critical,
+            ):
+                self.assertEqual(desktop_main(), 1)
+
+            lock.acquire.assert_called_once_with()
+            lock.release.assert_called_once_with()
+            self.assertIn("本地数据目录当前无法访问", critical.call_args.args[2])
+            self.assertIn("不会创建或切换空人才库", critical.call_args.args[2])
+            self.assertNotIn("denied", critical.call_args.args[2])
+
+    def test_non_directory_os_error_is_not_misreported_as_data_directory_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             project = root / "project"
@@ -225,14 +296,14 @@ class DesktopWebTransitionTest(unittest.TestCase):
                 patch("app.apply_application_theme"),
                 patch("app.resolve_desktop_startup", return_value=startup),
                 patch("app.DatabaseApplicationLock", return_value=lock),
-                patch("app.MainWindow", side_effect=OSError("drive unavailable")),
+                patch("app.MainWindow", side_effect=OSError("generic failure")),
                 patch("app.QMessageBox.critical") as critical,
             ):
-                self.assertEqual(desktop_main(), 1)
+                with self.assertRaises(OSError):
+                    desktop_main()
 
             lock.release.assert_called_once_with()
-            self.assertIn("D 盘", critical.call_args.args[2])
-            self.assertIn("不会创建或切换到空人才库", critical.call_args.args[2])
+            critical.assert_not_called()
 
     def test_desktop_entrypoint_shows_bootstrap_recovery_message(self) -> None:
         error = BootstrapConfigurationError("配置文件：C:\\broken\\bootstrap.json")

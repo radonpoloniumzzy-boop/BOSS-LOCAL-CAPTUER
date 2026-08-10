@@ -93,6 +93,13 @@ REVIEW_CSV_COLUMNS_V2 = [
 ]
 
 
+class DataDirectoryAccessError(RuntimeError):
+    def __init__(self, path: Path, cause: OSError) -> None:
+        super().__init__("Managed data directory is not accessible.")
+        self.path = path
+        self.cause = cause
+
+
 class ConfigService:
     def __init__(
         self,
@@ -102,13 +109,15 @@ class ConfigService:
     ) -> None:
         self.app_root = app_root or get_app_root()
         self.logger = logger
-        self.data_dir = ensure_directory(data_dir or self.app_root / "data")
-        self.logs_dir = ensure_directory(self.app_root / "logs")
-        self.dist_dir = ensure_directory(self.app_root / "dist")
+        self.data_dir = self._ensure_managed_directory(data_dir or self.app_root / "data")
+        self.logs_dir = self._ensure_managed_directory(self.app_root / "logs")
+        self.dist_dir = self._ensure_managed_directory(self.app_root / "dist")
         self.config_path = self.data_dir / "config.json"
         self.database_path = self.data_dir / "boss_local_tool.db"
-        self.default_export_dir = ensure_directory(self.data_dir / "exports")
-        self.default_user_data_dir = ensure_directory(self.data_dir / "browser_profile")
+        self.default_export_dir = self._ensure_managed_directory(self.data_dir / "exports")
+        self.default_user_data_dir = self._ensure_managed_directory(
+            self.data_dir / "browser_profile"
+        )
         self.default_selectors_path = self.data_dir / "boss_selectors.json"
 
     def default_config(self) -> AppConfig:
@@ -121,10 +130,10 @@ class ConfigService:
 
     def ensure_runtime_paths(self, config: AppConfig | None = None) -> AppConfig:
         config = config or self.default_config()
-        ensure_directory(Path(config.user_data_dir))
-        ensure_directory(Path(config.default_export_dir))
-        ensure_directory(self.logs_dir)
-        ensure_directory(self.data_dir)
+        self._ensure_managed_directory(Path(config.user_data_dir))
+        self._ensure_managed_directory(Path(config.default_export_dir))
+        self._ensure_managed_directory(self.logs_dir)
+        self._ensure_managed_directory(self.data_dir)
         return config
 
     def load(self) -> AppConfig:
@@ -135,7 +144,7 @@ class ConfigService:
             return defaults
 
         try:
-            raw = json.loads(self.config_path.read_text(encoding="utf-8"))
+            raw = json.loads(self._read_managed_text(self.config_path))
             merged = deep_merge(defaults.to_dict(), raw)
             config = self._build_config(merged)
             self.ensure_runtime_paths(config)
@@ -150,6 +159,8 @@ class ConfigService:
             ):
                 self.save(config)
             return config
+        except DataDirectoryAccessError:
+            raise
         except Exception as exc:
             self._log("exception", "Failed to load config from %s: %s", self.config_path, exc)
             self.save(defaults)
@@ -157,11 +168,11 @@ class ConfigService:
 
     def save(self, config: AppConfig) -> None:
         self.ensure_runtime_paths(config)
-        self.config_path.write_text(json_dumps(config.to_dict()), encoding="utf-8")
+        self._write_managed_text(self.config_path, json_dumps(config.to_dict()))
         self._log("info", "Saved config to %s", self.config_path)
 
     def export_example(self, target_path: Path) -> None:
-        target_path.write_text(json_dumps(self.default_config().to_dict()), encoding="utf-8")
+        self._write_managed_text(target_path, json_dumps(self.default_config().to_dict()))
 
     def _build_config(self, data: dict[str, Any]) -> AppConfig:
         defaults = self.default_config()
@@ -206,6 +217,24 @@ class ConfigService:
     @staticmethod
     def _new_local_api_token() -> str:
         return secrets.token_urlsafe(24)
+
+    def _ensure_managed_directory(self, path: Path) -> Path:
+        try:
+            return ensure_directory(path)
+        except OSError as exc:
+            raise DataDirectoryAccessError(path, exc) from exc
+
+    def _read_managed_text(self, path: Path) -> str:
+        try:
+            return path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise DataDirectoryAccessError(path, exc) from exc
+
+    def _write_managed_text(self, path: Path, content: str) -> None:
+        try:
+            path.write_text(content, encoding="utf-8")
+        except OSError as exc:
+            raise DataDirectoryAccessError(path, exc) from exc
 
     def _log(self, level: str, message: str, *args) -> None:
         if not self.logger:
