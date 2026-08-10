@@ -29,27 +29,37 @@ class DatabaseManager:
     def __init__(self, db_path: Path, logger=None) -> None:
         self.db_path = db_path
         self.logger = logger
+        self._existing_only = False
         self._local = threading.local()
         self._connections: set[sqlite3.Connection] = set()
         self._connections_lock = threading.Lock()
         self.last_backup_path: Path | None = None
 
     def initialize(self) -> None:
+        self._existing_only = False
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        connection = sqlite3.connect(str(self.db_path))
+        connection = self._open_connection(check_same_thread=True)
         self._initialize_connection(connection)
 
     def initialize_existing(self) -> None:
-        if not self.db_path.is_file():
-            raise DatabaseMissingError(self.db_path)
+        self._existing_only = True
+        connection = self._open_connection(check_same_thread=True)
+        self._initialize_connection(connection, require_schema=True)
+
+    def _open_connection(self, *, check_same_thread: bool) -> sqlite3.Connection:
+        if not self._existing_only:
+            return sqlite3.connect(str(self.db_path), check_same_thread=check_same_thread)
         uri = f"{self.db_path.resolve().as_uri()}?mode=rw"
         try:
-            connection = sqlite3.connect(uri, uri=True)
+            return sqlite3.connect(uri, uri=True, check_same_thread=check_same_thread)
+        except sqlite3.OperationalError as exc:
+            if not self.db_path.is_file():
+                raise DatabaseMissingError(self.db_path) from exc
+            raise DatabaseCorruptError("无法打开已配置的人才库。") from exc
         except sqlite3.DatabaseError as exc:
             if not self.db_path.is_file():
                 raise DatabaseMissingError(self.db_path) from exc
             raise DatabaseCorruptError("无法打开已配置的人才库。") from exc
-        self._initialize_connection(connection, require_schema=True)
 
     def _initialize_connection(
         self, connection: sqlite3.Connection, *, require_schema: bool = False
@@ -99,7 +109,7 @@ class DatabaseManager:
     def get_connection(self) -> sqlite3.Connection:
         connection = getattr(self._local, "connection", None)
         if connection is None:
-            connection = sqlite3.connect(str(self.db_path), check_same_thread=False)
+            connection = self._open_connection(check_same_thread=False)
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA foreign_keys = ON")
             self._local.connection = connection

@@ -13,7 +13,7 @@ from app import (
 )
 from core.bootstrap import BootstrapConfigurationError, BootstrapSettings, BootstrapStore
 from core.config import ConfigService
-from storage.db import DatabaseManager
+from storage.db import DatabaseManager, DatabaseMissingError
 from ui.main_window import initialize_database_for_startup
 
 
@@ -70,6 +70,25 @@ class DesktopWebTransitionTest(unittest.TestCase):
             self.assertEqual(startup.data_dir, chosen.resolve())
             self.assertTrue(database_path.is_file())
             self.assertFalse((project / "data" / "boss_local_tool.db").exists())
+
+    def test_existing_only_connection_strategy_survives_after_initialization(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            original = root / "configured-data" / "boss_local_tool.db"
+            moved = root / "moved-data" / "boss_local_tool.db"
+            original.parent.mkdir(parents=True)
+            moved.parent.mkdir(parents=True)
+            DatabaseManager(original).initialize()
+
+            configured = DatabaseManager(original)
+            configured.initialize_existing()
+            original.replace(moved)
+
+            with self.assertRaises(DatabaseMissingError):
+                configured.get_connection()
+
+            self.assertFalse(original.exists())
+            self.assertTrue(moved.exists())
 
     def test_desktop_keeps_legacy_project_data_before_web_setup(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -159,6 +178,61 @@ class DesktopWebTransitionTest(unittest.TestCase):
             self.assertIn("移动盘", critical.call_args.args[2])
             self.assertFalse((data_dir / "boss_local_tool.db").exists())
             self.assertEqual(store.path.read_bytes(), bootstrap_before)
+
+    def test_permission_denied_configured_directory_shows_recovery_message(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            project = root / "project"
+            project.mkdir()
+            data_dir = root / "configured-data"
+            data_dir.mkdir()
+            store = BootstrapStore(root / "local" / "bootstrap.json")
+            store.save(BootstrapSettings(data_dir=str(data_dir.resolve())))
+            bootstrap_before = store.path.read_bytes()
+            startup = resolve_desktop_startup(project, store)
+            lock = SimpleNamespace(acquire=unittest.mock.Mock(), release=unittest.mock.Mock())
+
+            with (
+                patch("app.QApplication"),
+                patch("app.apply_application_theme"),
+                patch("app.resolve_desktop_startup", return_value=startup),
+                patch("app.DatabaseApplicationLock", return_value=lock),
+                patch("app.MainWindow", side_effect=PermissionError("denied")),
+                patch("app.QMessageBox.critical") as critical,
+            ):
+                self.assertEqual(desktop_main(), 1)
+
+            lock.acquire.assert_called_once_with()
+            lock.release.assert_called_once_with()
+            self.assertIn("目录权限", critical.call_args.args[2])
+            self.assertIn("不会创建或切换到空人才库", critical.call_args.args[2])
+            self.assertEqual(store.path.read_bytes(), bootstrap_before)
+
+    def test_os_error_configured_directory_shows_recovery_message(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            project = root / "project"
+            project.mkdir()
+            data_dir = root / "configured-data"
+            data_dir.mkdir()
+            store = BootstrapStore(root / "local" / "bootstrap.json")
+            store.save(BootstrapSettings(data_dir=str(data_dir.resolve())))
+            startup = resolve_desktop_startup(project, store)
+            lock = SimpleNamespace(acquire=unittest.mock.Mock(), release=unittest.mock.Mock())
+
+            with (
+                patch("app.QApplication"),
+                patch("app.apply_application_theme"),
+                patch("app.resolve_desktop_startup", return_value=startup),
+                patch("app.DatabaseApplicationLock", return_value=lock),
+                patch("app.MainWindow", side_effect=OSError("drive unavailable")),
+                patch("app.QMessageBox.critical") as critical,
+            ):
+                self.assertEqual(desktop_main(), 1)
+
+            lock.release.assert_called_once_with()
+            self.assertIn("D 盘", critical.call_args.args[2])
+            self.assertIn("不会创建或切换到空人才库", critical.call_args.args[2])
 
     def test_desktop_entrypoint_shows_bootstrap_recovery_message(self) -> None:
         error = BootstrapConfigurationError("配置文件：C:\\broken\\bootstrap.json")

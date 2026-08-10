@@ -56,6 +56,10 @@ def resolve_desktop_data_dir(project_root: Path, store: BootstrapStore | None = 
     return resolve_desktop_startup(project_root, store).data_dir
 
 
+def _show_configured_database_recovery_message(title: str, message: str) -> None:
+    QMessageBox.critical(None, title, message)
+
+
 def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("Boss 本地候选人采集工具")
@@ -79,13 +83,23 @@ def main() -> int:
                 require_existing_database=startup.require_existing_database,
             )
         except DatabaseMissingError:
-            QMessageBox.critical(
-                None,
+            _show_configured_database_recovery_message(
                 "人才库文件不存在",
                 f"已配置的人才库文件不存在：{database_path}\n"
                 "系统不会自动创建空数据库。\n"
                 "请检查 D 盘或移动盘是否已连接，以及数据库文件是否被移动或改名。\n"
                 "恢复原数据库文件后再启动。",
+            )
+            return 1
+        except OSError as exc:
+            if not startup.require_existing_database:
+                raise
+            _show_configured_database_recovery_message(
+                "人才库目录需要恢复",
+                f"已配置的人才库目录当前无法访问：{startup.data_dir}\n"
+                "请检查 D 盘或移动盘是否已连接，并确认目录权限正常。\n"
+                "系统不会创建或切换到空人才库。\n"
+                f"恢复目录访问后再启动。\n\n详细错误：{exc}",
             )
             return 1
         window.show()
