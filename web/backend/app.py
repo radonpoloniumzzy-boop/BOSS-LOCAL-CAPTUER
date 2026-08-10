@@ -14,6 +14,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from core.app_lock import ApplicationLockError
 from core.bootstrap import BootstrapService, DataDirectoryError
 from core.version import APP_VERSION
+from storage.repository import IdempotencyConflictError
 from web.backend.runtime import WebRuntime
 
 
@@ -36,6 +37,7 @@ class IntakeCandidatesRequest(BaseModel):
     source_url: str = ""
     source_job_title: str = ""
     job_profile_id: int | None = None
+    recruitment_task_id: int | None = None
     idempotency_key: str = ""
     candidates: list[dict[str, object]]
 
@@ -155,6 +157,8 @@ def create_web_app(
             raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。")
         try:
             return runtime.import_service.import_candidates(payload.model_dump())
+        except IdempotencyConflictError as exc:
+            raise ApiError(409, "idempotency_conflict", str(exc)) from exc
         except ValueError as exc:
             raise ApiError(400, "invalid_request", str(exc)) from exc
 

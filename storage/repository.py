@@ -20,6 +20,10 @@ from storage.db import DatabaseManager
 from talent.profile_builder import StandardProfileBuilder
 
 
+class IdempotencyConflictError(ValueError):
+    """Raised when the same idempotency key is reused with different content."""
+
+
 RECRUITMENT_STATUSES = {
     "collected",
     "screened",
@@ -214,20 +218,7 @@ class CandidateRepository:
         task_id: int | None = None,
     ) -> CaptureBatch:
         connection = self.db.get_connection()
-        if role_id is not None:
-            profile = self.get_job_profile(int(role_id))
-            if profile is None:
-                raise ValueError("岗位档案不存在")
-            if str(profile.get("status") or "") != "active":
-                raise ValueError("所选岗位档案不是招聘中状态，不能创建采集批次")
-        if task_id is not None:
-            task = self.get_recruitment_task(int(task_id))
-            if task is None:
-                raise ValueError("招聘任务不存在")
-            if int(task["role_id"]) != int(role_id or 0):
-                raise ValueError("招聘任务与采集岗位不一致")
-            if str(task["status"]) != "running":
-                raise ValueError("招聘任务不是执行中状态，不能创建采集批次")
+        self._validate_batch_context(role_id=role_id, task_id=task_id)
         timestamp = now_iso()
         cursor = connection.execute(
             """
@@ -253,7 +244,7 @@ class CandidateRepository:
         )
         connection.commit()
         batch = CaptureBatch(
-            id=cursor.lastrowid,
+            id=int(cursor.lastrowid),
             job_title=job_title,
             source_url=source_url,
             source_platform=source_platform,
@@ -269,6 +260,129 @@ class CandidateRepository:
         )
         self._log("info", "Created capture batch %s for job %s", batch.id, job_title)
         return batch
+
+    def claim_intake_batch(
+        self,
+        job_title: str,
+        source_url: str,
+        note: str = "",
+        source_platform: str = "",
+        request_id: str = "",
+        request_payload_hash: str = "",
+        role_id: int | None = None,
+        task_id: int | None = None,
+    ) -> tuple[CaptureBatch, bool]:
+        normalized_request_id = str(request_id or "").strip()
+        if not normalized_request_id:
+            return (
+                self.create_batch(
+                    job_title,
+                    source_url,
+                    note=note,
+                    source_platform=source_platform,
+                    request_id="",
+                    request_payload_hash=request_payload_hash,
+                    role_id=role_id,
+                    task_id=task_id,
+                ),
+                False,
+            )
+
+        connection = self.db.get_connection()
+        self._validate_batch_context(role_id=role_id, task_id=task_id)
+        timestamp = now_iso()
+        try:
+            cursor = connection.execute(
+                """
+                INSERT INTO capture_batches(
+                    job_title, source_url, source_platform, request_id, request_payload_hash,
+                    start_time, status, note, role_id, task_id, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    job_title,
+                    source_url,
+                    source_platform,
+                    normalized_request_id,
+                    request_payload_hash,
+                    timestamp,
+                    "running",
+                    note,
+                    role_id,
+                    task_id,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            connection.commit()
+            return (
+                CaptureBatch(
+                    id=int(cursor.lastrowid),
+                    job_title=job_title,
+                    source_url=source_url,
+                    source_platform=source_platform,
+                    start_time=timestamp,
+                    status="running",
+                    note=note,
+                    request_id=normalized_request_id,
+                    request_payload_hash=request_payload_hash,
+                    role_id=role_id,
+                    task_id=task_id,
+                    created_at=timestamp,
+                    updated_at=timestamp,
+                ),
+                False,
+            )
+        except sqlite3.IntegrityError:
+            row = connection.execute(
+                "SELECT * FROM capture_batches WHERE request_id = ?",
+                (normalized_request_id,),
+            ).fetchone()
+            if row is None:
+                raise
+            if str(row["request_payload_hash"] or "") != request_payload_hash:
+                raise IdempotencyConflictError("幂等请求标识已被其他导入内容占用。")
+            return (self._capture_batch_from_row(row), True)
+
+    def _validate_batch_context(self, *, role_id: int | None, task_id: int | None) -> None:
+        if role_id is not None:
+            profile = self.get_job_profile(int(role_id))
+            if profile is None:
+                raise ValueError("岗位档案不存在")
+            if str(profile.get("status") or "") != "active":
+                raise ValueError("所选岗位档案不是招聘中状态，不能创建采集批次")
+        if task_id is not None:
+            task = self.get_recruitment_task(int(task_id))
+            if task is None:
+                raise ValueError("招聘任务不存在")
+            if int(task["role_id"]) != int(role_id or 0):
+                raise ValueError("招聘任务与采集岗位不一致")
+            if str(task["status"]) != "running":
+                raise ValueError("招聘任务不是执行中状态，不能创建采集批次")
+
+    @staticmethod
+    def _capture_batch_from_row(row: sqlite3.Row) -> CaptureBatch:
+        return CaptureBatch(
+            id=int(row["id"]),
+            job_title=str(row["job_title"] or ""),
+            source_url=str(row["source_url"] or ""),
+            source_platform=str(row["source_platform"] or ""),
+            start_time=str(row["start_time"] or ""),
+            end_time=str(row["end_time"] or ""),
+            total_collected=int(row["total_collected"] or 0),
+            total_new=int(row["total_new"] or 0),
+            total_updated=int(row["total_updated"] or 0),
+            total_skipped=int(row["total_skipped"] or 0),
+            total_failed=int(row["total_failed"] or 0),
+            status=str(row["status"] or ""),
+            note=str(row["note"] or ""),
+            request_id=str(row["request_id"] or ""),
+            request_payload_hash=str(row["request_payload_hash"] or ""),
+            role_id=row["role_id"],
+            task_id=row["task_id"],
+            created_at=str(row["created_at"] or ""),
+            updated_at=str(row["updated_at"] or ""),
+        )
 
     def save_recruitment_task(self, task: RecruitmentTask) -> RecruitmentTask:
         connection = self.db.get_connection()
@@ -794,7 +908,7 @@ class CandidateRepository:
             total_failed,
         )
 
-    def upsert_batch_candidates(self, batch_id: int, candidates: Iterable[CandidateRecord]) -> dict[str, int]:
+    def upsert_batch_candidates(self, batch_id: int, candidates: Iterable[CandidateRecord]) -> dict[str, object]:
         connection = self.db.get_connection()
         inserted_candidates = 0
         updated_candidates = 0
@@ -802,6 +916,7 @@ class CandidateRepository:
         inserted_batch_items = 0
         processed = 0
         seen_keys: set[str] = set()
+        candidate_results: list[dict[str, object]] = []
         with connection:
             for candidate in candidates:
                 processed += 1
@@ -883,6 +998,13 @@ class CandidateRepository:
                 )
                 if cursor.rowcount > 0:
                     inserted_batch_items += 1
+                candidate_results.append(
+                    {
+                        "candidate_id": candidate_id,
+                        "candidate_key": candidate.candidate_key,
+                        "ingest_status": ingest_status,
+                    }
+                )
         self._log(
             "info",
             "Upserted %s candidates for batch=%s inserted_candidates=%s inserted_batch_items=%s",
@@ -898,6 +1020,7 @@ class CandidateRepository:
             "skipped_candidates": skipped_candidates,
             "failed_candidates": 0,
             "inserted_batch_items": inserted_batch_items,
+            "candidate_results": candidate_results,
         }
 
     def list_candidates(
@@ -975,6 +1098,11 @@ class CandidateRepository:
             lb.role_id AS latest_batch_role_id,
             lb.total_new AS latest_batch_total_new,
             lb.total_updated AS latest_batch_total_updated,
+            CASE
+                WHEN EXISTS (
+                    SELECT 1 FROM candidate_role_matches mx WHERE mx.candidate_id = c.id
+                ) THEN 1 ELSE 0
+            END AS has_role_binding,
             COUNT(DISTINCT bi2.batch_id) AS batch_count
         FROM candidates c
         LEFT JOIN capture_batch_items bi2 ON bi2.candidate_id = c.id

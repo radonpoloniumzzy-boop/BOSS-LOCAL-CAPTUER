@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from automation.importer import CardImportService
 from automation.parser import CandidateParser
 from core.models import JobProfile
 from storage.db import DatabaseManager
-from storage.repository import CandidateRepository
+from storage.repository import CandidateRepository, IdempotencyConflictError
 
 
 class CardImportServiceTest(unittest.TestCase):
@@ -21,7 +23,7 @@ class CardImportServiceTest(unittest.TestCase):
         self.service = CardImportService(self.repository, CandidateParser())
 
     def tearDown(self) -> None:
-        self.db.close_thread_connection()
+        self.db.close_all_connections()
         self.temp_dir.cleanup()
 
     def test_import_cards_creates_batch_and_candidates(self) -> None:
@@ -63,6 +65,7 @@ class CardImportServiceTest(unittest.TestCase):
                 },
             }
         )
+
         self.assertEqual(result["parsed_cards"], 1)
         self.assertEqual(result["total_batch_items"], 1)
         self.assertEqual(result["job_title"], "Recruiting Intern")
@@ -111,6 +114,7 @@ class CardImportServiceTest(unittest.TestCase):
                 "meta": {"platform": "liepin", "rounds_completed": 3, "unique_cards": 1},
             }
         )
+
         candidates = self.repository.list_candidates()
         self.assertEqual(result["parsed_cards"], 1)
         self.assertEqual(result["total_batch_items"], 1)
@@ -123,7 +127,7 @@ class CardImportServiceTest(unittest.TestCase):
             JobProfile(
                 job_title="招聘实习生",
                 jd_text="负责招聘支持",
-                prompt_text="筛选招聘经历",
+                prompt_text="筛选招聘经验",
                 status="active",
             )
         )
@@ -186,6 +190,279 @@ class CardImportServiceTest(unittest.TestCase):
                     "cards": [{"raw_card_text": "钱七 招聘经验", "name": "钱七"}],
                 }
             )
+
+    def test_import_candidates_accepts_job_optional_records(self) -> None:
+        result = self.service.import_candidates(
+            {
+                "source_platform": "boss",
+                "source_url": "https://www.zhipin.com/web/geek/recommend",
+                "candidates": [
+                    {
+                        "name": "Alice",
+                        "source_candidate_id": "boss-1",
+                        "raw_card_text": "Alice trader card",
+                        "source_job_title": "证券交易员",
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(result["inserted_candidates"], 1)
+        self.assertEqual(result["job_profile_id"], None)
+        candidates = [dict(row) for row in self.repository.list_candidates()]
+        self.assertEqual(candidates[0]["source_platform"], "boss")
+        self.assertEqual(candidates[0]["job_title"], "证券交易员")
+
+    def test_import_candidates_only_source_job_title_and_blank_role_is_valid(self) -> None:
+        result = self.service.import_candidates(
+            {
+                "source_platform": "liepin",
+                "candidates": [
+                    {
+                        "name": "Bob",
+                        "source_candidate_id": "resume-2",
+                        "raw_card_text": "Bob java card",
+                        "source_job_title": "Java工程师",
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(result["inserted_candidates"], 1)
+        self.assertEqual(result["failed_candidates"], 0)
+
+    def test_blank_updates_do_not_overwrite_existing_master_and_old_snapshot_is_immutable(self) -> None:
+        first = self.service.import_candidates(
+            {
+                "source_platform": "boss",
+                "candidates": [
+                    {
+                        "name": "Alice",
+                        "source_candidate_id": "boss-1",
+                        "raw_card_text": "Alice first card",
+                        "expected_salary": "20k-30k",
+                    }
+                ],
+            }
+        )
+        self.service.import_candidates(
+            {
+                "source_platform": "boss",
+                "candidates": [
+                    {
+                        "name": "",
+                        "source_candidate_id": "boss-1",
+                        "raw_card_text": "Alice second card",
+                        "expected_salary": "",
+                    }
+                ],
+            }
+        )
+
+        candidate = dict(self.repository.list_candidates()[0])
+        export_rows = self.repository.get_capture_batch_export_rows(first["batch_id"])
+
+        self.assertEqual(candidate["name"], "Alice")
+        self.assertEqual(candidate["expected_salary"], "20k-30k")
+        self.assertEqual(export_rows[0]["name"], "Alice")
+        self.assertEqual(export_rows[0]["expected_salary"], "20k-30k")
+        self.assertEqual(export_rows[0]["raw_card_text"], "Alice first card")
+
+    def test_only_name_candidates_do_not_merge(self) -> None:
+        self.service.import_candidates(
+            {
+                "source_platform": "boss",
+                "candidates": [
+                    {"name": "张伟", "raw_card_text": "张伟 first card"},
+                    {"name": "张伟", "raw_card_text": "张伟 second card"},
+                ],
+            }
+        )
+
+        self.assertEqual(len(self.repository.list_candidates()), 2)
+
+    def test_same_stable_platform_uid_updates_same_candidate(self) -> None:
+        self.service.import_candidates(
+            {
+                "source_platform": "boss",
+                "candidates": [
+                    {
+                        "name": "Alice",
+                        "source_candidate_id": "boss-1",
+                        "raw_card_text": "Alice first card",
+                    }
+                ],
+            }
+        )
+        result = self.service.import_candidates(
+            {
+                "source_platform": "boss",
+                "candidates": [
+                    {
+                        "name": "Alice Updated",
+                        "source_candidate_id": "boss-1",
+                        "raw_card_text": "Alice second card",
+                    }
+                ],
+            }
+        )
+
+        candidates = [dict(row) for row in self.repository.list_candidates()]
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(result["updated_candidates"], 1)
+        self.assertEqual(candidates[0]["name"], "Alice Updated")
+
+    def test_different_platforms_with_same_source_candidate_id_do_not_merge(self) -> None:
+        self.service.import_candidates(
+            {
+                "source_platform": "boss",
+                "candidates": [{"source_candidate_id": "same-id", "raw_card_text": "boss card"}],
+            }
+        )
+        self.service.import_candidates(
+            {
+                "source_platform": "liepin",
+                "candidates": [{"source_candidate_id": "same-id", "raw_card_text": "liepin card"}],
+            }
+        )
+
+        self.assertEqual(len(self.repository.list_candidates()), 2)
+
+    def test_unknown_platform_same_id_does_not_merge(self) -> None:
+        self.service.import_candidates(
+            {
+                "source_platform": "unknown",
+                "candidates": [{"source_candidate_id": "same-id", "raw_card_text": "unknown card 1"}],
+            }
+        )
+        self.service.import_candidates(
+            {
+                "source_platform": "unknown",
+                "candidates": [{"source_candidate_id": "same-id", "raw_card_text": "unknown card 2"}],
+            }
+        )
+
+        self.assertEqual(len(self.repository.list_candidates()), 2)
+
+    def test_explicit_job_profile_id_creates_formal_role_binding(self) -> None:
+        profile = self.repository.save_job_profile(
+            JobProfile(job_title="证券交易员", jd_text="", prompt_text="", status="active")
+        )
+
+        self.service.import_candidates(
+            {
+                "source_platform": "boss",
+                "job_profile_id": profile.id,
+                "source_job_title": "证券交易员",
+                "candidates": [
+                    {"source_candidate_id": "boss-1", "raw_card_text": "Alice card", "name": "Alice"}
+                ],
+            }
+        )
+
+        candidate = dict(self.repository.list_candidates()[0])
+        matches = self.repository.list_candidate_role_matches(role_id=int(profile.id))
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0]["id"], candidate["id"])
+
+    def test_same_named_source_job_title_does_not_auto_bind_role(self) -> None:
+        profile = self.repository.save_job_profile(
+            JobProfile(job_title="证券交易员", jd_text="", prompt_text="", status="active")
+        )
+
+        self.service.import_candidates(
+            {
+                "source_platform": "boss",
+                "source_job_title": "证券交易员",
+                "candidates": [
+                    {"source_candidate_id": "boss-1", "raw_card_text": "Alice card", "name": "Alice"}
+                ],
+            }
+        )
+
+        self.assertEqual(self.repository.list_candidate_role_matches(role_id=int(profile.id)), [])
+
+    def test_one_candidate_can_bind_multiple_roles(self) -> None:
+        first_role = self.repository.save_job_profile(
+            JobProfile(job_title="证券交易员", jd_text="", prompt_text="", status="active")
+        )
+        second_role = self.repository.save_job_profile(
+            JobProfile(job_title="量化交易员", jd_text="", prompt_text="", status="active")
+        )
+
+        self.service.import_candidates(
+            {
+                "source_platform": "boss",
+                "job_profile_id": first_role.id,
+                "idempotency_key": "role-one",
+                "candidates": [{"source_candidate_id": "boss-1", "raw_card_text": "Alice card"}],
+            }
+        )
+        self.service.import_candidates(
+            {
+                "source_platform": "boss",
+                "job_profile_id": second_role.id,
+                "idempotency_key": "role-two",
+                "candidates": [{"source_candidate_id": "boss-1", "raw_card_text": "Alice card second"}],
+            }
+        )
+
+        rows = self.repository.list_candidate_role_matches()
+        self.assertEqual(len(rows), 2)
+
+    def test_concurrent_idempotent_same_payload_creates_one_batch(self) -> None:
+        payload = {
+            "source_platform": "boss",
+            "idempotency_key": "same-request",
+            "candidates": [{"source_candidate_id": "boss-1", "raw_card_text": "Alice card"}],
+        }
+        barrier = threading.Barrier(2)
+
+        def run_import() -> dict[str, object]:
+            barrier.wait(timeout=5)
+            return self.service.import_candidates(payload)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first, second = list(pool.map(lambda _value: run_import(), range(2)))
+
+        self.assertEqual(first["batch_id"], second["batch_id"])
+        self.assertEqual(len(self.repository.list_batches()), 1)
+        self.assertEqual(len(self.repository.list_candidates()), 1)
+        batch_id = int(first["batch_id"])
+        batch_rows = self.repository.page_capture_batch_candidates(batch_id)["rows"]
+        self.assertEqual(len(batch_rows), 1)
+
+    def test_concurrent_idempotent_different_payload_conflicts_cleanly(self) -> None:
+        barrier = threading.Barrier(2)
+        results: list[object] = []
+        payloads = [
+            {
+                "source_platform": "boss",
+                "idempotency_key": "same-request",
+                "candidates": [{"source_candidate_id": "boss-1", "raw_card_text": "Alice card"}],
+            },
+            {
+                "source_platform": "boss",
+                "idempotency_key": "same-request",
+                "candidates": [{"source_candidate_id": "boss-2", "raw_card_text": "Bob card"}],
+            },
+        ]
+
+        def run_import(payload: dict[str, object]) -> object:
+            try:
+                barrier.wait(timeout=5)
+                return self.service.import_candidates(payload)
+            except Exception as exc:  # pragma: no cover - asserted below
+                return exc
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results.extend(pool.map(run_import, payloads))
+
+        successes = [result for result in results if isinstance(result, dict)]
+        conflicts = [result for result in results if isinstance(result, IdempotencyConflictError)]
+        self.assertEqual(len(successes), 1)
+        self.assertEqual(len(conflicts), 1)
+        self.assertEqual(len(self.repository.list_batches()), 1)
 
 
 if __name__ == "__main__":

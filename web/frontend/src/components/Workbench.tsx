@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  ArrowLeft,
   BriefcaseBusiness,
   Database,
   Home,
@@ -12,6 +13,7 @@ import {
 import {
   ApiRequestError,
   AppStatus,
+  BatchCandidateRow,
   CandidateRow,
   CaptureBatchRow,
   PagedResponse,
@@ -48,20 +50,40 @@ const emptyBatches: Loadable<CaptureBatchRow> = {
   error: "",
 };
 
+const emptyBatchCandidates: Loadable<BatchCandidateRow> = {
+  rows: [],
+  total: 0,
+  page: 1,
+  page_size: 50,
+  loading: false,
+  error: "",
+};
+
 export function Workbench({ status }: { status: AppStatus }) {
   const [view, setView] = useState<View>("home");
   const [platformFilter, setPlatformFilter] = useState("");
   const [unboundOnly, setUnboundOnly] = useState(false);
   const [candidatePage, setCandidatePage] = useState(1);
   const [batchPage, setBatchPage] = useState(1);
+  const [batchCandidatePage, setBatchCandidatePage] = useState(1);
+  const [candidateRefreshTick, setCandidateRefreshTick] = useState(0);
+  const [batchRefreshTick, setBatchRefreshTick] = useState(0);
+  const [batchCandidateRefreshTick, setBatchCandidateRefreshTick] = useState(0);
+  const [selectedBatch, setSelectedBatch] = useState<CaptureBatchRow | null>(null);
   const [candidates, setCandidates] = useState<Loadable<CandidateRow>>(emptyCandidates);
   const [batches, setBatches] = useState<Loadable<CaptureBatchRow>>(emptyBatches);
+  const [batchCandidates, setBatchCandidates] = useState<Loadable<BatchCandidateRow>>(emptyBatchCandidates);
   const latestCandidateRequest = useRef(0);
   const latestBatchRequest = useRef(0);
+  const latestBatchCandidateRequest = useRef(0);
 
   useEffect(() => {
     setCandidatePage(1);
   }, [platformFilter, unboundOnly]);
+
+  useEffect(() => {
+    setBatchPage(1);
+  }, [platformFilter]);
 
   useEffect(() => {
     if (view !== "candidates") return;
@@ -81,14 +103,13 @@ export function Workbench({ status }: { status: AppStatus }) {
       })
       .catch((error: unknown) => {
         if (latestCandidateRequest.current !== requestId) return;
-        const message =
-          error instanceof ApiRequestError ? error.message : "候选人列表加载失败。";
+        const message = error instanceof ApiRequestError ? error.message : "候选人列表加载失败。";
         setCandidates((current) => ({ ...current, loading: false, error: message, rows: [] }));
       });
-  }, [candidatePage, platformFilter, unboundOnly, view]);
+  }, [candidatePage, candidateRefreshTick, platformFilter, unboundOnly, view]);
 
   useEffect(() => {
-    if (view !== "batches") return;
+    if (view !== "batches" || selectedBatch !== null) return;
     const requestId = latestBatchRequest.current + 1;
     latestBatchRequest.current = requestId;
     setBatches((current) => ({ ...current, loading: true, error: "" }));
@@ -104,11 +125,33 @@ export function Workbench({ status }: { status: AppStatus }) {
       })
       .catch((error: unknown) => {
         if (latestBatchRequest.current !== requestId) return;
-        const message =
-          error instanceof ApiRequestError ? error.message : "采集批次加载失败。";
+        const message = error instanceof ApiRequestError ? error.message : "采集批次加载失败。";
         setBatches((current) => ({ ...current, loading: false, error: message, rows: [] }));
       });
-  }, [batchPage, platformFilter, view]);
+  }, [batchPage, batchRefreshTick, platformFilter, selectedBatch, view]);
+
+  useEffect(() => {
+    if (view !== "batches" || selectedBatch === null) return;
+    const requestId = latestBatchCandidateRequest.current + 1;
+    latestBatchCandidateRequest.current = requestId;
+    setBatchCandidates((current) => ({ ...current, loading: true, error: "" }));
+    const params = new URLSearchParams({
+      page: String(batchCandidatePage),
+      page_size: "50",
+    });
+    void requestJson<PagedResponse<BatchCandidateRow>>(
+      `/api/capture-batches/${selectedBatch.id}/candidates?${params.toString()}`,
+    )
+      .then((payload) => {
+        if (latestBatchCandidateRequest.current !== requestId) return;
+        setBatchCandidates({ ...payload, loading: false, error: "" });
+      })
+      .catch((error: unknown) => {
+        if (latestBatchCandidateRequest.current !== requestId) return;
+        const message = error instanceof ApiRequestError ? error.message : "批次候选人加载失败。";
+        setBatchCandidates((current) => ({ ...current, loading: false, error: message, rows: [] }));
+      });
+  }, [batchCandidatePage, batchCandidateRefreshTick, selectedBatch, view]);
 
   const latestLabel = status.latest_batch_id ? `#${status.latest_batch_id}` : "暂无批次";
   const statusLabel = !status.latest_batch_id
@@ -169,7 +212,7 @@ export function Workbench({ status }: { status: AppStatus }) {
               <article><span>最新批次</span><strong>{status.latest_batch_id ? <CountUp to={status.latest_batch_id} prefix="#" /> : latestLabel}</strong><small>{statusLabel}</small></article>
             </section>
             <section className="status-band">
-              <div><Database size={21} aria-hidden="true" /><div><strong>阶段 2A 已接入候选人主档入口</strong><p>当前可以查看候选人列表、未绑定岗位状态和最近采集批次，不再把“无岗位”当成异常。</p></div></div>
+              <div><Database size={21} aria-hidden="true" /><div><strong>阶段 2A 已接入候选人主档入口</strong><p>当前可以查看候选人列表、正式岗位绑定状态和最近采集批次，也能回看单批次快照。</p></div></div>
             </section>
             <section className="data-location">
               <div><h2>数据位置</h2><p>工作台正在读取的本地目录</p></div>
@@ -187,7 +230,7 @@ export function Workbench({ status }: { status: AppStatus }) {
                 unboundOnly={unboundOnly}
                 setUnboundOnly={setUnboundOnly}
                 platformOptions={platformOptions}
-                onRefresh={() => setCandidatePage((value) => value)}
+                onRefresh={() => setCandidateRefreshTick((value) => value + 1)}
               />
             </div>
             <CandidateTable data={candidates} />
@@ -210,11 +253,15 @@ export function Workbench({ status }: { status: AppStatus }) {
                 unboundOnly={false}
                 setUnboundOnly={() => undefined}
                 platformOptions={platformOptions}
-                onRefresh={() => setBatchPage((value) => value)}
+                onRefresh={() => setBatchRefreshTick((value) => value + 1)}
                 hideUnboundToggle
               />
             </div>
-            <BatchTable data={batches} />
+            <BatchTable data={batches} onOpenBatch={(batch) => {
+              setSelectedBatch(batch);
+              setBatchCandidatePage(1);
+              setBatchCandidateRefreshTick((value) => value + 1);
+            }} />
             <Pager
               page={batchPage}
               pageSize={batches.page_size}
@@ -222,6 +269,29 @@ export function Workbench({ status }: { status: AppStatus }) {
               onPrevious={() => setBatchPage((value) => Math.max(1, value - 1))}
               onNext={() => setBatchPage((value) => value + 1)}
             />
+            {selectedBatch !== null && (
+              <>
+                <div className="page-heading">
+                  <div><p className="eyebrow">批次候选人快照</p><h1>批次 #{selectedBatch.id}</h1></div>
+                  <div className="shell-meta">
+                    <button className="icon-button" onClick={() => setSelectedBatch(null)} aria-label="返回批次列表" title="返回批次列表">
+                      <ArrowLeft size={16} aria-hidden="true" />
+                    </button>
+                    <button className="icon-button" onClick={() => setBatchCandidateRefreshTick((value) => value + 1)} aria-label="刷新批次候选人" title="刷新批次候选人">
+                      <RefreshCw size={16} aria-hidden="true" />
+                    </button>
+                  </div>
+                </div>
+                <BatchCandidateTable batchId={selectedBatch.id} data={batchCandidates} />
+                <Pager
+                  page={batchCandidatePage}
+                  pageSize={batchCandidates.page_size}
+                  total={batchCandidates.total}
+                  onPrevious={() => setBatchCandidatePage((value) => Math.max(1, value - 1))}
+                  onNext={() => setBatchCandidatePage((value) => value + 1)}
+                />
+              </>
+            )}
           </div>
         )}
         {view === "settings" && (
@@ -305,7 +375,7 @@ function CandidateTable({ data }: { data: Loadable<CandidateRow> }) {
             <td>{row.name || `候选人 #${row.id}`}</td>
             <td>{row.latest_source_platform || row.source_platform || "unknown"}</td>
             <td>{row.latest_source_job_title || "未提供"}</td>
-            <td>{row.latest_batch_role_id ? "已绑定岗位" : "未绑定岗位"}</td>
+            <td>{Boolean(row.has_role_binding) ? "已绑定岗位" : "未绑定岗位"}</td>
             <td>{row.latest_capture_time || "—"}</td>
             <td>{row.latest_batch_id ? `#${row.latest_batch_id}` : "—"}</td>
             <td>{row.latest_ingest_status === "updated" ? "更新" : "新增"}</td>
@@ -316,7 +386,13 @@ function CandidateTable({ data }: { data: Loadable<CandidateRow> }) {
   );
 }
 
-function BatchTable({ data }: { data: Loadable<CaptureBatchRow> }) {
+function BatchTable({
+  data,
+  onOpenBatch,
+}: {
+  data: Loadable<CaptureBatchRow>;
+  onOpenBatch: (batch: CaptureBatchRow) => void;
+}) {
   if (data.loading) return <section className="status-band"><div><strong>正在加载批次…</strong></div></section>;
   if (data.error) return <section className="status-band"><div><strong>{data.error}</strong></div></section>;
   if (!data.rows.length) return <section className="status-band"><div><strong>还没有采集批次。</strong></div></section>;
@@ -332,6 +408,7 @@ function BatchTable({ data }: { data: Loadable<CaptureBatchRow> }) {
           <th>更新</th>
           <th>跳过</th>
           <th>失败</th>
+          <th>操作</th>
         </tr>
       </thead>
       <tbody>
@@ -345,6 +422,49 @@ function BatchTable({ data }: { data: Loadable<CaptureBatchRow> }) {
             <td>{row.total_updated}</td>
             <td>{row.total_skipped}</td>
             <td>{row.total_failed}</td>
+            <td>
+              <button className="icon-button" onClick={() => onOpenBatch(row)}>
+                查看候选人
+              </button>
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+function BatchCandidateTable({
+  batchId,
+  data,
+}: {
+  batchId: number;
+  data: Loadable<BatchCandidateRow>;
+}) {
+  if (data.loading) return <section className="status-band"><div><strong>正在加载批次 #{batchId} 的候选人…</strong></div></section>;
+  if (data.error) return <section className="status-band"><div><strong>{data.error}</strong></div></section>;
+  if (!data.rows.length) return <section className="status-band"><div><strong>批次 #{batchId} 暂无候选人快照。</strong></div></section>;
+  return (
+    <table>
+      <thead>
+        <tr>
+          <th>候选人</th>
+          <th>来源岗位文字</th>
+          <th>采集时间</th>
+          <th>本次结果</th>
+          <th>正式岗位绑定</th>
+          <th>原始快照</th>
+        </tr>
+      </thead>
+      <tbody>
+        {data.rows.map((row) => (
+          <tr key={row.id}>
+            <td>{row.name || `候选人 #${row.candidate_id}`}</td>
+            <td>{row.job_title || "未提供"}</td>
+            <td>{row.capture_time || "—"}</td>
+            <td>{row.ingest_status === "updated" ? "更新" : "新增"}</td>
+            <td>{Boolean(row.has_role_binding) ? "已绑定岗位" : "未绑定岗位"}</td>
+            <td>{row.raw_card_text}</td>
           </tr>
         ))}
       </tbody>

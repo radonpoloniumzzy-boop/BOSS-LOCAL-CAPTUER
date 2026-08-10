@@ -25,6 +25,7 @@ export type CandidateRow = {
   latest_capture_time: string;
   latest_ingest_status: string;
   latest_batch_role_id: number | null;
+  has_role_binding: boolean | number;
 };
 
 export type CaptureBatchRow = {
@@ -38,6 +39,20 @@ export type CaptureBatchRow = {
   total_failed: number;
   status: string;
   role_id: number | null;
+};
+
+export type BatchCandidateRow = {
+  id: number;
+  batch_id: number;
+  candidate_id: number;
+  name: string;
+  source_platform: string;
+  platform_uid: string;
+  job_title: string;
+  capture_time: string;
+  raw_card_text: string;
+  ingest_status: string;
+  has_role_binding: boolean | number;
 };
 
 export type PagedResponse<T> = {
