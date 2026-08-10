@@ -76,7 +76,12 @@ def create_web_app(
             return error_response(400, "invalid_host", "本地工作台只接受配置端口上的本机请求。")
         if request.method not in {"GET", "HEAD", "OPTIONS"} and request.url.path.startswith("/api/"):
             expected = f"http://127.0.0.1:{web_port}"
-            if request.headers.get("origin") != expected:
+            origin = str(request.headers.get("origin") or "")
+            is_extension_intake = (
+                request.url.path == "/api/intake/candidates"
+                and origin.startswith("chrome-extension://")
+            )
+            if origin != expected and not is_extension_intake:
                 return error_response(403, "same_origin_required", "请求来源无效，请从本地工作台页面操作。")
         return await call_next(request)
 

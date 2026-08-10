@@ -1,7 +1,7 @@
-﻿const REMOTE_CONTROL_DEFAULTS = {
+const REMOTE_CONTROL_DEFAULTS = {
   apiBase: "http://127.0.0.1:17863",
   apiToken: "",
-  jobTitle: "Boss 鎺ㄨ崘鐗涗汉",
+  jobTitle: "Boss 推荐牛人",
   jobProfileId: null,
   recruitmentTaskId: null,
   scrollMode: "hold_end",
@@ -79,12 +79,12 @@ async function pollRemoteCommand() {
 async function executeRemoteCommand(command, storedSettings) {
   const action = String(command?.action || "");
   if (!SUPPORTED_REMOTE_ACTIONS.has(action)) {
-    throw new Error(`涓嶆敮鎸佺殑杩滅▼鎿嶄綔锛?{action || "-"}`);
+    throw new Error(`不支持的远程操作：${action || "-"}`);
   }
   const interruptRequested = action === "pause_scroll" || action === "stop_capture";
   const tab = interruptRequested ? null : await findActiveSupportedRecruitingTab(command);
   if (!interruptRequested && !tab?.id) {
-    throw new Error(`未找到已打开的${remotePlatformLabel(command.platform)}招聘页面。`);
+    throw new Error(`未找到已打开的${remotePlatformLabel(command.platform)}招聘页面。`)
   }
   let settings = { ...storedSettings };
   const automationRequested = action === "automation_auto";
@@ -106,7 +106,7 @@ async function executeRemoteCommand(command, storedSettings) {
   if (interruptRequested) {
     const captureTab = await findRemoteCaptureTab(command);
     await requestRemoteScrollPause(captureTab.id, action);
-    return action === "stop_capture" ? "已发送停止采集请求。" : "已发送暂停滚动请求。";
+    return action === "stop_capture" ? "已发送停止采集请求" : "已发送暂停滚动请求";
   }
 
   await chrome.storage.local.set(settings);
@@ -124,10 +124,10 @@ async function executeRemoteCommand(command, storedSettings) {
     const frameResults = await collectRemoteFrames(tab.id, autoScroll, settings);
     const merged = mergeRemoteFrameResults(frameResults);
     if (merged.stopRequested) {
-      return `閲囬泦宸插仠姝細鏈璇嗗埆鐨?${merged.cards.length} 浜烘湭瀵煎叆`;
+      return `采集已停止：本次识别的 ${merged.cards.length} 人未导入`;
     }
     if (merged.cards.length === 0) {
-      throw new Error(`椤甸潰娌℃湁璇嗗埆鍒板€欓€変汉鍗＄墖銆?{merged.debugSummary || ""}`.trim());
+      throw new Error(`页面没有识别到候选人卡片。${merged.debugSummary || ""}`.trim());
     }
     const imported = await importRemoteCards(
       settings,
@@ -135,23 +135,7 @@ async function executeRemoteCommand(command, storedSettings) {
       merged,
       automationRequested,
     );
-    const webIntake = await BossLocalWebIntake.queueImportedBatch({
-      settings,
-      imported,
-      merged,
-      sourceUrl: tab.url,
-      storageArea: chrome.storage.local,
-    });
-    let webMessage = "";
-    if (webIntake?.batchKey) {
-      const sent = await BossLocalWebIntake.sendQueuedBatch({
-        settings,
-        batchKey: webIntake.batchKey,
-        storageArea: chrome.storage.local,
-      });
-      webMessage = sent?.message ? `，Web 入库：${sent.message}` : "";
-    }
-    return `采集完成：识别 ${merged.cards.length} 人，导入批次 #${imported.batch_id ?? "-"}${webMessage}`;
+    return `采集完成：识别 ${merged.cards.length} 人，导入批次 #${imported.batch_id ?? "-"}`;
   } finally {
     await clearRemoteCaptureContext(command.id);
   }
@@ -172,10 +156,10 @@ async function loadRemoteDesktopJob(settings) {
   });
   const payload = await response.json();
   if (!response.ok || !payload?.ok) {
-    throw new Error(payload?.error || `璇诲彇妗岄潰宀椾綅澶辫触锛?{response.status}`);
+    throw new Error(payload?.error || `读取桌面岗位失败：${response.status}`);
   }
   if (payload.result?.job_profile_id === null || payload.result?.job_profile_id === undefined) {
-    throw new Error("桌面端尚未选择有效岗位。");
+    throw new Error("桌面端尚未选择有效岗位。")
   }
   return {
     ...settings,
@@ -203,7 +187,7 @@ async function startRemoteDesktopAutomation(settings, sourceUrl, command) {
   });
   const payload = await response.json();
   if (!response.ok || !payload?.ok || !payload.result?.ready) {
-    throw new Error(payload?.error || "桌面端自动化方案尚未准备好。");
+    throw new Error(payload?.error || "桌面端自动化方案尚未准备好。")
   }
   return payload.result;
 }
@@ -246,7 +230,7 @@ function remoteUrlHost(value) {
 }
 
 function remotePlatformLabel(platform) {
-  return platform === "liepin" ? "鐚庤仒" : "Boss";
+  return platform === "liepin" ? "猎聘" : "Boss";
 }
 
 function validateRemoteTaskContext(command, settings) {
@@ -254,13 +238,13 @@ function validateRemoteTaskContext(command, settings) {
   const commandPlatform = String(command.platform || "");
   const sourcePlatform = remotePlatformFromUrl(command.source_url);
   if (!Number.isInteger(expectedTaskId) || Number(settings.recruitmentTaskId) !== expectedTaskId) {
-    throw new Error("前端任务与插件当前任务不一致，请重新启动招聘任务后再试。");
+    throw new Error("前端任务与插件当前任务不一致，请重新启动招聘任务后再试。")
   }
   if (!commandPlatform || sourcePlatform !== commandPlatform) {
-    throw new Error("招聘任务的平台与来源页面不一致，请检查任务设置。");
+    throw new Error("招聘任务的平台与来源页面不一致，请检查任务设置。")
   }
   if (settings.platform && String(settings.platform) !== commandPlatform) {
-    throw new Error("桌面端当前任务平台与插件指令不一致。");
+    throw new Error("桌面端当前任务平台与插件指令不一致。")
   }
 }
 
@@ -273,11 +257,11 @@ async function findRemoteCaptureTab(command) {
     String(context.platform) !== String(command.platform) ||
     !Number.isInteger(Number(context.tabId))
   ) {
-    throw new Error("当前任务没有正在执行的前端采集，未发送暂停或停止请求。");
+    throw new Error("当前任务没有正在执行的前端采集，未发送暂停或停止请求。")
   }
   const tab = await chrome.tabs.get(Number(context.tabId));
   if (remotePlatformFromUrl(tab?.url) !== String(command.platform)) {
-    throw new Error("正在采集的浏览器标签页已切换平台，操作已取消。");
+    throw new Error("正在采集的浏览器标签页已切换平台，操作已取消。")
   }
   return tab;
 }
@@ -427,7 +411,7 @@ async function importRemoteCards(settings, sourceUrl, merged, automationRequeste
   });
   const payload = await response.json();
   if (!response.ok || !payload?.ok) {
-    throw new Error(payload?.error || `瀵煎叆妗岄潰绔け璐ワ細${response.status}`);
+    throw new Error(payload?.error || `导入桌面端失败：${response.status}`);
   }
   return payload.result || {};
 }
@@ -442,7 +426,7 @@ async function renewRemoteCommand(settings, command) {
     },
   );
   if (!response.ok) {
-    throw new Error(`鎻掍欢鎸囦护蹇冭烦澶辫触锛?{response.status}`);
+    throw new Error(`插件指令心跳失败：${response.status}`);
   }
 }
 
@@ -459,7 +443,7 @@ async function completeRemoteCommand(settings, command, ok, message) {
         },
       );
       if (!response.ok) {
-        throw new Error(`鎻掍欢鎸囦护瀹屾垚纭澶辫触锛?{response.status}`);
+        throw new Error(`插件指令完成确认失败：${response.status}`);
       }
       return;
     } catch (error) {
@@ -469,7 +453,7 @@ async function completeRemoteCommand(settings, command, ok, message) {
       }
     }
   }
-  throw lastError || new Error("鎻掍欢鎸囦护瀹屾垚纭澶辫触");
+  throw lastError || new Error("插件指令完成确认失败");
 }
 
 function remoteHeaders(settings) {

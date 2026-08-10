@@ -1,4 +1,4 @@
-﻿const assert = require("assert");
+const assert = require("assert");
 const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
@@ -106,6 +106,245 @@ globalThis.__serviceTest = {
   return { chrome, api: context.__serviceTest };
 }
 
+function createPopupElement(initial = {}) {
+  return {
+    value: "",
+    checked: false,
+    disabled: false,
+    textContent: "",
+    type: "text",
+    listeners: {},
+    addEventListener(event, handler) {
+      this.listeners[event] = handler;
+    },
+    ...initial,
+  };
+}
+
+function createPopupTestContext(options = {}) {
+  const store = options.store || {};
+  if (options.apiBase !== undefined) {
+    store.apiBase = options.apiBase;
+  }
+  if (options.apiToken !== undefined) {
+    store.apiToken = options.apiToken;
+  }
+  if (options.jobTitle !== undefined) {
+    store.jobTitle = options.jobTitle;
+  }
+  const fetchCalls = [];
+  const tabCreates = [];
+  const activeTab = options.activeTab || {
+    id: 7,
+    url: "https://www.zhipin.com/web/geek/recommend",
+  };
+  const frameResult = options.frameResult || {
+    cards: [
+      {
+        source_candidate_id: "boss-1",
+        platform_uid: "boss:1",
+        detail_url: "https://www.zhipin.com/candidate/1",
+        raw_card_text: "候选人 A",
+        name: "候选人 A",
+      },
+    ],
+    meta: { platform: "boss", rounds_completed: 2 },
+    frameUrl: activeTab.url,
+  };
+  const ids = [
+    "jobTitle",
+    "apiBase",
+    "apiToken",
+    "scrollMode",
+    "scrollStep",
+    "scrollWaitMs",
+    "maxScrollCount",
+    "noNewStopRounds",
+    "resumeMessage",
+    "waitSeconds",
+    "pollIntervalMs",
+    "batchActionDelaySeconds",
+    "maxBatchSessions",
+    "chatAutomationEnabled",
+    "status",
+    "batchStatus",
+    "batchLog",
+    "webIntakeStatus",
+    "automationAuto",
+    "pairingCode",
+    "applyPairingCode",
+    "downloadCurrentBatch",
+    "retryWebIntake",
+    "openWebWorkbench",
+    "scrollWaitDown",
+    "scrollWaitUp",
+    "collectCurrent",
+    "collectAuto",
+    "pauseScroll",
+    "requestResume",
+    "downloadResume",
+    "requestAndDownload",
+    "startBatchRequest",
+    "startBatchDownload",
+    "stopBatch",
+  ];
+  const elements = Object.fromEntries(ids.map((id) => [id, createPopupElement()]));
+  elements.chatAutomationEnabled.type = "checkbox";
+  elements.apiBase.value = String(options.apiBase || store.apiBase || "http://127.0.0.1:17863");
+  elements.apiToken.value = String(options.apiToken || store.apiToken || "token");
+  elements.jobTitle.value = String(options.jobTitle || store.jobTitle || "Boss 推荐牛人");
+  elements.scrollMode.value = "hold_end";
+  elements.scrollStep.value = "900";
+  elements.scrollWaitMs.value = "30";
+  elements.maxScrollCount.value = "80";
+  elements.noNewStopRounds.value = "4";
+  elements.resumeMessage.value = "方便发一份你的简历过来吗？";
+  elements.waitSeconds.value = "45";
+  elements.pollIntervalMs.value = "2000";
+  elements.batchActionDelaySeconds.value = "5";
+  elements.maxBatchSessions.value = "50";
+  elements.webIntakeStatus.textContent = "网页入库：等待发送。";
+
+  const chrome = {
+    storage: {
+      local: {
+        async get(key) {
+          if (typeof key === "string") {
+            return { [key]: store[key] };
+          }
+          if (Array.isArray(key)) {
+            return Object.fromEntries(key.map((item) => [item, store[item]]));
+          }
+          return { ...key, ...store };
+        },
+        async set(value) {
+          Object.assign(store, value);
+        },
+        async remove(key) {
+          if (Array.isArray(key)) {
+            for (const item of key) {
+              delete store[item];
+            }
+            return;
+          }
+          delete store[key];
+        },
+      },
+    },
+    tabs: {
+      async query() {
+        return [activeTab];
+      },
+      async sendMessage() {
+        return { ok: true };
+      },
+      async create(payload) {
+        tabCreates.push(payload);
+        return { id: 88, ...payload };
+      },
+    },
+    scripting: {
+      async executeScript(details) {
+        if (details.args?.length === 2) {
+          return [{ result: frameResult }];
+        }
+        return [];
+      },
+    },
+    runtime: {
+      async sendMessage() {
+        return {
+          ok: true,
+          status: {
+            running: false,
+            phase: "idle",
+            mode: "",
+            stats: {},
+            runtimeLogs: [],
+            recentEvents: [],
+          },
+        };
+      },
+    },
+  };
+
+  const fetch = async (url, requestOptions = {}) => {
+    fetchCalls.push({
+      url: String(url),
+      options: {
+        ...requestOptions,
+        headers: { ...(requestOptions.headers || {}) },
+      },
+    });
+    if (typeof options.fetchImpl === "function") {
+      return options.fetchImpl(url, requestOptions);
+    }
+    throw new Error(`Unexpected fetch: ${String(url)}`);
+  };
+
+  const context = {
+    URL,
+    Blob,
+    chrome,
+    console,
+    fetch,
+    clearInterval,
+    clearTimeout,
+    setTimeout,
+    addEventListener() {},
+    setInterval() {
+      return 1;
+    },
+    window: null,
+    document: {
+      getElementById(id) {
+        return elements[id] || createPopupElement();
+      },
+    },
+    BossLocalBatchExport: {
+      batchBelongsToConnection(previous, next) {
+        if (!previous || !next) {
+          return false;
+        }
+        return (
+          String(previous.apiBase || "").replace(/\/+$/, "") === String(next.apiBase || "").replace(/\/+$/, "")
+          && String(previous.apiToken || "") === String(next.apiToken || "")
+        );
+      },
+      async downloadBatchCsv() {
+        return { batchId: 1, filename: "batch.csv" };
+      },
+    },
+    BossLocalPairing: {
+      parsePairingCode(value) {
+        if (String(value || "").includes("pair-token")) {
+          return { apiBase: "http://127.0.0.1:17863", apiToken: "pair-token_123" };
+        }
+        throw new Error("连接码格式无效，请从桌面端设置页重新复制。");
+      },
+    },
+    globalThis: {},
+    __bossLocalPopupTestMode: true,
+  };
+  context.window = context;
+  context.globalThis = context;
+
+  const intakeSource = fs.readFileSync(path.join(EXTENSION_DIR, "web_intake.js"), "utf8");
+  vm.runInNewContext(intakeSource, context, { filename: "web_intake.js" });
+  const popupSource = fs.readFileSync(path.join(EXTENSION_DIR, "popup.js"), "utf8");
+  vm.runInNewContext(popupSource, context, { filename: "popup.js" });
+
+  return {
+    api: context.BossLocalPopup,
+    chrome,
+    context,
+    elements,
+    fetchCalls,
+    store,
+    tabCreates,
+  };
+}
+
 async function testDownloadEndpointValidation() {
   const { api } = loadServiceWorker();
   const downloadUrl = "https://www.zhipin.com/wflow/zpgeek/download/preview4boss/abc123?d=1&id=xyz";
@@ -207,7 +446,7 @@ function testChatRunnerHandlesTwoResumeRequestButtons() {
   assert(source.includes("isLikelyRequestResumeAction"));
   assert(source.includes("isRequestResumeButtonUsable"));
   assert(source.includes("messageOnly"));
-  assert(source.includes("页面求简历按钮当前需双方回复后才可用"));
+  assert(source.includes("双方回复后可用"));
 }
 
 function testBatchModesAreSeparated() {
@@ -216,7 +455,7 @@ function testBatchModesAreSeparated() {
   assert(source.includes("async function requestAndDownload"));
   assert(source.includes("async function processDownloadOnlySession"));
   assert(!source.includes("request flow download ok"));
-  assert(!source.includes("start waiting attachment resume"));
+  assert(!source.includes("开始等待附件简历"));
 }
 
 function testPreviewClickAvoidsAttachmentCardFalsePositive() {
@@ -457,7 +696,7 @@ function loadRemoteControlForBehaviorTest() {
           return [
             {
               result: {
-                cards: [{ platform_uid: "boss-1", raw_card_text: "鍊欓€変汉 A" }],
+                cards: [{ platform_uid: "boss-1", raw_card_text: "候选人 A" }],
                 meta: { platform: "boss", rounds_completed: 2 },
                 frameUrl: "https://www.zhipin.com/web/geek/recommend",
               },
@@ -482,7 +721,7 @@ function loadRemoteControlForBehaviorTest() {
               task_id: 12,
               platform: "boss",
               source_url: "https://www.zhipin.com/web/geek/recommend",
-              job_title: "鎷涜仒椤鹃棶",
+              job_title: "招聘顾问",
             },
           };
         },
@@ -493,22 +732,6 @@ function loadRemoteControlForBehaviorTest() {
         ok: true,
         async json() {
           return { ok: true, result: { batch_id: 88 } };
-        },
-      };
-    }
-    if (textUrl.endsWith("/api/intake/candidates")) {
-      return {
-        ok: true,
-        async json() {
-          return {
-            batch_id: 201,
-            status: "completed",
-            received_count: 1,
-            inserted_candidates: 1,
-            updated_candidates: 0,
-            skipped_candidates: 0,
-            failed_candidates: 0,
-          };
         },
       };
     }
@@ -526,8 +749,6 @@ function loadRemoteControlForBehaviorTest() {
     __bossLocalRemoteControlTestMode: true,
   };
   context.globalThis = context;
-  const intakeSource = fs.readFileSync(path.join(EXTENSION_DIR, "web_intake.js"), "utf8");
-  vm.runInNewContext(intakeSource, context, { filename: "web_intake.js" });
   const source = fs.readFileSync(path.join(EXTENSION_DIR, "remote_control.js"), "utf8");
   vm.runInNewContext(source, context, { filename: "remote_control.js" });
   return context.BossLocalRemoteControl;
@@ -557,6 +778,9 @@ function testPopupSupportsPairingAndAuthenticatedConnectionCheck() {
   assert(html.includes('id="pairingCode"'));
   assert(html.includes('id="applyPairingCode"'));
   assert(html.includes('<script src="pairing.js"></script>'));
+  assert(html.includes('<script src="web_intake.js"></script>'));
+  assert(html.includes('id="retryWebIntake"'));
+  assert(html.includes('id="openWebWorkbench"'));
   assert(popup.includes("applyPairingCodeAndTest"));
   assert(popup.includes("/api/connection/check"));
   assert(popup.includes("Token 不正确"));
@@ -568,7 +792,7 @@ function testCollectionCarriesCanonicalJobProfileId() {
   const chatRunner = fs.readFileSync(path.join(EXTENSION_DIR, "chat_batch_runner.js"), "utf8");
   assert(popup.includes("jobProfileId: activeJobProfileId"));
   assert(popup.includes("job_profile_id: settings.jobProfileId"));
-  assert(popup.includes("if (!options.automationRequested)"));
+  assert(popup.includes("if (!options.automationRequested && !webMode)"));
   assert(popup.includes("baseSettings = await loadDesktopJobProfile(baseSettings)"));
   assert(popup.includes("/api/extension/config"));
   assert(content.includes("job_profile_id: settings.jobProfileId"));
@@ -576,6 +800,251 @@ function testCollectionCarriesCanonicalJobProfileId() {
   assert(popup.includes("recruitment_task_id: settings.recruitmentTaskId"));
   assert(content.includes("recruitment_task_id: settings.recruitmentTaskId"));
   assert(!popup.includes("window.setTimeout(() => window.close(), 1200)"));
+}
+
+async function testPopupPairingSuccessDoesNotReferenceCollectionVariables() {
+  const popup = createPopupTestContext({
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/api/connection/check")) {
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return { ok: true };
+          },
+        };
+      }
+      throw new Error(`Unexpected fetch: ${String(url)}`);
+    },
+  });
+  popup.elements.pairingCode.value =
+    "boss-local://pair?apiBase=http%3A%2F%2F127.0.0.1%3A17863&apiToken=pair-token_123";
+
+  await popup.api.applyPairingCodeAndTest();
+
+  assert.strictEqual(popup.fetchCalls.length, 1);
+  assert.strictEqual(popup.fetchCalls[0].url, "http://127.0.0.1:17863/api/connection/check");
+  assert(popup.elements.status.textContent.includes("桌面端已连接"));
+}
+
+async function testPopupWebModeCollectCurrentPostsDirectlyToWebIntake() {
+  const popup = createPopupTestContext({
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "web-token",
+    fetchImpl: async (url, requestOptions) => {
+      if (String(url).endsWith("/api/intake/candidates")) {
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return {
+              batch_id: 201,
+              status: "completed",
+              received_count: 1,
+              inserted_candidates: 1,
+              updated_candidates: 0,
+              skipped_candidates: 0,
+              failed_candidates: 0,
+            };
+          },
+        };
+      }
+      throw new Error(`Unexpected fetch: ${String(url)}`);
+    },
+  });
+
+  await popup.api.init();
+  await popup.api.runCollection(false);
+
+  assert.strictEqual(popup.fetchCalls.length, 1);
+  assert.strictEqual(popup.fetchCalls[0].url, "http://127.0.0.1:17864/api/intake/candidates");
+  assert(!("Origin" in popup.fetchCalls[0].options.headers));
+  const payload = JSON.parse(popup.fetchCalls[0].options.body);
+  assert.strictEqual(payload.job_profile_id, null);
+  assert.strictEqual(payload.recruitment_task_id, null);
+  assert.strictEqual(payload.candidates[0].platform_uid, "boss:1");
+  assert.strictEqual(payload.candidates[0].source_candidate_id, "boss-1");
+  assert(popup.elements.status.textContent.includes("已发送到网页工作台"));
+}
+
+async function testPopupWebModeCollectAutoPostsDirectlyToWebIntake() {
+  const popup = createPopupTestContext({
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "web-token",
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/api/intake/candidates")) {
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return {
+              batch_id: 301,
+              status: "completed",
+              received_count: 1,
+              inserted_candidates: 1,
+              updated_candidates: 0,
+              skipped_candidates: 0,
+              failed_candidates: 0,
+            };
+          },
+        };
+      }
+      throw new Error(`Unexpected fetch: ${String(url)}`);
+    },
+  });
+
+  await popup.api.init();
+  await popup.api.runCollection(true);
+
+  assert.strictEqual(popup.fetchCalls.length, 1);
+  assert.strictEqual(popup.fetchCalls[0].url, "http://127.0.0.1:17864/api/intake/candidates");
+}
+
+async function testPopupDesktopModeStillUsesDesktopImportOnly() {
+  const popup = createPopupTestContext({
+    apiBase: "http://127.0.0.1:17863",
+    apiToken: "desktop-token",
+    fetchImpl: async (url) => {
+      const textUrl = String(url);
+      if (textUrl.endsWith("/api/extension/config")) {
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return {
+              ok: true,
+              result: {
+                job_profile_id: 9,
+                recruitment_task_id: 12,
+                job_title: "招聘顾问",
+              },
+            };
+          },
+        };
+      }
+      if (textUrl.endsWith("/api/import/cards")) {
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return { ok: true, result: { batch_id: 88, parsed_cards: 1, total_batch_items: 1 } };
+          },
+        };
+      }
+      throw new Error(`Unexpected fetch: ${textUrl}`);
+    },
+  });
+
+  await popup.api.init();
+  await popup.api.runCollection(false);
+
+  assert.strictEqual(popup.fetchCalls.length, 2);
+  assert(popup.fetchCalls.some((call) => call.url.endsWith("/api/extension/config")));
+  assert(popup.fetchCalls.some((call) => call.url.endsWith("/api/import/cards")));
+  assert(!popup.fetchCalls.some((call) => call.url.endsWith("/api/intake/candidates")));
+}
+
+async function testPopupRetryRestoresPendingStateAcrossInit() {
+  const sharedStore = { apiBase: "http://127.0.0.1:17864", apiToken: "web-token" };
+  const failing = createPopupTestContext({
+    store: sharedStore,
+    fetchImpl: async () => {
+      throw new Error("connect ECONNREFUSED 127.0.0.1:17864");
+    },
+  });
+
+  await failing.api.init();
+  await failing.api.runCollection(false);
+  const pendingState = sharedStore[failing.context.BossLocalWebIntake.STATE_KEY];
+  assert.strictEqual(Object.keys(pendingState.pendingBatches).length, 1);
+
+  const recovered = createPopupTestContext({
+    store: sharedStore,
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/api/intake/candidates")) {
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return {
+              batch_id: 302,
+              status: "completed",
+              received_count: 1,
+              inserted_candidates: 1,
+              updated_candidates: 0,
+              skipped_candidates: 0,
+              failed_candidates: 0,
+            };
+          },
+        };
+      }
+      throw new Error(`Unexpected fetch: ${String(url)}`);
+    },
+  });
+
+  await recovered.api.init();
+  assert(recovered.elements.webIntakeStatus.textContent.includes("Web 工作台未启动"));
+  await recovered.api.retryWebIntake();
+  const state = sharedStore[recovered.context.BossLocalWebIntake.STATE_KEY];
+  assert.strictEqual(Object.keys(state.pendingBatches).length, 0);
+  assert.strictEqual(Object.keys(state.completedBatches).length, 1);
+  assert(recovered.elements.webIntakeStatus.textContent.includes("入库成功"));
+}
+
+async function testWebIntakeConnectionChangeDoesNotResendOldPendingBatch() {
+  const popup = createPopupTestContext({ apiBase: "http://127.0.0.1:17864", apiToken: "token-a" });
+  const settingsA = { apiBase: "http://127.0.0.1:17864", apiToken: "token-a", jobTitle: "Boss 推荐牛人" };
+  const merged = {
+    platform: "boss",
+    cards: [{ source_candidate_id: "boss-1", raw_card_text: "候选人 A" }],
+  };
+  const queued = await popup.context.BossLocalWebIntake.queueCapturedBatch({
+    settings: settingsA,
+    merged,
+    sourceUrl: "https://www.zhipin.com/web/geek/recommend",
+    idempotencyKey: "webcap-test-1",
+    storageArea: popup.chrome.storage.local,
+  });
+  let fetchCalled = false;
+  const result = await popup.context.BossLocalWebIntake.sendQueuedBatch({
+    settings: { ...settingsA, apiToken: "token-b" },
+    batchKey: queued.batchKey,
+    storageArea: popup.chrome.storage.local,
+    fetchImpl: async () => {
+      fetchCalled = true;
+      throw new Error("should not fetch");
+    },
+  });
+
+  assert.strictEqual(fetchCalled, false);
+  assert.strictEqual(result.statusLabel, "等待原连接");
+}
+
+async function testWebIntakeSameRunIdDoesNotDuplicatePendingBatch() {
+  const popup = createPopupTestContext({ apiBase: "http://127.0.0.1:17864", apiToken: "token-a" });
+  const settings = { apiBase: "http://127.0.0.1:17864", apiToken: "token-a", jobTitle: "Boss 推荐牛人" };
+  const merged = {
+    platform: "boss",
+    cards: [{ source_candidate_id: "boss-1", raw_card_text: "候选人 A" }],
+  };
+  const first = await popup.context.BossLocalWebIntake.queueCapturedBatch({
+    settings,
+    merged,
+    sourceUrl: "https://www.zhipin.com/web/geek/recommend",
+    idempotencyKey: "webcap-run-1",
+    storageArea: popup.chrome.storage.local,
+  });
+  const second = await popup.context.BossLocalWebIntake.queueCapturedBatch({
+    settings,
+    merged,
+    sourceUrl: "https://www.zhipin.com/web/geek/recommend",
+    idempotencyKey: "webcap-run-1",
+    storageArea: popup.chrome.storage.local,
+  });
+  const state = await popup.context.BossLocalWebIntake.loadState(popup.chrome.storage.local);
+
+  assert.strictEqual(first.batchKey, second.batchKey);
+  assert.strictEqual(state.pendingOrder.length, 1);
 }
 
 async function testCompletedCollectionCanDownloadItsExactBatch() {
@@ -680,7 +1149,7 @@ function testDesktopRemoteControlKeepsPopupControlsAndUsesTaskScopedCommands() {
   const remote = fs.readFileSync(path.join(EXTENSION_DIR, "remote_control.js"), "utf8");
   const popup = fs.readFileSync(path.join(EXTENSION_DIR, "popup.html"), "utf8");
 
-  assert(worker.includes('importScripts("web_intake.js", "remote_control.js")'));
+  assert(worker.includes('importScripts("remote_control.js")'));
   for (const action of [
     "automation_auto",
     "collect_current",
@@ -704,8 +1173,6 @@ function testDesktopRemoteControlKeepsPopupControlsAndUsesTaskScopedCommands() {
   assert(popup.includes('id="collectCurrent"'));
   assert(popup.includes('id="collectAuto"'));
   assert(popup.includes('id="pauseScroll"'));
-  assert(popup.includes('id="retryWebIntake"'));
-  assert(popup.includes('id="openWebWorkbench"'));
 }
 
 async function testDesktopRemoteAutoExecutesAgainstMatchedTaskTab() {
@@ -728,7 +1195,7 @@ async function testDesktopRemoteAutoExecutesAgainstMatchedTaskTab() {
       noNewStopRounds: 2,
     },
   );
-  assert.strictEqual(message, "采集完成：识别 1 人，导入批次 #88，Web 入库：网页工作台已接收批次 #201");
+  assert.strictEqual(message, "采集完成：识别 1 人，导入批次 #88");
 }
 
 async function main() {
@@ -755,6 +1222,13 @@ async function main() {
   testPairingCodeParsesAndRejectsInvalidInput();
   testPopupSupportsPairingAndAuthenticatedConnectionCheck();
   testCollectionCarriesCanonicalJobProfileId();
+  await testPopupPairingSuccessDoesNotReferenceCollectionVariables();
+  await testPopupWebModeCollectCurrentPostsDirectlyToWebIntake();
+  await testPopupWebModeCollectAutoPostsDirectlyToWebIntake();
+  await testPopupDesktopModeStillUsesDesktopImportOnly();
+  await testPopupRetryRestoresPendingStateAcrossInit();
+  await testWebIntakeConnectionChangeDoesNotResendOldPendingBatch();
+  await testWebIntakeSameRunIdDoesNotDuplicatePendingBatch();
   await testCompletedCollectionCanDownloadItsExactBatch();
   testFilenameTemplatesMatchDesktopFixtures();
   testDesktopRemoteControlKeepsPopupControlsAndUsesTaskScopedCommands();

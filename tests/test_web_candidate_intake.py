@@ -39,9 +39,9 @@ class CandidateIntakeWebApiTest(unittest.TestCase):
         self.client.__exit__(None, None, None)
         self.temp.cleanup()
 
-    def _headers(self) -> dict[str, str]:
+    def _headers(self, origin: str = "http://127.0.0.1:17864") -> dict[str, str]:
         return {
-            "Origin": "http://127.0.0.1:17864",
+            "Origin": origin,
             "X-Boss-Local-Token": self.token,
         }
 
@@ -54,6 +54,34 @@ class CandidateIntakeWebApiTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 401)
         self.assertNotIn(self.token, response.text)
+
+    def test_candidate_intake_accepts_chrome_extension_origin(self) -> None:
+        response = self.client.post(
+            "/api/intake/candidates",
+            json={
+                "source_platform": "boss",
+                "idempotency_key": "chrome-extension-origin",
+                "candidates": [{"source_candidate_id": "boss-1", "raw_card_text": "Alice card"}],
+            },
+            headers=self._headers("chrome-extension://unit-test-extension"),
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["inserted_candidates"], 1)
+
+    def test_candidate_intake_rejects_non_local_non_extension_origin(self) -> None:
+        response = self.client.post(
+            "/api/intake/candidates",
+            json={
+                "source_platform": "boss",
+                "idempotency_key": "bad-origin",
+                "candidates": [{"source_candidate_id": "boss-1", "raw_card_text": "Alice card"}],
+            },
+            headers=self._headers("https://example.com"),
+        )
+
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(response.json()["error"]["code"], "same_origin_required")
 
     def test_candidate_intake_and_queries_work_without_formal_role_binding(self) -> None:
         payload = {

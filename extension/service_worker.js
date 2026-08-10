@@ -1017,7 +1017,7 @@ async function safeTabsSendMessage(tabId, message) {
 }
 
 if (typeof importScripts === "function") {
-  importScripts("web_intake.js", "remote_control.js");
+  importScripts("remote_control.js");
 }
 
 async function handleBatchTabRemoved(tabId) {

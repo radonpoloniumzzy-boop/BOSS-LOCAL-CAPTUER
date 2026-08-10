@@ -1,6 +1,6 @@
 (function (globalThis) {
   const WEB_INTAKE_PORT = 17864;
-  const STATE_KEY = "boss_web_intake_state_v1";
+  const STATE_KEY = "boss_web_intake_state_v2";
   const MAX_AUTO_RETRIES = 1;
   const AUTO_RETRY_DELAY_MS = 900;
   const COMPLETED_LIMIT = 20;
@@ -16,20 +16,35 @@
     }
     try {
       const url = new URL(raw);
-      const hostname = url.hostname.toLowerCase();
-      if (hostname === "localhost" || hostname === "::1" || hostname === "[::1]") {
+      if (["localhost", "::1", "[::1]"].includes(url.hostname.toLowerCase())) {
         url.hostname = "127.0.0.1";
       }
       return trimTrailingSlash(url.toString());
     } catch (_error) {
-      return trimTrailingSlash(raw.replace(/^http:\/\/(?:localhost|\[::1\])(?=[:/]|$)/i, "http://127.0.0.1"));
+      return trimTrailingSlash(raw);
     }
   }
 
-  function deriveWebApiBase(apiBase) {
-    const normalizedBase = normalizeApiBase(apiBase);
+  function getApiPort(value) {
     try {
-      const url = new URL(normalizedBase);
+      const url = new URL(normalizeApiBase(value));
+      if (url.port) {
+        return Number(url.port);
+      }
+      return url.protocol === "https:" ? 443 : 80;
+    } catch (_error) {
+      return 0;
+    }
+  }
+
+  function isWebWorkbenchMode(settings) {
+    return getApiPort(settings?.apiBase) === WEB_INTAKE_PORT;
+  }
+
+  function deriveWebApiBase(apiBase) {
+    const normalized = normalizeApiBase(apiBase);
+    try {
+      const url = new URL(normalized);
       url.port = String(WEB_INTAKE_PORT);
       url.pathname = "";
       url.search = "";
@@ -51,19 +66,20 @@
   }
 
   function connectionIdentity(settings) {
-    const desktopApiBase = normalizeApiBase(settings?.apiBase || "");
-    const webApiBase = deriveWebApiBase(desktopApiBase);
+    const modeApiBase = normalizeApiBase(settings?.apiBase || "");
+    const webApiBase = isWebWorkbenchMode(settings)
+      ? modeApiBase
+      : deriveWebApiBase(modeApiBase);
     return {
-      desktopApiBase,
+      modeApiBase,
       webApiBase,
       tokenFingerprint: stableHash(String(settings?.apiToken || "")),
-      key: stableHash(`${desktopApiBase}|${webApiBase}|${String(settings?.apiToken || "")}`),
+      key: stableHash(`${modeApiBase}|${webApiBase}|${String(settings?.apiToken || "")}`),
     };
   }
 
   function sameConnection(identity, settings) {
-    const current = connectionIdentity(settings);
-    return identity && identity.key === current.key;
+    return Boolean(identity) && identity.key === connectionIdentity(settings).key;
   }
 
   function nowIso() {
@@ -92,6 +108,10 @@
   async function saveState(state, storageArea) {
     const area = storageArea || chrome.storage.local;
     await area.set({ [STATE_KEY]: state });
+  }
+
+  function createClientBatchId() {
+    return `webcap-${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 10)}`;
   }
 
   function sanitizeResult(result) {
@@ -127,7 +147,7 @@
     };
   }
 
-  function buildPayload({ settings, imported, merged, sourceUrl }) {
+  function buildPayload({ settings, merged, sourceUrl, idempotencyKey }) {
     const sourcePlatform = String(merged?.platform || settings?.platform || "").trim();
     const candidates = Array.isArray(merged?.cards)
       ? merged.cards
@@ -137,33 +157,29 @@
     if (!candidates.length) {
       return null;
     }
-    const desktopBatchId = Number(imported?.batch_id || 0);
     return {
       source_platform: sourcePlatform,
-      source_url: String(sourceUrl || imported?.source_url || settings?.sourceUrl || "").trim(),
-      source_job_title: String(imported?.job_title || settings?.jobTitle || "").trim(),
-      job_profile_id: imported?.job_profile_id ?? settings?.jobProfileId ?? null,
-      recruitment_task_id: imported?.recruitment_task_id ?? settings?.recruitmentTaskId ?? null,
-      idempotency_key: desktopBatchId > 0 ? `ext-web-intake-${desktopBatchId}` : `ext-web-intake-${Date.now()}`,
+      source_url: String(sourceUrl || "").trim(),
+      source_job_title: String(settings?.jobTitle || "").trim(),
+      job_profile_id: null,
+      recruitment_task_id: null,
+      idempotency_key: String(idempotencyKey || "").trim(),
       candidates,
     };
   }
 
-  function buildPendingRecord({ settings, imported, merged, sourceUrl }) {
-    const payload = buildPayload({ settings, imported, merged, sourceUrl });
+  function buildPendingRecord({ settings, merged, sourceUrl, idempotencyKey }) {
+    const payload = buildPayload({ settings, merged, sourceUrl, idempotencyKey });
     if (!payload) {
       return null;
     }
-    const identity = connectionIdentity(settings);
-    const desktopBatchId = Number(imported?.batch_id || 0);
-    const batchKey = `${identity.key}:${desktopBatchId}:${payload.idempotency_key}`;
+    const connection = connectionIdentity(settings);
+    const batchKey = `${connection.key}:${payload.idempotency_key}`;
     return {
       batchKey,
-      desktopBatchId,
       idempotencyKey: payload.idempotency_key,
       payload,
-      connection: identity,
-      source: "extension_capture",
+      connection,
       createdAt: nowIso(),
       updatedAt: nowIso(),
       attemptCount: 0,
@@ -174,13 +190,13 @@
     };
   }
 
-  function classifyFailure(response, payload, error) {
+  function classifyFailure(response, payload) {
     const safeCode = String(payload?.error?.code || "");
     const safeMessage = String(payload?.error?.message || "");
     if (!response) {
       return {
         status: "waiting_retry",
-        statusLabel: "网页工作台未启动",
+        statusLabel: "Web 工作台未启动",
         code: "workbench_unreachable",
         message: "无法连接网页工作台，请确认 http://127.0.0.1:17864 已启动。",
         autoRetry: true,
@@ -191,7 +207,16 @@
         status: "failed",
         statusLabel: "鉴权失败",
         code: "auth_failed",
-        message: "网页工作台 Token 校验失败，请重新检查连接配置。",
+        message: "网页工作台 Token 校验失败，请检查当前连接配置。",
+        autoRetry: false,
+      };
+    }
+    if (response.status === 403) {
+      return {
+        status: "failed",
+        statusLabel: "发送失败",
+        code: safeCode || "same_origin_required",
+        message: safeMessage || "网页工作台拒绝了当前写入请求。",
         autoRetry: false,
       };
     }
@@ -217,7 +242,7 @@
       status: "failed",
       statusLabel: "发送失败",
       code: safeCode || "request_failed",
-      message: safeMessage || error?.message || `网页工作台返回状态码 ${response.status}`,
+      message: safeMessage || `网页工作台返回状态码 ${response.status}`,
       autoRetry: false,
     };
   }
@@ -235,7 +260,7 @@
       return {
         status: "partial",
         statusLabel: "部分成功",
-        message: `网页工作台已接收，批次 #${safe.batch_id || "-"} 存在部分失败。`,
+        message: `网页工作台已接收批次 #${safe.batch_id || "-"}，其中存在部分失败。`,
       };
     }
     return {
@@ -274,17 +299,13 @@
     if (pending) {
       return pending;
     }
-    const completed = state.completedOrder
+    return state.completedOrder
       .map((key) => state.completedBatches[key])
-      .find((record) => sameConnection(record?.connection, settings));
-    if (completed) {
-      return completed;
-    }
-    return null;
+      .find((record) => sameConnection(record?.connection, settings)) || null;
   }
 
-  async function queueImportedBatch({ settings, imported, merged, sourceUrl, storageArea }) {
-    const record = buildPendingRecord({ settings, imported, merged, sourceUrl });
+  async function queueCapturedBatch({ settings, merged, sourceUrl, idempotencyKey, storageArea }) {
+    const record = buildPendingRecord({ settings, merged, sourceUrl, idempotencyKey });
     if (!record) {
       return null;
     }
@@ -307,13 +328,16 @@
       return currentRecordForConnection(state, settings);
     }
     if (!sameConnection(record.connection, settings)) {
-      record.status = "failed";
-      record.statusLabel = "等待原连接";
-      record.message = "该待发送批次属于旧连接，不会误发到当前人才库。";
-      record.updatedAt = nowIso();
-      upsertPending(state, record);
+      const blocked = {
+        ...record,
+        status: "failed",
+        statusLabel: "等待原连接",
+        message: "该待发送批次属于旧连接，不会误发到当前人才库。",
+        updatedAt: nowIso(),
+      };
+      upsertPending(state, blocked);
       await saveState(state, storageArea);
-      return record;
+      return blocked;
     }
 
     const executeFetch = fetchImpl || fetch;
@@ -337,7 +361,6 @@
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            Origin: record.connection.webApiBase,
             "X-Boss-Local-Token": String(settings.apiToken || ""),
           },
           body: JSON.stringify(record.payload),
@@ -361,12 +384,12 @@
           await saveState(state, storageArea);
           return lastRecord;
         }
-      } catch (error) {
+      } catch (_error) {
         payload = {};
         response = null;
       }
 
-      const failure = classifyFailure(response, payload, null);
+      const failure = classifyFailure(response, payload);
       lastRecord = {
         ...lastRecord,
         status: failure.status,
@@ -402,8 +425,6 @@
         title: "等待发送",
         message: "采集完成后会自动尝试发送到网页工作台。",
         canRetry: false,
-        belongsToCurrentConnection: true,
-        openUrl: deriveWebApiBase(settings?.apiBase || ""),
       };
     }
     const belongsToCurrentConnection = sameConnection(record.connection, settings);
@@ -413,18 +434,16 @@
       message: [
         record.message || "",
         result.batch_id ? `Web 批次 ID: ${result.batch_id}` : "",
-        result.received_count ? `接收数: ${result.received_count}` : "",
-        Number.isFinite(result.inserted_candidates) ? `新增: ${result.inserted_candidates || 0}` : "",
-        Number.isFinite(result.updated_candidates) ? `更新: ${result.updated_candidates || 0}` : "",
-        Number.isFinite(result.skipped_candidates) ? `跳过: ${result.skipped_candidates || 0}` : "",
-        Number.isFinite(result.failed_candidates) ? `失败: ${result.failed_candidates || 0}` : "",
+        Number.isFinite(result.received_count) ? `接收数: ${result.received_count || 0}` : "",
+        Number.isFinite(result.inserted_candidates) ? `新增数: ${result.inserted_candidates || 0}` : "",
+        Number.isFinite(result.updated_candidates) ? `更新数: ${result.updated_candidates || 0}` : "",
+        Number.isFinite(result.skipped_candidates) ? `跳过数: ${result.skipped_candidates || 0}` : "",
+        Number.isFinite(result.failed_candidates) ? `失败数: ${result.failed_candidates || 0}` : "",
         !belongsToCurrentConnection ? "当前连接与该批次创建时不同，已阻止误发送。" : "",
       ]
         .filter(Boolean)
         .join("\n"),
       canRetry: belongsToCurrentConnection && ["waiting_retry", "failed"].includes(String(record.status || "")),
-      belongsToCurrentConnection,
-      openUrl: (record.connection && record.connection.webApiBase) || deriveWebApiBase(settings?.apiBase || ""),
     };
   }
 
@@ -432,15 +451,18 @@
     STATE_KEY,
     normalizeApiBase,
     deriveWebApiBase,
+    getApiPort,
+    isWebWorkbenchMode,
     connectionIdentity,
     sameConnection,
+    createClientBatchId,
     buildPayload,
     buildPendingRecord,
-    queueImportedBatch,
-    sendQueuedBatch,
-    retryPendingForCurrentConnection,
     loadState,
     saveState,
+    queueCapturedBatch,
+    sendQueuedBatch,
+    retryPendingForCurrentConnection,
     currentRecordForConnection,
     formatStatus,
   };
