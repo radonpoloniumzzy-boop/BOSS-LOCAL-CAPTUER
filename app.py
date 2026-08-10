@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 try:
@@ -27,13 +28,32 @@ from ui.theme import apply_application_theme
 from core.app_lock import ApplicationLockError, DatabaseApplicationLock
 from core.bootstrap import BootstrapConfigurationError, BootstrapStore
 from core.utils import get_app_root
+from storage.db import DatabaseMissingError
+
+
+@dataclass(frozen=True)
+class DesktopStartupConfiguration:
+    data_dir: Path
+    require_existing_database: bool
+
+
+def resolve_desktop_startup(
+    project_root: Path, store: BootstrapStore | None = None
+) -> DesktopStartupConfiguration:
+    configured = (store or BootstrapStore()).load()
+    if configured is not None:
+        return DesktopStartupConfiguration(
+            data_dir=Path(configured.data_dir).resolve(),
+            require_existing_database=True,
+        )
+    return DesktopStartupConfiguration(
+        data_dir=project_root / "data",
+        require_existing_database=False,
+    )
 
 
 def resolve_desktop_data_dir(project_root: Path, store: BootstrapStore | None = None) -> Path:
-    configured = (store or BootstrapStore()).load()
-    if configured is not None:
-        return Path(configured.data_dir).resolve()
-    return project_root / "data"
+    return resolve_desktop_startup(project_root, store).data_dir
 
 
 def main() -> int:
@@ -41,11 +61,11 @@ def main() -> int:
     app.setApplicationName("Boss 本地候选人采集工具")
     apply_application_theme(app)
     try:
-        data_dir = resolve_desktop_data_dir(get_app_root())
+        startup = resolve_desktop_startup(get_app_root())
     except BootstrapConfigurationError as exc:
         QMessageBox.critical(None, "启动配置需要恢复", str(exc))
         return 1
-    database_path = data_dir / "boss_local_tool.db"
+    database_path = startup.data_dir / "boss_local_tool.db"
     lock = DatabaseApplicationLock(database_path)
     try:
         lock.acquire()
@@ -53,7 +73,21 @@ def main() -> int:
         QMessageBox.critical(None, "无法启动", str(exc))
         return 1
     try:
-        window = MainWindow(data_dir=data_dir)
+        try:
+            window = MainWindow(
+                data_dir=startup.data_dir,
+                require_existing_database=startup.require_existing_database,
+            )
+        except DatabaseMissingError:
+            QMessageBox.critical(
+                None,
+                "人才库文件不存在",
+                f"已配置的人才库文件不存在：{database_path}\n"
+                "系统不会自动创建空数据库。\n"
+                "请检查 D 盘或移动盘是否已连接，以及数据库文件是否被移动或改名。\n"
+                "恢复原数据库文件后再启动。",
+            )
+            return 1
         window.show()
         return app.exec()
     finally:

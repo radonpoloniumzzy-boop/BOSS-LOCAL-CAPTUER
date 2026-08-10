@@ -13,6 +13,10 @@ class DatabaseCorruptError(RuntimeError):
     pass
 
 
+class DatabaseMissingError(FileNotFoundError):
+    pass
+
+
 class UnsupportedSchemaError(RuntimeError):
     pass
 
@@ -37,11 +41,13 @@ class DatabaseManager:
 
     def initialize_existing(self) -> None:
         if not self.db_path.is_file():
-            raise FileNotFoundError(self.db_path)
+            raise DatabaseMissingError(self.db_path)
         uri = f"{self.db_path.resolve().as_uri()}?mode=rw"
         try:
             connection = sqlite3.connect(uri, uri=True)
         except sqlite3.DatabaseError as exc:
+            if not self.db_path.is_file():
+                raise DatabaseMissingError(self.db_path) from exc
             raise DatabaseCorruptError("无法打开已配置的人才库。") from exc
         self._initialize_connection(connection, require_schema=True)
 

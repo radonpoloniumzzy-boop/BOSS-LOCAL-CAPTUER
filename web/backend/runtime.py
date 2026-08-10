@@ -12,6 +12,7 @@ from core.bootstrap import BootstrapService, DATABASE_NAME, DataDirectoryError
 from storage.db import (
     DatabaseCorruptError,
     DatabaseManager,
+    DatabaseMissingError,
     DatabaseUpgradeError,
     UnsupportedSchemaError,
 )
@@ -91,6 +92,14 @@ class WebRuntime:
             return
         try:
             self.connect(data_dir, existing_only=True)
+        except DatabaseMissingError:
+            self.database_fault = self._fault("configured_database_missing")
+            write_runtime_log(
+                self.log_dir,
+                logging.ERROR,
+                "Configured database disappeared before it could be opened",
+                exc_info=True,
+            )
         except ApplicationLockError:
             self.database_fault = self._fault("database_in_use")
             write_runtime_log(

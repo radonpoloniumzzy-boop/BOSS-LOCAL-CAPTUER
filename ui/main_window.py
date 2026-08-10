@@ -61,6 +61,15 @@ from ui.workers import (
 )
 
 
+def initialize_database_for_startup(
+    database: DatabaseManager, *, require_existing: bool
+) -> None:
+    if require_existing:
+        database.initialize_existing()
+    else:
+        database.initialize()
+
+
 def open_local_folder(path: Path) -> bool:
     return QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.resolve())))
 
@@ -82,7 +91,12 @@ class MainWindow(QMainWindow):
     candidate_query_requested = Signal(object)
     ai_connection_test_requested = Signal(object)
 
-    def __init__(self, *, data_dir: Path | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        data_dir: Path | None = None,
+        require_existing_database: bool = False,
+    ) -> None:
         super().__init__()
         self.setWindowTitle("招聘候选人采集与 AI 初筛工具")
         self.resize(920, 720)
@@ -104,7 +118,14 @@ class MainWindow(QMainWindow):
             self.config_service.database_path,
             logger=self.logging_service.get_logger("storage.db"),
         )
-        self.database.initialize()
+        try:
+            initialize_database_for_startup(
+                self.database,
+                require_existing=require_existing_database,
+            )
+        except Exception:
+            self.logging_service.close()
+            raise
         self.repository = CandidateRepository(
             self.database,
             logger=self.logging_service.get_logger("storage.repository"),
