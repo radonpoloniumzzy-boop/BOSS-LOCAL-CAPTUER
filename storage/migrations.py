@@ -100,7 +100,6 @@ CREATE TABLE IF NOT EXISTS capture_batch_items (
 
 CREATE INDEX IF NOT EXISTS idx_capture_batch_items_batch_id ON capture_batch_items(batch_id);
 CREATE INDEX IF NOT EXISTS idx_capture_batch_items_candidate_id ON capture_batch_items(candidate_id);
-CREATE INDEX IF NOT EXISTS idx_capture_batch_items_platform_capture ON capture_batch_items(source_platform, capture_time DESC);
 
 CREATE TABLE IF NOT EXISTS candidate_profiles (
     candidate_id INTEGER PRIMARY KEY,
