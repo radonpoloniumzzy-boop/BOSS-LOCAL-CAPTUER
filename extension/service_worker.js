@@ -45,10 +45,20 @@ const stoppedBatchTabs = new Map();
 
 chrome.runtime.onInstalled.addListener(() => {
   void ensureBatchStatus();
+  void scheduleWebIntakeRetryAlarm();
+  void restorePendingWebIntake();
 });
 
 chrome.runtime.onStartup.addListener(() => {
   void ensureBatchStatus();
+  void scheduleWebIntakeRetryAlarm();
+  void restorePendingWebIntake();
+});
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm?.name === globalThis.BossLocalWebIntake?.RETRY_ALARM_NAME) {
+    void restorePendingWebIntake();
+  }
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
@@ -91,6 +101,12 @@ async function handleMessage(message, sender) {
       return resolveActivePdfUrl(message.payload || {}, sender);
     case "trusted_click":
       return trustedClick(message.payload || {}, sender);
+    case "web_intake_get_status":
+      return getWebIntakeStatus(message.settings || {});
+    case "web_intake_enqueue_and_send":
+      return enqueueAndSendWebIntake(message);
+    case "web_intake_retry":
+      return retryWebIntake(message.settings || {});
     default:
       return { ok: false, error: `Unknown message type: ${String(message?.type || "")}` };
   }
@@ -1017,7 +1033,101 @@ async function safeTabsSendMessage(tabId, message) {
 }
 
 if (typeof importScripts === "function") {
+  importScripts(
+    "web_intake_identity.js",
+    "web_intake_storage.js",
+    "web_intake_ui.js",
+    "web_intake_sender.js",
+    "web_intake.js",
+  );
   importScripts("remote_control.js");
+}
+
+async function scheduleWebIntakeRetryAlarm() {
+  const alarmName = globalThis.BossLocalWebIntake?.RETRY_ALARM_NAME;
+  const delayMinutes = globalThis.BossLocalWebIntake?.RETRY_ALARM_DELAY_MINUTES || 0.25;
+  if (!alarmName) {
+    return;
+  }
+  await chrome.alarms.create(alarmName, {
+    periodInMinutes: delayMinutes,
+    delayInMinutes: delayMinutes,
+  });
+}
+
+async function restorePendingWebIntake() {
+  if (!globalThis.BossLocalWebIntake?.processPendingBatches) {
+    return [];
+  }
+  try {
+    return await globalThis.BossLocalWebIntake.processPendingBatches({
+      storageArea: chrome.storage.local,
+    });
+  } catch (_error) {
+    return [];
+  }
+}
+
+async function getWebIntakeStatus(settings) {
+  if (!globalThis.BossLocalWebIntake?.getStatusView) {
+    return { ok: false, error: "web intake unavailable" };
+  }
+  const result = await globalThis.BossLocalWebIntake.getStatusView({
+    settings,
+    storageArea: chrome.storage.local,
+  });
+  return {
+    ok: true,
+    record: result.record,
+    view: result.view,
+  };
+}
+
+async function enqueueAndSendWebIntake(message) {
+  if (!globalThis.BossLocalWebIntake?.queueCapturedBatch) {
+    return { ok: false, error: "web intake unavailable" };
+  }
+  try {
+    const queued = await globalThis.BossLocalWebIntake.queueCapturedBatch({
+      settings: message.settings || {},
+      merged: message.merged || {},
+      sourceUrl: message.sourceUrl || "",
+      idempotencyKey: message.idempotencyKey || "",
+      storageArea: chrome.storage.local,
+    });
+    if (!queued) {
+      return { ok: true, record: null };
+    }
+    const sent = await globalThis.BossLocalWebIntake.sendQueuedBatch({
+      settings: message.settings || {},
+      batchKey: queued.batchKey,
+      storageArea: chrome.storage.local,
+    });
+    if (String(sent?.status || "") === "waiting_retry") {
+      await scheduleWebIntakeRetryAlarm();
+    }
+    return { ok: true, record: sent };
+  } catch (error) {
+    return { ok: false, error: error?.message || String(error) };
+  }
+}
+
+async function retryWebIntake(settings) {
+  if (!globalThis.BossLocalWebIntake?.retryPendingForCurrentConnection) {
+    return { ok: false, error: "web intake unavailable" };
+  }
+  try {
+    const record = await globalThis.BossLocalWebIntake.retryPendingForCurrentConnection({
+      settings,
+      storageArea: chrome.storage.local,
+    });
+    if (String(record?.status || "") === "waiting_retry") {
+      await scheduleWebIntakeRetryAlarm();
+    }
+    return { ok: true, record };
+  } catch (error) {
+    return { ok: false, error: error?.message || String(error) };
+  }
 }
 
 async function handleBatchTabRemoved(tabId) {

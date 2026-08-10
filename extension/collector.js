@@ -31,7 +31,8 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
         tags: [".tags span", ".tag-list span", ".labels span", ".tag", "[class*='tag'] span"],
         summary: [".description", ".summary", ".card-desc", ".self-intro", "[class*='summary']", "[class*='desc']"],
         detailLink: ["a[href*='geek']", "a[href*='candidate']", "a[href*='zhipin.com']"],
-        platformUidAttrs: ["data-geek-id", "data-id", "data-candidate-id", "data-user-id"],
+        platformUidAttrs: ["data-geek-id", "data-candidate-id", "data-user-id"],
+        sourceCandidateIdAttrs: ["data-id", "data-geek-id", "data-candidate-id", "data-user-id"],
       },
       broadScanSelector: "div, li, article, section",
       matches(url) {
@@ -103,12 +104,13 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
           "a[href*='liepin.com']",
           "a[href]",
         ],
-        platformUidAttrs: [
+        platformUidAttrs: ["data-resume-id", "data-candidate-id", "data-talent-id", "data-user-id", "data-uid"],
+        sourceCandidateIdAttrs: [
+          "data-id",
           "data-resume-id",
           "data-candidate-id",
           "data-talent-id",
           "data-user-id",
-          "data-id",
           "data-uid",
         ],
       },
@@ -706,8 +708,10 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
     const tags = allTexts(card, platform.selectors.tags);
     const detailUrl = firstHref(card, platform.selectors.detailLink) || inferred.detail_url;
     const platformUid = normalizePlatformUid(platform, firstAttr(card, platform.selectors.platformUidAttrs) || inferred.platform_uid);
+    const sourceCandidateId = normalizeText(firstAttr(card, platform.selectors.sourceCandidateIdAttrs || []) || "");
     return {
       platform: platform.id,
+      source_candidate_id: sourceCandidateId,
       raw_card_text: rawText,
       name: firstText(card, platform.selectors.name) || inferred.name,
       active_status: firstText(card, platform.selectors.activeStatus) || inferred.active_status,
@@ -1062,5 +1066,12 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
 
   function delay(ms) {
     return new Promise((resolve) => setTimeout(resolve, Number(ms || 0)));
+  }
+
+  if (globalThis.__bossLocalCollectorTestMode) {
+    globalThis.BossLocalCollectorTest = {
+      extractCardPayload,
+      platforms: PLATFORM_ADAPTERS,
+    };
   }
 }

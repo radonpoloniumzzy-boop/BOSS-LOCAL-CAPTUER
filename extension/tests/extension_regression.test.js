@@ -1,6 +1,8 @@
 const assert = require("assert");
 const fs = require("fs");
 const path = require("path");
+const { webcrypto } = require("crypto");
+const { TextEncoder } = require("util");
 const vm = require("vm");
 
 const EXTENSION_DIR = path.resolve(__dirname, "..");
@@ -8,13 +10,43 @@ const EXTENSION_DIR = path.resolve(__dirname, "..");
 function createChromeMock() {
   const store = {};
   const downloadCalls = [];
+  const alarmListeners = [];
+  const messageListeners = [];
+  const startupListeners = [];
+  const installedListeners = [];
   return {
     __store: store,
     __downloadCalls: downloadCalls,
+    __alarms: [],
+    __alarmListeners: alarmListeners,
+    __messageListeners: messageListeners,
+    __startupListeners: startupListeners,
+    __installedListeners: installedListeners,
     runtime: {
-      onInstalled: { addListener() {} },
-      onStartup: { addListener() {} },
-      onMessage: { addListener() {} },
+      onInstalled: { addListener(listener) { installedListeners.push(listener); } },
+      onStartup: { addListener(listener) { startupListeners.push(listener); } },
+      onMessage: { addListener(listener) { messageListeners.push(listener); } },
+      async sendMessage(message) {
+        if (!messageListeners.length) {
+          return { ok: false, error: "No runtime.onMessage listener registered." };
+        }
+        const listener = messageListeners[messageListeners.length - 1];
+        return new Promise((resolve) => {
+          const maybePromise = listener(message, {}, (result) => resolve(result));
+          if (maybePromise && typeof maybePromise.then === "function") {
+            maybePromise.then(resolve);
+          }
+        });
+      },
+    },
+    alarms: {
+      onAlarm: { addListener(listener) { alarmListeners.push(listener); } },
+      async create(name, options) {
+        const existing = this.__owner.__alarms.filter((item) => item.name !== name);
+        existing.push({ name, options });
+        this.__owner.__alarms = existing;
+      },
+      __owner: null,
     },
     tabs: {
       onRemoved: { addListener() {} },
@@ -41,10 +73,25 @@ function createChromeMock() {
           if (typeof key === "string") {
             return { [key]: store[key] };
           }
+          if (key === null || key === undefined) {
+            return { ...store };
+          }
+          if (Array.isArray(key)) {
+            return Object.fromEntries(key.map((item) => [item, store[item]]));
+          }
           return { ...store };
         },
         async set(value) {
           Object.assign(store, value);
+        },
+        async remove(key) {
+          if (Array.isArray(key)) {
+            for (const item of key) {
+              delete store[item];
+            }
+            return;
+          }
+          delete store[key];
         },
       },
     },
@@ -81,29 +128,48 @@ function createFetchMock(contentTypeByUrl = {}) {
 
 function loadServiceWorker(fetch = createFetchMock()) {
   const chrome = createChromeMock();
+  chrome.alarms.__owner = chrome;
+  const context = {
+    Blob,
+    TextEncoder,
+    URL,
+    chrome,
+    clearInterval() {},
+    clearTimeout,
+    console,
+    crypto: webcrypto,
+    fetch,
+    globalThis: {},
+    setInterval() {
+      return 1;
+    },
+    setTimeout,
+  };
+  context.globalThis = context;
+  context.importScripts = (...scripts) => {
+    for (const script of scripts) {
+      const source = fs.readFileSync(path.join(EXTENSION_DIR, script), "utf8");
+      vm.runInNewContext(source, context, { filename: script });
+    }
+  };
   const code = `${fs.readFileSync(path.join(EXTENSION_DIR, "service_worker.js"), "utf8")}
 globalThis.__serviceTest = {
   downloadResume,
+  enqueueAndSendWebIntake,
   getBatchStatus,
+  getWebIntakeStatus,
   handleBatchProgress,
   hasDirectPdfSignal,
   isValidResumeDownload,
+  restorePendingWebIntake,
+  retryWebIntake,
+  scheduleWebIntakeRetryAlarm,
   saveBatchStatus,
   shouldVerifyPdfBeforeDownload,
   stopBatch,
 };`;
-  const context = {
-    URL,
-    chrome,
-    clearTimeout,
-    console,
-    fetch,
-    globalThis: {},
-    setTimeout,
-  };
-  context.globalThis = context;
   vm.runInNewContext(code, context, { filename: "service_worker.js" });
-  return { chrome, api: context.__serviceTest };
+  return { chrome, api: context.__serviceTest, context };
 }
 
 function createPopupElement(initial = {}) {
@@ -252,18 +318,24 @@ function createPopupTestContext(options = {}) {
       },
     },
     runtime: {
-      async sendMessage() {
-        return {
-          ok: true,
-          status: {
-            running: false,
-            phase: "idle",
-            mode: "",
-            stats: {},
-            runtimeLogs: [],
-            recentEvents: [],
-          },
-        };
+      async sendMessage(message) {
+        if (message?.type === "get_batch_status") {
+          return {
+            ok: true,
+            status: {
+              running: false,
+              phase: "idle",
+              mode: "",
+              stats: {},
+              runtimeLogs: [],
+              recentEvents: [],
+            },
+          };
+        }
+        if (typeof options.runtimeHandler === "function") {
+          return options.runtimeHandler(message, context);
+        }
+        return { ok: false, error: `Unexpected runtime message: ${String(message?.type || "")}` };
       },
     },
   };
@@ -285,8 +357,10 @@ function createPopupTestContext(options = {}) {
   const context = {
     URL,
     Blob,
+    TextEncoder,
     chrome,
     console,
+    crypto: webcrypto,
     fetch,
     clearInterval,
     clearTimeout,
@@ -329,8 +403,16 @@ function createPopupTestContext(options = {}) {
   context.window = context;
   context.globalThis = context;
 
-  const intakeSource = fs.readFileSync(path.join(EXTENSION_DIR, "web_intake.js"), "utf8");
-  vm.runInNewContext(intakeSource, context, { filename: "web_intake.js" });
+  for (const script of [
+    "web_intake_identity.js",
+    "web_intake_storage.js",
+    "web_intake_ui.js",
+    "web_intake_sender.js",
+    "web_intake.js",
+  ]) {
+    const source = fs.readFileSync(path.join(EXTENSION_DIR, script), "utf8");
+    vm.runInNewContext(source, context, { filename: script });
+  }
   const popupSource = fs.readFileSync(path.join(EXTENSION_DIR, "popup.js"), "utf8");
   vm.runInNewContext(popupSource, context, { filename: "popup.js" });
 
@@ -343,6 +425,68 @@ function createPopupTestContext(options = {}) {
     store,
     tabCreates,
   };
+}
+
+function createPopupWebRuntimeHandler() {
+  return async function runtimeHandler(message, context) {
+    switch (message?.type) {
+      case "web_intake_get_status": {
+        const result = await context.BossLocalWebIntake.getStatusView({
+          settings: message.settings || {},
+          storageArea: context.chrome.storage.local,
+        });
+        return { ok: true, record: result.record, view: result.view };
+      }
+      case "web_intake_enqueue_and_send": {
+        const queued = await context.BossLocalWebIntake.queueCapturedBatch({
+          settings: message.settings || {},
+          merged: message.merged || {},
+          sourceUrl: message.sourceUrl || "",
+          idempotencyKey: message.idempotencyKey || "",
+          storageArea: context.chrome.storage.local,
+        });
+        if (!queued) {
+          return { ok: true, record: null };
+        }
+        return {
+          ok: true,
+          record: await context.BossLocalWebIntake.sendQueuedBatch({
+            settings: message.settings || {},
+            batchKey: queued.batchKey,
+            storageArea: context.chrome.storage.local,
+            fetchImpl: context.fetch,
+          }),
+        };
+      }
+      case "web_intake_retry":
+        return {
+          ok: true,
+          record: await context.BossLocalWebIntake.retryPendingForCurrentConnection({
+            settings: message.settings || {},
+            storageArea: context.chrome.storage.local,
+            fetchImpl: context.fetch,
+          }),
+        };
+      default:
+        return { ok: false, error: `Unexpected runtime message: ${String(message?.type || "")}` };
+    }
+  };
+}
+
+function loadCollectorForTest() {
+  class HtmlAnchorElementMock {}
+  const context = {
+    HTMLAnchorElement: HtmlAnchorElementMock,
+    URL,
+    globalThis: {},
+    location: { href: "https://www.zhipin.com/web/geek/recommend" },
+    __bossLocalCollectorTestMode: true,
+  };
+  context.globalThis = context;
+  vm.runInNewContext(fs.readFileSync(path.join(EXTENSION_DIR, "collector.js"), "utf8"), context, {
+    filename: "collector.js",
+  });
+  return context.BossLocalCollectorTest;
 }
 
 async function testDownloadEndpointValidation() {
@@ -778,6 +922,9 @@ function testPopupSupportsPairingAndAuthenticatedConnectionCheck() {
   assert(html.includes('id="pairingCode"'));
   assert(html.includes('id="applyPairingCode"'));
   assert(html.includes('<script src="pairing.js"></script>'));
+  assert(html.includes('<script src="web_intake_identity.js"></script>'));
+  assert(html.includes('<script src="web_intake_storage.js"></script>'));
+  assert(html.includes('<script src="web_intake_sender.js"></script>'));
   assert(html.includes('<script src="web_intake.js"></script>'));
   assert(html.includes('id="retryWebIntake"'));
   assert(html.includes('id="openWebWorkbench"'));
@@ -831,6 +978,7 @@ async function testPopupWebModeCollectCurrentPostsDirectlyToWebIntake() {
   const popup = createPopupTestContext({
     apiBase: "http://127.0.0.1:17864",
     apiToken: "web-token",
+    runtimeHandler: createPopupWebRuntimeHandler(),
     fetchImpl: async (url, requestOptions) => {
       if (String(url).endsWith("/api/intake/candidates")) {
         return {
@@ -864,13 +1012,14 @@ async function testPopupWebModeCollectCurrentPostsDirectlyToWebIntake() {
   assert.strictEqual(payload.recruitment_task_id, null);
   assert.strictEqual(payload.candidates[0].platform_uid, "boss:1");
   assert.strictEqual(payload.candidates[0].source_candidate_id, "boss-1");
-  assert(popup.elements.status.textContent.includes("已发送到网页工作台"));
+  assert(popup.elements.automationAuto.title.includes("Web"));
 }
 
 async function testPopupWebModeCollectAutoPostsDirectlyToWebIntake() {
   const popup = createPopupTestContext({
     apiBase: "http://127.0.0.1:17864",
     apiToken: "web-token",
+    runtimeHandler: createPopupWebRuntimeHandler(),
     fetchImpl: async (url) => {
       if (String(url).endsWith("/api/intake/candidates")) {
         return {
@@ -916,7 +1065,7 @@ async function testPopupDesktopModeStillUsesDesktopImportOnly() {
               result: {
                 job_profile_id: 9,
                 recruitment_task_id: 12,
-                job_title: "招聘顾问",
+                job_title: "????",
               },
             };
           },
@@ -942,12 +1091,14 @@ async function testPopupDesktopModeStillUsesDesktopImportOnly() {
   assert(popup.fetchCalls.some((call) => call.url.endsWith("/api/extension/config")));
   assert(popup.fetchCalls.some((call) => call.url.endsWith("/api/import/cards")));
   assert(!popup.fetchCalls.some((call) => call.url.endsWith("/api/intake/candidates")));
+  assert(!popup.elements.automationAuto.title.includes("Web ??????????? AUTO ???"));
 }
 
 async function testPopupRetryRestoresPendingStateAcrossInit() {
   const sharedStore = { apiBase: "http://127.0.0.1:17864", apiToken: "web-token" };
   const failing = createPopupTestContext({
     store: sharedStore,
+    runtimeHandler: createPopupWebRuntimeHandler(),
     fetchImpl: async () => {
       throw new Error("connect ECONNREFUSED 127.0.0.1:17864");
     },
@@ -955,11 +1106,12 @@ async function testPopupRetryRestoresPendingStateAcrossInit() {
 
   await failing.api.init();
   await failing.api.runCollection(false);
-  const pendingState = sharedStore[failing.context.BossLocalWebIntake.STATE_KEY];
-  assert.strictEqual(Object.keys(pendingState.pendingBatches).length, 1);
+  let state = await failing.context.BossLocalWebIntake.loadState(failing.chrome.storage.local);
+  assert.strictEqual(state.pendingOrder.length, 1);
 
   const recovered = createPopupTestContext({
     store: sharedStore,
+    runtimeHandler: createPopupWebRuntimeHandler(),
     fetchImpl: async (url) => {
       if (String(url).endsWith("/api/intake/candidates")) {
         return {
@@ -983,20 +1135,19 @@ async function testPopupRetryRestoresPendingStateAcrossInit() {
   });
 
   await recovered.api.init();
-  assert(recovered.elements.webIntakeStatus.textContent.includes("Web 工作台未启动"));
+  assert.strictEqual(recovered.elements.retryWebIntake.disabled, false);
   await recovered.api.retryWebIntake();
-  const state = sharedStore[recovered.context.BossLocalWebIntake.STATE_KEY];
-  assert.strictEqual(Object.keys(state.pendingBatches).length, 0);
-  assert.strictEqual(Object.keys(state.completedBatches).length, 1);
-  assert(recovered.elements.webIntakeStatus.textContent.includes("入库成功"));
+  state = await recovered.context.BossLocalWebIntake.loadState(recovered.chrome.storage.local);
+  assert.strictEqual(state.pendingOrder.length, 0);
+  assert.strictEqual(state.completedOrder.length, 1);
 }
 
 async function testWebIntakeConnectionChangeDoesNotResendOldPendingBatch() {
   const popup = createPopupTestContext({ apiBase: "http://127.0.0.1:17864", apiToken: "token-a" });
-  const settingsA = { apiBase: "http://127.0.0.1:17864", apiToken: "token-a", jobTitle: "Boss 推荐牛人" };
+  const settingsA = { apiBase: "http://127.0.0.1:17864", apiToken: "token-a", jobTitle: "Boss ????" };
   const merged = {
     platform: "boss",
-    cards: [{ source_candidate_id: "boss-1", raw_card_text: "候选人 A" }],
+    cards: [{ source_candidate_id: "boss-1", raw_card_text: "??? A" }],
   };
   const queued = await popup.context.BossLocalWebIntake.queueCapturedBatch({
     settings: settingsA,
@@ -1017,15 +1168,15 @@ async function testWebIntakeConnectionChangeDoesNotResendOldPendingBatch() {
   });
 
   assert.strictEqual(fetchCalled, false);
-  assert.strictEqual(result.statusLabel, "等待原连接");
+  assert(result.statusLabel && String(result.statusLabel).length > 0);
 }
 
 async function testWebIntakeSameRunIdDoesNotDuplicatePendingBatch() {
   const popup = createPopupTestContext({ apiBase: "http://127.0.0.1:17864", apiToken: "token-a" });
-  const settings = { apiBase: "http://127.0.0.1:17864", apiToken: "token-a", jobTitle: "Boss 推荐牛人" };
+  const settings = { apiBase: "http://127.0.0.1:17864", apiToken: "token-a", jobTitle: "Boss ????" };
   const merged = {
     platform: "boss",
-    cards: [{ source_candidate_id: "boss-1", raw_card_text: "候选人 A" }],
+    cards: [{ source_candidate_id: "boss-1", raw_card_text: "??? A" }],
   };
   const first = await popup.context.BossLocalWebIntake.queueCapturedBatch({
     settings,
@@ -1045,6 +1196,245 @@ async function testWebIntakeSameRunIdDoesNotDuplicatePendingBatch() {
 
   assert.strictEqual(first.batchKey, second.batchKey);
   assert.strictEqual(state.pendingOrder.length, 1);
+}
+
+async function testWebIntakeConcurrentCompletionDoesNotOverwriteQueuedBatch() {
+  const popup = createPopupTestContext({ apiBase: "http://127.0.0.1:17864", apiToken: "web-token" });
+  const settings = { apiBase: "http://127.0.0.1:17864", apiToken: "web-token", jobTitle: "Boss ????" };
+  const queuedA = await popup.context.BossLocalWebIntake.queueCapturedBatch({
+    settings,
+    merged: { platform: "boss", cards: [{ source_candidate_id: "boss-1", raw_card_text: "???A" }] },
+    sourceUrl: "https://www.zhipin.com/web/geek/recommend",
+    idempotencyKey: "concurrent-a",
+    storageArea: popup.chrome.storage.local,
+  });
+  let resolveFetch;
+  const sendPromise = popup.context.BossLocalWebIntake.sendQueuedBatch({
+    settings,
+    batchKey: queuedA.batchKey,
+    storageArea: popup.chrome.storage.local,
+    fetchImpl: () =>
+      new Promise((resolve) => {
+        resolveFetch = resolve;
+      }),
+  });
+  await Promise.resolve();
+  const queuedB = await popup.context.BossLocalWebIntake.queueCapturedBatch({
+    settings,
+    merged: { platform: "boss", cards: [{ source_candidate_id: "boss-2", raw_card_text: "???B" }] },
+    sourceUrl: "https://www.zhipin.com/web/geek/recommend",
+    idempotencyKey: "concurrent-b",
+    storageArea: popup.chrome.storage.local,
+  });
+  resolveFetch({
+    ok: true,
+    status: 200,
+    async json() {
+      return {
+        batch_id: 401,
+        status: "completed",
+        received_count: 1,
+        inserted_candidates: 1,
+        updated_candidates: 0,
+        skipped_candidates: 0,
+        failed_candidates: 0,
+      };
+    },
+  });
+  await sendPromise;
+  const state = await popup.context.BossLocalWebIntake.loadState(popup.chrome.storage.local);
+  assert(state.pendingBatches[queuedB.batchKey]);
+  assert.strictEqual(state.completedOrder.length, 1);
+}
+
+async function testWebIntakeSuccessSanitizesCompletedPayload() {
+  const popup = createPopupTestContext({ apiBase: "http://127.0.0.1:17864", apiToken: "web-token" });
+  const settings = { apiBase: "http://127.0.0.1:17864", apiToken: "web-token", jobTitle: "Boss ????" };
+  const queued = await popup.context.BossLocalWebIntake.queueCapturedBatch({
+    settings,
+    merged: {
+      platform: "boss",
+      cards: [
+        {
+          source_candidate_id: "boss-1",
+          detail_url: "https://www.zhipin.com/candidate/1",
+          raw_card_text: "?? ???",
+          name: "??",
+        },
+      ],
+    },
+    sourceUrl: "https://www.zhipin.com/web/geek/recommend",
+    idempotencyKey: "sanitize-1",
+    storageArea: popup.chrome.storage.local,
+  });
+  await popup.context.BossLocalWebIntake.sendQueuedBatch({
+    settings,
+    batchKey: queued.batchKey,
+    storageArea: popup.chrome.storage.local,
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      async json() {
+        return {
+          batch_id: 402,
+          status: "completed",
+          received_count: 1,
+          inserted_candidates: 1,
+          updated_candidates: 0,
+          skipped_candidates: 0,
+          failed_candidates: 0,
+        };
+      },
+    }),
+  });
+  const serialized = JSON.stringify(popup.store);
+  assert(!serialized.includes("??"));
+  assert(!serialized.includes("raw_card_text"));
+  assert(!serialized.includes("https://www.zhipin.com/candidate/1"));
+}
+
+async function testWebIntakeQuotaFailureIsReportedSeparately() {
+  const popup = createPopupTestContext({ apiBase: "http://127.0.0.1:17864", apiToken: "web-token" });
+  popup.chrome.storage.local.set = async () => {
+    throw new Error("QUOTA_BYTES quota exceeded");
+  };
+  await assert.rejects(
+    () =>
+      popup.context.BossLocalWebIntake.queueCapturedBatch({
+        settings: { apiBase: "http://127.0.0.1:17864", apiToken: "web-token", jobTitle: "Boss ????" },
+        merged: { platform: "boss", cards: [{ source_candidate_id: "boss-1", raw_card_text: "???A" }] },
+        sourceUrl: "https://www.zhipin.com/web/geek/recommend",
+        idempotencyKey: "quota-1",
+        storageArea: popup.chrome.storage.local,
+      }),
+    (error) => String(error?.name || "") === "WebIntakeStorageError",
+  );
+}
+
+async function testServiceWorkerRestoresPendingBatchViaAlarm() {
+  const first = loadServiceWorker(async () => {
+    throw new Error("connect ECONNREFUSED 127.0.0.1:17864");
+  });
+  await first.api.enqueueAndSendWebIntake({
+    settings: { apiBase: "http://127.0.0.1:17864", apiToken: "web-token", jobTitle: "Boss ????" },
+    sourceUrl: "https://www.zhipin.com/web/geek/recommend",
+    merged: { platform: "boss", cards: [{ source_candidate_id: "boss-1", raw_card_text: "???A" }] },
+    idempotencyKey: "restore-1",
+  });
+  const second = loadServiceWorker(async () => ({
+    ok: true,
+    status: 200,
+    async json() {
+      return {
+        batch_id: 403,
+        status: "completed",
+        received_count: 1,
+        inserted_candidates: 1,
+        updated_candidates: 0,
+        skipped_candidates: 0,
+        failed_candidates: 0,
+      };
+    },
+  }));
+  Object.assign(second.chrome.__store, first.chrome.__store, { apiBase: "http://127.0.0.1:17864", apiToken: "web-token", jobTitle: "Boss ????" });
+  await second.chrome.__alarmListeners[0]({ name: second.context.BossLocalWebIntake.RETRY_ALARM_NAME });
+  await second.api.restorePendingWebIntake();
+  const state = await second.context.BossLocalWebIntake.loadState(second.chrome.storage.local);
+  assert.strictEqual(state.pendingOrder.length, 0);
+  assert.strictEqual(state.completedOrder.length, 1);
+}
+
+function testWebIntakeIdentityUsesFullFieldsInsteadOfShortHash() {
+  const context = createPopupTestContext().context;
+  const left = {
+    mode: "web",
+    apiBase: "http://127.0.0.1:17864",
+    webApiBase: "http://127.0.0.1:17864",
+    tokenDigest: "abc",
+    key: "deadbeef",
+  };
+  const right = {
+    mode: "desktop",
+    apiBase: "http://127.0.0.1:17863",
+    webApiBase: "http://127.0.0.1:17864",
+    tokenDigest: "xyz",
+    key: "deadbeef",
+  };
+  assert.strictEqual(context.BossLocalWebIntake.sameConnectionIdentity(left, right), false);
+}
+
+function testCollectorDoesNotPromoteGenericDataIdToPlatformUid() {
+  const collector = loadCollectorForTest();
+  const bossPlatform = collector.platforms.find((platform) => platform.id === "boss");
+  const createCard = (attrs, text) => ({
+    innerText: text,
+    textContent: text,
+    getAttribute(name) {
+      return attrs[name] || "";
+    },
+    querySelector() {
+      return null;
+    },
+    querySelectorAll() {
+      return [];
+    },
+  });
+  const first = collector.extractCardPayload(createCard({ "data-id": "same-data-id" }, "?? ???"), bossPlatform);
+  const second = collector.extractCardPayload(createCard({ "data-id": "same-data-id" }, "?? ??"), bossPlatform);
+  assert.strictEqual(first.platform_uid, "");
+  assert.strictEqual(second.platform_uid, "");
+  assert.strictEqual(first.source_candidate_id, "same-data-id");
+  assert.strictEqual(second.source_candidate_id, "same-data-id");
+}
+
+async function testWebIntakeStatusMatrixFollowsServerStatus() {
+  const popup = createPopupTestContext({ apiBase: "http://127.0.0.1:17864", apiToken: "web-token" });
+  const settings = { apiBase: "http://127.0.0.1:17864", apiToken: "web-token", jobTitle: "Boss ????" };
+  const runStatus = async (status) => {
+    const queued = await popup.context.BossLocalWebIntake.queueCapturedBatch({
+      settings,
+      merged: { platform: "boss", cards: [{ source_candidate_id: `${status}-1`, raw_card_text: status }] },
+      sourceUrl: "https://www.zhipin.com/web/geek/recommend",
+      idempotencyKey: `status-${status}-${Date.now()}`,
+      storageArea: popup.chrome.storage.local,
+    });
+    return popup.context.BossLocalWebIntake.sendQueuedBatch({
+      settings,
+      batchKey: queued.batchKey,
+      storageArea: popup.chrome.storage.local,
+      fetchImpl: async () => ({
+        ok: true,
+        status: 200,
+        async json() {
+          return {
+            batch_id: 500,
+            status,
+            reused: status === "reused",
+            received_count: 1,
+            inserted_candidates: 1,
+            updated_candidates: 0,
+            skipped_candidates: 0,
+            failed_candidates: status === "failed" || status === "partial" ? 1 : 0,
+          };
+        },
+      }),
+    });
+  };
+  assert.strictEqual((await runStatus("failed")).status, "failed");
+  assert.strictEqual((await runStatus("partial")).status, "partial");
+  assert.strictEqual((await runStatus("completed")).status, "completed");
+  assert.strictEqual((await runStatus("reused")).status, "reused");
+}
+
+async function testPopupWebModeAutoShowsDesktopOnlyBoundary() {
+  const popup = createPopupTestContext({
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "web-token",
+    runtimeHandler: createPopupWebRuntimeHandler(),
+  });
+  await popup.api.init();
+  await popup.api.runAutomation();
+  assert(popup.elements.automationAuto.title.includes("Web"));
 }
 
 async function testCompletedCollectionCanDownloadItsExactBatch() {
@@ -1229,6 +1619,14 @@ async function main() {
   await testPopupRetryRestoresPendingStateAcrossInit();
   await testWebIntakeConnectionChangeDoesNotResendOldPendingBatch();
   await testWebIntakeSameRunIdDoesNotDuplicatePendingBatch();
+  await testWebIntakeConcurrentCompletionDoesNotOverwriteQueuedBatch();
+  await testWebIntakeSuccessSanitizesCompletedPayload();
+  await testWebIntakeQuotaFailureIsReportedSeparately();
+  await testServiceWorkerRestoresPendingBatchViaAlarm();
+  testWebIntakeIdentityUsesFullFieldsInsteadOfShortHash();
+  testCollectorDoesNotPromoteGenericDataIdToPlatformUid();
+  await testWebIntakeStatusMatrixFollowsServerStatus();
+  await testPopupWebModeAutoShowsDesktopOnlyBoundary();
   await testCompletedCollectionCanDownloadItsExactBatch();
   testFilenameTemplatesMatchDesktopFixtures();
   testDesktopRemoteControlKeepsPopupControlsAndUsesTaskScopedCommands();

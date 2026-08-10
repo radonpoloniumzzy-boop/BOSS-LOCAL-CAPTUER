@@ -288,43 +288,57 @@ function buildCollectionRunId() {
   return BossLocalWebIntake.createClientBatchId();
 }
 
+function syncModeHints(settings = collectSettings()) {
+  const webMode = isWebWorkbenchMode(settings);
+  automationAutoButton.textContent = webMode ? "AUTO：桌面兼容模式专用" : "AUTO：滚动采集 + AI 初筛";
+  automationAutoButton.title = webMode
+    ? "Web 工作台模式下不使用桌面 AUTO 流程。"
+    : "桌面兼容模式下可直接触发桌面 AUTO 流程。";
+}
+
 async function refreshWebIntakeStatus(settingsOverride = null) {
   const settings = settingsOverride ? { ...DEFAULTS, ...settingsOverride } : collectSettings();
-  const state = await BossLocalWebIntake.loadState(chrome.storage.local);
-  const record = BossLocalWebIntake.currentRecordForConnection(state, settings);
-  const view = BossLocalWebIntake.formatStatus(record, settings);
+  syncModeHints(settings);
+  const response = await chrome.runtime.sendMessage({
+    type: "web_intake_get_status",
+    settings,
+  });
+  if (!response?.ok || !response.view) {
+    webIntakeStatusEl.textContent = `当前模式：${BossLocalWebIntake.modeLabel(settings)}\n网页入库状态读取失败。`;
+    retryWebIntakeButton.disabled = true;
+    return;
+  }
+  const view = response.view;
   webIntakeStatusEl.textContent = `${view.title}\n${view.message}`;
   retryWebIntakeButton.disabled = !view.canRetry;
 }
 
 async function queueAndSendWebBatch(settings, sourceUrl, merged, runId) {
-  const queued = await BossLocalWebIntake.queueCapturedBatch({
+  const response = await chrome.runtime.sendMessage({
+    type: "web_intake_enqueue_and_send",
     settings,
-    merged,
     sourceUrl,
+    merged,
     idempotencyKey: runId,
-    storageArea: chrome.storage.local,
   });
-  if (!queued) {
-    await refreshWebIntakeStatus(settings);
-    return null;
+  if (!response?.ok) {
+    throw new Error(response?.error || "网页工作台发送失败。");
   }
-  const sent = await BossLocalWebIntake.sendQueuedBatch({
-    settings,
-    batchKey: queued.batchKey,
-    storageArea: chrome.storage.local,
-  });
   await refreshWebIntakeStatus(settings);
-  return sent;
+  return response.record || null;
 }
 
 async function retryWebIntake() {
   retryWebIntakeButton.disabled = true;
   try {
-    const result = await BossLocalWebIntake.retryPendingForCurrentConnection({
+    const response = await chrome.runtime.sendMessage({
+      type: "web_intake_retry",
       settings: collectSettings(),
-      storageArea: chrome.storage.local,
     });
+    if (!response?.ok) {
+      throw new Error(response?.error || "网页入库重试失败。");
+    }
+    const result = response.record || null;
     if (result?.message) {
       setStatus(`网页入库状态已更新。\n${result.message}`);
     }
@@ -405,7 +419,7 @@ async function runCollection(autoScroll, options = {}) {
       updateBatchDownloadButton();
       const webResult = await queueAndSendWebBatch(webSettings, tab.url, merged, runId);
       const resultStats = webResult?.webResult || {};
-      const firstLine = ["success", "partial", "reused"].includes(String(webResult?.status || ""))
+      const firstLine = ["completed", "partial", "reused"].includes(String(webResult?.status || ""))
         ? "采集完成，已发送到网页工作台。"
         : "采集完成，但网页入库未完成。";
       setStatus(
