@@ -33,6 +33,12 @@ def _request_json(url: str) -> dict[str, object] | None:
     try:
         with urllib.request.urlopen(url, timeout=0.5) as response:
             return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        try:
+            payload = json.loads(exc.read().decode("utf-8"))
+            return payload if isinstance(payload, dict) else None
+        except (OSError, ValueError):
+            return None
     except (OSError, ValueError, urllib.error.URLError):
         return None
 
@@ -94,7 +100,10 @@ class WorkbenchLauncher:
             if getattr(process, "poll", lambda: None)() is not None:
                 raise LaunchFailure("service_start_failed")
             if self._is_workbench_service(self.service_probe(f"{self.url}api/health")):
-                status = self.status_probe(f"{self.url}api/app/status") or {}
+                status = self.status_probe(f"{self.url}api/app/status")
+                if status is None:
+                    self.wait(0.2)
+                    continue
                 fault = status.get("error") if isinstance(status, dict) else None
                 code = str(fault.get("code") or "") if isinstance(fault, dict) else ""
                 if code and code != "database_not_ready":

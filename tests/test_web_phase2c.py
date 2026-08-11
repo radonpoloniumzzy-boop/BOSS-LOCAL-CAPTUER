@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import tempfile
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -9,7 +11,7 @@ from fastapi.testclient import TestClient
 from core.bootstrap import BootstrapService, BootstrapStore
 from core.config import ConfigService
 from web.backend.app import create_web_app
-from web.backend.workbench_launcher import LaunchFailure, WorkbenchLauncher
+from web.backend.workbench_launcher import LaunchFailure, WorkbenchLauncher, _request_json
 
 
 class Phase2CWebApiTest(unittest.TestCase):
@@ -73,6 +75,29 @@ class Phase2CWebApiTest(unittest.TestCase):
         )
         self.assertEqual(verified.status_code, 200)
         self.assertNotIn(token, verified.text)
+
+    def test_last_plugin_verification_survives_service_restart(self) -> None:
+        created = self.client.post("/api/plugin-connection/pairing-code", headers=self.same_origin)
+        paired = self.client.post(
+            "/api/plugin/pair",
+            json={"pairing_code": created.json()["pairing_code"]},
+            headers=self.extension_origin,
+        )
+        token = paired.json()["api_token"]
+        self.client.get(
+            "/api/plugin/connection/check",
+            headers={**self.extension_origin, "X-Boss-Local-Token": token},
+        )
+        saved = ConfigService(data_dir=self.data_dir).load().web_plugin_last_verified_at
+        self.assertTrue(saved)
+
+        self.client.__exit__(None, None, None)
+        self.app = create_web_app(self.bootstrap, lock_root=self.root / "locks")
+        self.client = TestClient(self.app, base_url="http://127.0.0.1:17864")
+        self.client.__enter__()
+        status = self.client.get("/api/plugin-connection/status").json()
+        self.assertTrue(status["connected"])
+        self.assertEqual(status["last_verified_at"], saved)
 
     def test_pairing_code_expiry_and_wrong_code_have_stable_errors(self) -> None:
         created = self.app.state.runtime.pairing.create_code(ttl_seconds=-1)
@@ -180,6 +205,18 @@ class Phase2CWebApiTest(unittest.TestCase):
         self.assertEqual(missing.status_code, 404)
         self.assertEqual(missing.json()["error"]["code"], "batch_not_found")
 
+    def test_today_batch_summary_counts_beyond_the_first_page(self) -> None:
+        for index in range(25):
+            self._intake(f"summary-{index}", f"Candidate {index}", f"snapshot {index}")
+        page = self.client.get("/api/capture-batches?page=1&page_size=20").json()
+        self.assertEqual(len(page["rows"]), 20)
+        self.assertEqual(page["today_summary"], {"batch_count": 25, "received": 25, "added": 25})
+
+        oldest_id = page["rows"][-1]["id"] - 5
+        direct = self.client.get(f"/api/capture-batches/{oldest_id}")
+        self.assertEqual(direct.status_code, 200)
+        self.assertEqual(direct.json()["id"], oldest_id)
+
     def test_state_change_without_origin_is_rejected(self) -> None:
         response = self.client.post("/api/plugin-connection/pairing-code")
         self.assertEqual(response.status_code, 403)
@@ -187,6 +224,30 @@ class Phase2CWebApiTest(unittest.TestCase):
 
 
 class WorkbenchLauncherBehaviorTest(unittest.TestCase):
+    def test_http_503_database_fault_body_remains_available_to_launcher(self) -> None:
+        class FaultHandler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                body = b'{"error":{"code":"database_corrupt"}}'
+                self.send_response(503)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, _format: str, *args: object) -> None:
+                return
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), FaultHandler)
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            payload = _request_json(f"http://127.0.0.1:{server.server_port}/api/app/status")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+        self.assertEqual(payload, {"error": {"code": "database_corrupt"}})
+
     def test_running_service_is_opened_without_starting_second_process(self) -> None:
         opened: list[str] = []
         started: list[bool] = []
@@ -203,6 +264,32 @@ class WorkbenchLauncherBehaviorTest(unittest.TestCase):
         )
         self.assertEqual(launcher.launch(), "already_running")
         self.assertEqual(started, [])
+        self.assertEqual(opened, ["http://127.0.0.1:17864/"])
+
+    def test_stopped_service_is_started_checked_and_opened(self) -> None:
+        health_calls = 0
+        opened: list[str] = []
+
+        class Process:
+            def poll(self):
+                return None
+
+        def health(_url):
+            nonlocal health_calls
+            health_calls += 1
+            if health_calls == 1:
+                return None
+            return {"status": "ok", "service": "recruiting-talent-workbench"}
+
+        launcher = WorkbenchLauncher(
+            service_probe=health,
+            status_probe=lambda _url: {"database_ready": True},
+            port_in_use=lambda _port: False,
+            process_start=Process,
+            browser_open=opened.append,
+            wait=lambda _seconds: None,
+        )
+        self.assertEqual(launcher.launch(), "started")
         self.assertEqual(opened, ["http://127.0.0.1:17864/"])
 
     def test_unknown_port_owner_has_specific_recovery_message(self) -> None:
@@ -266,6 +353,44 @@ class WorkbenchLauncherBehaviorTest(unittest.TestCase):
         self.assertEqual(caught.exception.code, "database_in_use")
         self.assertIn("关闭桌面端", str(caught.exception))
         self.assertEqual(terminated, [True])
+
+    def test_database_fault_matrix_stops_before_opening_browser(self) -> None:
+        for fault_code in (
+            "configured_database_missing",
+            "database_corrupt",
+            "unsupported_schema",
+            "database_upgrade_failed",
+        ):
+            with self.subTest(fault_code=fault_code):
+                health_calls = 0
+                opened: list[str] = []
+
+                class Process:
+                    def poll(self):
+                        return None
+
+                    def terminate(self):
+                        return None
+
+                def health(_url):
+                    nonlocal health_calls
+                    health_calls += 1
+                    if health_calls == 1:
+                        return None
+                    return {"status": "ok", "service": "recruiting-talent-workbench"}
+
+                launcher = WorkbenchLauncher(
+                    service_probe=health,
+                    status_probe=lambda _url, code=fault_code: {"error": {"code": code}},
+                    port_in_use=lambda _port: False,
+                    process_start=Process,
+                    browser_open=opened.append,
+                    wait=lambda _seconds: None,
+                )
+                with self.assertRaises(LaunchFailure) as caught:
+                    launcher.launch()
+                self.assertEqual(caught.exception.code, fault_code)
+                self.assertEqual(opened, [])
 
 
 if __name__ == "__main__":

@@ -93,6 +93,60 @@ describe("workbench candidate intake views", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("opens an older candidate batch directly without requiring it on the first page", async () => {
+    const fetchMock = vi.fn((input: string | URL) => {
+      const url = String(input);
+      if (url.includes("/api/candidates?")) {
+        return response({
+          rows: [{
+            id: 42,
+            name: "Older Candidate",
+            source_platform: "boss",
+            latest_source_platform: "boss",
+            latest_source_job_title: "证券交易员",
+            latest_batch_id: 7,
+            latest_capture_time: "2026-07-01T09:00:00",
+            latest_ingest_status: "new",
+            latest_batch_role_id: null,
+            has_role_binding: 0,
+          }],
+          total: 1,
+          page: 1,
+          page_size: 100,
+        });
+      }
+      if (url === "/api/capture-batches/7") {
+        return response({
+          id: 7,
+          start_time: "2026-07-01T09:00:00",
+          source_platform: "boss",
+          total_collected: 1,
+          total_new: 1,
+          total_updated: 0,
+          total_skipped: 0,
+          total_failed: 0,
+          status: "completed",
+          role_id: null,
+        });
+      }
+      if (url.includes("/api/capture-batches/7/candidates")) {
+        return response({ rows: [], total: 0, page: 1, page_size: 50 });
+      }
+      if (url.includes("/api/capture-batches?")) {
+        return response({ rows: [], total: 30, page: 1, page_size: 20 });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    render(<Workbench status={status} />);
+
+    await user.click(screen.getByRole("button", { name: "候选人" }));
+    await user.click(await screen.findByRole("button", { name: "#7" }));
+    expect(await screen.findByRole("heading", { name: "批次 #7" })).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith("/api/capture-batches/7", undefined);
+  });
+
   it("renders job-optional candidates and batches", async () => {
     vi.stubGlobal(
       "fetch",

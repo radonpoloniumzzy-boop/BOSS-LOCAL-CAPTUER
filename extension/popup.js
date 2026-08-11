@@ -1195,6 +1195,7 @@ globalThis.BossLocalPopup = {
   applyPairingCodeAndTest,
   retryWebIntake,
   openWebWorkbench,
+  downloadCurrentBatch,
   refreshWebIntakeStatus,
   queueAndSendWebBatch,
   collectSettings,

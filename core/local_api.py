@@ -157,6 +157,7 @@ class LocalApiServer:
                     self._send_json(404, {"error": "Not found"})
                     return
                 if not self._is_authorized():
+                    self._discard_request_body()
                     self._send_json(401, {"ok": False, "error": "Unauthorized"})
                     return
                 try:
@@ -255,6 +256,14 @@ class LocalApiServer:
                     return False
                 supplied = self.headers.get("X-Boss-Local-Token", "")
                 return secrets.compare_digest(str(supplied), parent.auth_token)
+
+            def _discard_request_body(self) -> None:
+                try:
+                    content_length = int(self.headers.get("Content-Length", "0"))
+                except ValueError:
+                    return
+                if 0 < content_length <= parent.max_body_bytes:
+                    self.rfile.read(content_length)
 
         self._server = ThreadingHTTPServer((self.host, self.port), Handler)
         self.port = int(self._server.server_address[1])

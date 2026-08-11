@@ -44,7 +44,8 @@ class BatchMarkdownExporter:
             f"- 跳过数：{int(batch.get('total_skipped') or 0)}",
             f"- 失败数：{int(batch.get('total_failed') or 0)}",
         ]
-        formally_bound = batch.get("role_id") is not None
+        batch_role_id = batch.get("role_id")
+        role_label = f"岗位档案 #{batch_role_id}" if batch_role_id is not None else "未提供正式岗位"
         for index, row in enumerate(rows, start=1):
             name = str(row.get("name") or f"候选人 {index}").strip()
             sections.extend(
@@ -54,7 +55,7 @@ class BatchMarkdownExporter:
                     f"- 来源平台：{row.get('source_platform') or row.get('candidate_source_platform') or 'unknown'}",
                     f"- 来源岗位：{row.get('job_title') or '未提供'}",
                     f"- 本次结果：{'更新' if row.get('ingest_status') == 'updated' else '新增'}",
-                    f"- 正式岗位绑定状态：{'已绑定岗位' if formally_bound else '未绑定岗位'}",
+                    f"- 本次正式岗位：{role_label}",
                     f"- 采集时间：{row.get('capture_time') or '未记录'}",
                     "",
                     "### 原始信息快照",
@@ -64,8 +65,9 @@ class BatchMarkdownExporter:
                 ]
             )
         timestamp = self._filename_timestamp(created)
+        platform = re.sub(r"[^a-z0-9_-]", "", str(batch.get("source_platform") or "batch").lower()) or "batch"
         return MarkdownDownload(
-            filename=f"boss-批次-{batch_id}-{timestamp}.md",
+            filename=f"{platform}-批次-{batch_id}-{timestamp}.md",
             content="\n".join(sections).rstrip() + "\n",
         )
 

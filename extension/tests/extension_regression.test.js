@@ -1074,6 +1074,17 @@ async function testPopupWebModeCollectCurrentPostsDirectlyToWebIntake() {
   assert.strictEqual(payload.candidates[0].platform_uid, "boss:1");
   assert.strictEqual(payload.candidates[0].source_candidate_id, "boss-1");
   assert(popup.elements.automationAuto.title.includes("Web"));
+
+  await popup.api.downloadCurrentBatch();
+  assert.deepStrictEqual(popup.store.lastMarkdownExport, {
+    apiBase: "http://127.0.0.1:17864",
+    batchId: 201,
+  });
+  popup.elements.apiToken.value = "different-token";
+  delete popup.store.lastMarkdownExport;
+  await popup.api.downloadCurrentBatch();
+  assert.strictEqual(popup.store.lastMarkdownExport, undefined);
+  assert(popup.elements.status.textContent.includes("当前连接没有可导出的 Web 批次"));
 }
 
 async function testPopupWebModeCollectAutoPostsDirectlyToWebIntake() {

@@ -175,6 +175,9 @@ class WebRuntime:
                 self.database = database
                 self.repository = CandidateRepository(database)
                 self.config_service = ConfigService(data_dir=data_dir)
+                self.pairing.restore_last_verified(
+                    self.config_service.load().web_plugin_last_verified_at
+                )
                 self.import_service = CardImportService(
                     self.repository,
                     CandidateParser(),
@@ -201,6 +204,9 @@ class WebRuntime:
                 self.repository = CandidateRepository(self.database)
                 self.data_dir = selected
                 self.config_service = ConfigService(data_dir=selected)
+                self.pairing.restore_last_verified(
+                    self.config_service.load().web_plugin_last_verified_at
+                )
                 self.import_service = CardImportService(
                     self.repository,
                     CandidateParser(),

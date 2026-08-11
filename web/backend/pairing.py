@@ -49,6 +49,10 @@ class PluginPairingService:
         with self._lock:
             self.last_verified_at = datetime.now().isoformat(timespec="seconds")
 
+    def restore_last_verified(self, value: str) -> None:
+        with self._lock:
+            self.last_verified_at = str(value or "")
+
     def revoke(self) -> None:
         with self._lock:
             self._codes.clear()

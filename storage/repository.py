@@ -1520,7 +1520,25 @@ class CandidateRepository:
             """,
             [*params, page_size, offset],
         ).fetchall()
-        return {"rows": [dict(row) for row in rows], "total": total, "page": page, "page_size": page_size}
+        today = now_iso()[:10]
+        summary_row = self.db.get_connection().execute(
+            f"""
+            SELECT
+                COUNT(*) AS batch_count,
+                COALESCE(SUM(total_collected), 0) AS received,
+                COALESCE(SUM(total_new), 0) AS added
+            FROM capture_batches
+            {where_sql}{' AND' if where_sql else ' WHERE'} substr(start_time, 1, 10) = ?
+            """,
+            [*params, today],
+        ).fetchone()
+        return {
+            "rows": [dict(row) for row in rows],
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "today_summary": dict(summary_row),
+        }
 
     def page_capture_batch_candidates(
         self,

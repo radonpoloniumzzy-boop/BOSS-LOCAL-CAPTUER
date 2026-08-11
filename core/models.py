@@ -81,6 +81,7 @@ class AppConfig:
     target_url: str = "https://www.zhipin.com/web/geek/recommend"
     local_api_port: int = 17863
     local_api_token: str = ""
+    web_plugin_last_verified_at: str = ""
     scroll_mode: str = "page"
     scroll_step: int = 900
     scroll_wait_seconds: float = 1.5

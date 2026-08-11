@@ -223,6 +223,8 @@ def create_web_app(
             raise ApiError(status, exc.code, str(exc)) from exc
         configured = bootstrap.store.load()
         config = runtime.config_service.load()
+        config.web_plugin_last_verified_at = runtime.pairing.last_verified_at
+        runtime.config_service.save(config)
         return {
             "api_base": f"http://127.0.0.1:{configured.web_port if configured else 17864}",
             "api_token": config.local_api_token,
@@ -233,6 +235,9 @@ def create_web_app(
     @app.get("/api/plugin/connection/check")
     def check_plugin_connection(_auth: None = Depends(require_local_api_token)) -> dict[str, object]:
         runtime.pairing.mark_verified()
+        config = runtime.config_service.load()
+        config.web_plugin_last_verified_at = runtime.pairing.last_verified_at
+        runtime.config_service.save(config)
         return {"ok": True, "verified_at": runtime.pairing.last_verified_at}
 
     @app.post("/api/plugin-connection/revoke")
@@ -241,6 +246,7 @@ def create_web_app(
             raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。")
         config = runtime.config_service.load()
         config.local_api_token = secrets.token_urlsafe(24)
+        config.web_plugin_last_verified_at = ""
         runtime.config_service.save(config)
         runtime.pairing.revoke()
         return {"revoked": True, "message": "现有插件连接已撤销，请重新配对。"}
@@ -290,6 +296,15 @@ def create_web_app(
             page=page,
             page_size=page_size,
         )
+
+    @app.get("/api/capture-batches/{batch_id}")
+    def get_capture_batch(batch_id: int) -> dict[str, object]:
+        if runtime.repository is None:
+            raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。")
+        batch = runtime.repository.get_capture_batch(batch_id)
+        if batch is None:
+            raise ApiError(404, "batch_not_found", "采集批次不存在。")
+        return batch
 
     @app.get("/api/capture-batches/{batch_id}/candidates")
     def list_capture_batch_candidates(
