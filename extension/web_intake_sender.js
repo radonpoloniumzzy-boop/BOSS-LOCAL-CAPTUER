@@ -8,6 +8,7 @@
     readPendingRecord,
     readCompletedRecord,
     currentRecordForConnection,
+    createScrubbedPendingTransition,
     WebIntakeStorageError,
   } = globalThis.BossLocalWebIntakeStorage;
   const { classifySuccessfulStatus, formatStatus } = globalThis.BossLocalWebIntakeUi;
@@ -81,6 +82,31 @@
       sendingStartedAt: "",
       leaseOwner: "",
       leaseExpiresAt: "",
+    };
+  }
+
+  function createCompletedWriteFailedRecord(record) {
+    return {
+      ...createScrubbedPendingTransition(record),
+      status: "waiting_retry",
+      statusLabel: "等待重试",
+      message: "服务端已成功接收，但本地完成状态写入失败，请重试恢复。",
+      errorCode: "complete_write_failed",
+      updatedAt: nowIso(),
+    };
+  }
+
+  function normalizeRecoveredCompletedRecord(record) {
+    if (!record?.scrubbedPendingTransition || record?.errorCode !== "complete_write_failed") {
+      return record;
+    }
+    const success = classifySuccessfulStatus(record.webResult || {});
+    return {
+      ...record,
+      status: success.status,
+      statusLabel: success.statusLabel,
+      message: success.message,
+      updatedAt: nowIso(),
     };
   }
 
@@ -220,11 +246,30 @@
     return failedRecord;
   }
 
+  async function finalizeCompletedTransition(record, storageArea) {
+    const completedRecord = normalizeRecoveredCompletedRecord(record);
+    try {
+      return await moveToCompleted(completedRecord, storageArea);
+    } catch (_error) {
+      const latestCompleted = await readCompletedRecord(completedRecord.batchKey, storageArea);
+      if (latestCompleted) {
+        return latestCompleted;
+      }
+      const scrubbed = createCompletedWriteFailedRecord(completedRecord);
+      await upsertPendingRecord(scrubbed, storageArea);
+      return scrubbed;
+    }
+  }
+
   async function performSend({ settings, batchKey, storageArea, fetchImpl, manualRetry = false, leaseOwner }) {
     let record = await recoverExpiredLease(batchKey, storageArea);
     record = getRetryableRecord(record, manualRetry);
     if (!record) {
       return readCompletedRecord(batchKey, storageArea) || currentRecordForConnection(settings, storageArea);
+    }
+
+    if (record.scrubbedPendingTransition && !record.payload && record.webResult) {
+      return finalizeCompletedTransition(record, storageArea);
     }
 
     const currentIdentity = await connectionIdentity(settings);
@@ -233,7 +278,7 @@
         ...record,
         status: "failed",
         statusLabel: "等待原连接",
-        message: "该待发送批次属于旧连接，不会误发到当前人才库。",
+        message: "该待发送批次属于旧连接，不会误投到当前人才库。",
         updatedAt: nowIso(),
       });
       await upsertPendingRecord(blocked, storageArea);
@@ -301,25 +346,7 @@
           await upsertPendingRecord(nextRecord, storageArea);
           return nextRecord;
         }
-        try {
-          return await moveToCompleted(nextRecord, storageArea);
-        } catch (_error) {
-          const latestCompleted = await readCompletedRecord(batchKey, storageArea);
-          if (latestCompleted) {
-            return latestCompleted;
-          }
-          const recovered = clearLeaseFields({
-            ...record,
-            status: "waiting_retry",
-            statusLabel: "等待重试",
-            message: "服务端已成功接收，但本地完成状态写入失败，请重试恢复。",
-            errorCode: "complete_write_failed",
-            updatedAt: nowIso(),
-            webResult: safeResult,
-          });
-          await upsertPendingRecord(recovered, storageArea);
-          return recovered;
-        }
+        return finalizeCompletedTransition(nextRecord, storageArea);
       }
     } catch (_error) {
       response = null;
@@ -454,6 +481,8 @@
     isLeaseExpired,
     hasBrokenLeaseTiming,
     nowMs,
+    createCompletedWriteFailedRecord,
+    finalizeCompletedTransition,
     WebIntakeStorageError,
   };
 })(globalThis);

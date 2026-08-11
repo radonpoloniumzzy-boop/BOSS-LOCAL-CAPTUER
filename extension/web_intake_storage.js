@@ -153,14 +153,14 @@
     };
   }
 
-  async function resolveCurrentConnection(storageArea) {
-    const stored = await storageArea.get({
+  async function resolveCurrentConnection(storageArea, settingsOverride = null) {
+    const stored = settingsOverride || await storageArea.get({
       apiBase: "http://127.0.0.1:17863",
       apiToken: "",
     });
-    const apiBase = normalizeApiBase(stored.apiBase || "");
+    const apiBase = normalizeApiBase(stored?.apiBase || "");
     const webApiBase = deriveWebApiBase(apiBase);
-    const token = String(stored.apiToken || "");
+    const token = String(stored?.apiToken || "");
     return {
       apiBase,
       webApiBase,
@@ -247,7 +247,23 @@
     };
   }
 
-  async function migrateLegacyState(storageArea) {
+  function buildLegacyBlockedStatus() {
+    return {
+      batchKey: "legacy-blocked",
+      idempotencyKey: "",
+      connection: null,
+      status: "failed",
+      statusLabel: "等待原连接",
+      message: "存在属于旧连接的待发送批次，请切回原连接完成迁移。",
+      errorCode: "legacy_connection_mismatch",
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+      webResult: null,
+      legacyBlocked: true,
+    };
+  }
+
+  async function migrateLegacyState(storageArea, settingsOverride = null) {
     const area = storageArea || chrome.storage.local;
     const allEntries = await area.get(null);
     const legacy = allEntries[LEGACY_STATE_KEY];
@@ -256,7 +272,7 @@
     }
 
     const state = parseStoredEntries(allEntries);
-    const currentConnection = await resolveCurrentConnection(area);
+    const currentConnection = await resolveCurrentConnection(area, settingsOverride);
     const pendingWrites = {};
     const completedWrites = {};
     const blockedLegacy = {};
@@ -309,9 +325,9 @@
     }
   }
 
-  async function loadState(storageArea) {
+  async function loadState(storageArea, settingsOverride = null) {
     const area = storageArea || chrome.storage.local;
-    await migrateLegacyState(area);
+    await migrateLegacyState(area, settingsOverride);
     const entries = await area.get(null);
     const state = parseStoredEntries(entries);
     const duplicatePendingKeys = state.pendingOrder.filter(
@@ -377,8 +393,19 @@
     return stored[completedStorageKey(batchKey)] || null;
   }
 
+  async function readLegacyBlockedRecord(storageArea, settingsOverride = null) {
+    const area = storageArea || chrome.storage.local;
+    await migrateLegacyState(area, settingsOverride);
+    const stored = await area.get(LEGACY_STATE_KEY);
+    const legacy = stored[LEGACY_STATE_KEY];
+    if (!legacy || !Object.keys(legacy.pendingBatches || {}).length) {
+      return null;
+    }
+    return buildLegacyBlockedStatus();
+  }
+
   async function currentRecordForConnection(settings, storageArea) {
-    const state = await loadState(storageArea);
+    const state = await loadState(storageArea, settings);
     const identity = await connectionIdentity(settings);
     const pending = state.pendingOrder
       .map((batchKey) => state.pendingBatches[batchKey])
@@ -386,11 +413,15 @@
     if (pending) {
       return pending;
     }
-    return (
+    const completed = (
       state.completedOrder
         .map((batchKey) => state.completedBatches[batchKey])
         .find((record) => sameConnectionIdentity(record?.connection, identity)) || null
     );
+    if (completed) {
+      return completed;
+    }
+    return readLegacyBlockedRecord(storageArea, settings);
   }
 
   globalThis.BossLocalWebIntakeStorage = {
@@ -412,6 +443,8 @@
     currentRecordForConnection,
     migrateLegacyState,
     createScrubbedPendingTransition,
+    readLegacyBlockedRecord,
+    buildLegacyBlockedStatus,
     stableHash,
     LEGACY_PENDING_BLOCKED_MESSAGE,
   };

@@ -1097,6 +1097,14 @@ async function restorePendingWebIntake() {
   }
 }
 
+async function syncWebIntakeRetryAlarm() {
+  if (await globalThis.BossLocalWebIntake.hasAutoRetryablePending(chrome.storage.local)) {
+    await scheduleWebIntakeRetryAlarm();
+  } else {
+    await clearWebIntakeRetryAlarm();
+  }
+}
+
 async function getWebIntakeStatus(settings) {
   if (!globalThis.BossLocalWebIntake?.getStatusView) {
     return { ok: false, error: "web intake unavailable" };
@@ -1129,18 +1137,13 @@ async function enqueueAndSendWebIntake(message) {
     if (!queued) {
       return { ok: true, record: null };
     }
+    await withWebIntakeQueue(() => scheduleWebIntakeRetryAlarm());
     const sent = await globalThis.BossLocalWebIntake.sendQueuedBatch({
       settings: message.settings || {},
       batchKey: queued.batchKey,
       storageArea: chrome.storage.local,
     });
-    await withWebIntakeQueue(async () => {
-      if (await globalThis.BossLocalWebIntake.hasAutoRetryablePending(chrome.storage.local)) {
-        await scheduleWebIntakeRetryAlarm();
-      } else {
-        await clearWebIntakeRetryAlarm();
-      }
-    });
+    await withWebIntakeQueue(() => syncWebIntakeRetryAlarm());
     return { ok: true, record: sent };
   } catch (error) {
     return {
@@ -1156,17 +1159,12 @@ async function retryWebIntake(settings) {
     return { ok: false, error: "web intake unavailable" };
   }
   try {
+    await withWebIntakeQueue(() => scheduleWebIntakeRetryAlarm());
     const record = await globalThis.BossLocalWebIntake.retryPendingForCurrentConnection({
       settings,
       storageArea: chrome.storage.local,
     });
-    await withWebIntakeQueue(async () => {
-      if (await globalThis.BossLocalWebIntake.hasAutoRetryablePending(chrome.storage.local)) {
-        await scheduleWebIntakeRetryAlarm();
-      } else {
-        await clearWebIntakeRetryAlarm();
-      }
-    });
+    await withWebIntakeQueue(() => syncWebIntakeRetryAlarm());
     return { ok: true, record };
   } catch (error) {
     return {

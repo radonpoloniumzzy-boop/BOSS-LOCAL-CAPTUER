@@ -2041,20 +2041,23 @@ async function testCompletedTransitionScrubsSensitivePendingBeforeDelete() {
     idempotencyKey: "safe-transition",
     storageArea: popup.chrome.storage.local,
   });
-  let removeCalls = 0;
-  const originalRemove = popup.chrome.storage.local.remove;
-  popup.chrome.storage.local.remove = async (key) => {
-    removeCalls += 1;
-    if (removeCalls === 1) {
-      throw new Error("remove failed once");
+  let fetchCalls = 0;
+  const completedKey = popup.context.BossLocalWebIntake.completedStorageKey(queued.batchKey);
+  const originalSet = popup.chrome.storage.local.set;
+  popup.chrome.storage.local.set = async (value) => {
+    if (Object.prototype.hasOwnProperty.call(value, completedKey)) {
+      popup.chrome.storage.local.set = originalSet;
+      throw new Error("completed write failed once");
     }
-    return originalRemove.call(popup.chrome.storage.local, key);
+    return originalSet.call(popup.chrome.storage.local, value);
   };
-  const completed = await popup.context.BossLocalWebIntake.sendQueuedBatch({
-      settings,
-      batchKey: queued.batchKey,
-      storageArea: popup.chrome.storage.local,
-      fetchImpl: async () => ({
+  const firstResult = await popup.context.BossLocalWebIntake.sendQueuedBatch({
+    settings,
+    batchKey: queued.batchKey,
+    storageArea: popup.chrome.storage.local,
+    fetchImpl: async () => {
+      fetchCalls += 1;
+      return {
         ok: true,
         status: 200,
         async json() {
@@ -2068,17 +2071,253 @@ async function testCompletedTransitionScrubsSensitivePendingBeforeDelete() {
             failed_candidates: 0,
           };
         },
-      }),
-    });
-  assert.strictEqual(completed.status, "completed");
+      };
+    },
+  });
+  assert.strictEqual(firstResult.status, "waiting_retry");
   let serialized = JSON.stringify(popup.store);
   assert(!serialized.includes("Sensitive Name"));
   assert(!serialized.includes("Sensitive Raw Card"));
   assert(!serialized.includes("candidate/safe"));
+  assert(!serialized.includes("payload"));
+  const pendingAfterFailure = await popup.context.BossLocalWebIntake.readPendingRecord(queued.batchKey, popup.chrome.storage.local);
+  assert.strictEqual(pendingAfterFailure.scrubbedPendingTransition, true);
+  assert.strictEqual(Boolean(pendingAfterFailure.payload), false);
+  await Promise.resolve();
+  const secondResult = await popup.context.BossLocalWebIntake.sendQueuedBatch({
+    settings,
+    batchKey: queued.batchKey,
+    storageArea: popup.chrome.storage.local,
+    fetchImpl: async () => {
+      fetchCalls += 1;
+      throw new Error("should not send again");
+    },
+  });
+  assert.strictEqual(secondResult.status, "completed");
+  assert.strictEqual(fetchCalls, 1);
   await popup.context.BossLocalWebIntake.loadState(popup.chrome.storage.local);
   serialized = JSON.stringify(popup.store);
   assert(!serialized.includes("Sensitive Name"));
   assert(!serialized.includes("Sensitive Raw Card"));
+  assert(!serialized.includes("payload"));
+}
+
+async function testAlarmExistsBeforeInitialSendAndCrashRecoveryCompletesAfterLeaseExpires() {
+  let fakeNow = Date.now();
+  const settings = { apiBase: "http://127.0.0.1:17864", apiToken: "crash-token", jobTitle: "Crash Recovery" };
+  const fetchStarted = createDeferred();
+  const releaseFetch = createDeferred();
+  const firstWorker = loadServiceWorker(async () => {
+    fetchStarted.resolve();
+    await releaseFetch.promise;
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return {
+          batch_id: 991,
+          status: "completed",
+          received_count: 1,
+          inserted_candidates: 1,
+          updated_candidates: 0,
+          skipped_candidates: 0,
+          failed_candidates: 0,
+        };
+      },
+    };
+  });
+  firstWorker.context.__bossLocalWebIntakeNow = () => fakeNow;
+  Object.assign(firstWorker.chrome.__store, settings);
+  const sendPromise = firstWorker.api.enqueueAndSendWebIntake({
+    settings,
+    sourceUrl: "https://www.zhipin.com/web/geek/recommend",
+    merged: {
+      platform: "boss",
+      cards: [{ source_candidate_id: "crash-1", raw_card_text: "crash-card", name: "Crash Name", detail_url: "https://www.zhipin.com/candidate/crash-1" }],
+    },
+    idempotencyKey: "crash-batch",
+  });
+  await fetchStarted.promise;
+  assert(firstWorker.chrome.__alarms.some((alarm) => alarm.name === firstWorker.context.BossLocalWebIntake.RETRY_ALARM_NAME));
+
+  let recoveryFetchCalls = 0;
+  const secondWorker = loadServiceWorker(async () => {
+    recoveryFetchCalls += 1;
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return {
+          batch_id: 992,
+          status: "completed",
+          received_count: 1,
+          inserted_candidates: 1,
+          updated_candidates: 0,
+          skipped_candidates: 0,
+          failed_candidates: 0,
+        };
+      },
+    };
+  });
+  secondWorker.context.__bossLocalWebIntakeNow = () => fakeNow;
+  Object.assign(secondWorker.chrome.__store, firstWorker.chrome.__store);
+
+  await triggerRetryAlarm(secondWorker);
+  assert.strictEqual(recoveryFetchCalls, 0);
+  assert(secondWorker.chrome.__alarms.some((alarm) => alarm.name === secondWorker.context.BossLocalWebIntake.RETRY_ALARM_NAME));
+
+  fakeNow += secondWorker.context.BossLocalWebIntake.SEND_LEASE_MS + 1000;
+  await triggerRetryAlarm(secondWorker);
+  const state = await secondWorker.context.BossLocalWebIntake.loadState(secondWorker.chrome.storage.local);
+  assert.strictEqual(recoveryFetchCalls, 1);
+  assert.strictEqual(state.pendingOrder.length, 0);
+  assert.strictEqual(state.completedOrder.length, 1);
+  const serialized = JSON.stringify(secondWorker.chrome.__store);
+  assert(!serialized.includes("Crash Name"));
+  assert(!serialized.includes("crash-card"));
+  assert(!serialized.includes("candidate/crash-1"));
+  releaseFetch.resolve();
+  void sendPromise;
+}
+
+async function testManualRetryCreatesAlarmBeforeFetchStarts() {
+  const settings = { apiBase: "http://127.0.0.1:17864", apiToken: "manual-alarm-token", jobTitle: "Manual Retry Alarm" };
+  const fetchStarted = createDeferred();
+  const releaseFetch = createDeferred();
+  const worker = loadServiceWorker(async () => {
+    fetchStarted.resolve();
+    await releaseFetch.promise;
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return {
+          batch_id: 993,
+          status: "completed",
+          received_count: 1,
+          inserted_candidates: 1,
+          updated_candidates: 0,
+          skipped_candidates: 0,
+          failed_candidates: 0,
+        };
+      },
+    };
+  });
+  Object.assign(worker.chrome.__store, settings);
+  const queued = await worker.context.BossLocalWebIntake.queueCapturedBatch({
+    settings,
+    merged: { platform: "boss", cards: [{ source_candidate_id: "manual-alarm-1", raw_card_text: "manual-alarm-card" }] },
+    sourceUrl: "https://www.zhipin.com/web/geek/recommend",
+    idempotencyKey: "manual-alarm-batch",
+    storageArea: worker.chrome.storage.local,
+  });
+  await worker.context.BossLocalWebIntake.upsertPendingRecord(
+    {
+      ...(await worker.context.BossLocalWebIntake.readPendingRecord(queued.batchKey, worker.chrome.storage.local)),
+      status: "waiting_retry",
+      attemptCount: 1,
+    },
+    worker.chrome.storage.local,
+  );
+  const retryPromise = worker.api.retryWebIntake(settings);
+  await fetchStarted.promise;
+  assert(worker.chrome.__alarms.some((alarm) => alarm.name === worker.context.BossLocalWebIntake.RETRY_ALARM_NAME));
+  releaseFetch.resolve();
+  await retryPromise;
+}
+
+async function testLegacyV2CompletedMigrationSanitizesSensitiveData() {
+  const worker = loadServiceWorker();
+  worker.chrome.__store[worker.context.BossLocalWebIntake.LEGACY_STATE_KEY] = {
+    pendingBatches: {},
+    completedBatches: {
+      "legacy-completed": {
+        batchKey: "legacy-completed",
+        idempotencyKey: "legacy-idem-2",
+        payload: {
+          candidates: [
+            {
+              name: "Completed Name",
+              raw_card_text: "Completed Raw Card",
+              detail_url: "https://www.zhipin.com/candidate/completed",
+            },
+          ],
+        },
+        webResult: { batch_id: 901, status: "completed", received_count: 1 },
+      },
+    },
+  };
+  const state = await worker.context.BossLocalWebIntake.loadState(worker.chrome.storage.local);
+  assert.strictEqual(state.completedOrder.length, 1);
+  const serialized = JSON.stringify(worker.chrome.__store);
+  assert(!serialized.includes("Completed Name"));
+  assert(!serialized.includes("Completed Raw Card"));
+  assert(!serialized.includes("candidate/completed"));
+  assert(!serialized.includes("\"payload\""));
+}
+
+async function testLegacyV2MismatchShowsPopupBlockedStatusAndPreservesPayload() {
+  const sharedStore = {
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "other-token",
+  };
+  const popup = createPopupTestContext({
+    store: sharedStore,
+    runtimeHandler: createPopupWebRuntimeHandler(),
+  });
+  const stableHash = popup.context.BossLocalWebIntake.stableHash;
+  sharedStore[popup.context.BossLocalWebIntake.LEGACY_STATE_KEY] = {
+    pendingBatches: {
+      "legacy-pending": {
+        batchKey: "legacy-pending",
+        idempotencyKey: "legacy-popup-1",
+        payload: {
+          source_platform: "boss",
+          source_url: "https://www.zhipin.com/web/geek/recommend",
+          source_job_title: "Legacy Popup",
+          idempotency_key: "legacy-popup-1",
+          candidates: [{ name: "Popup Name", raw_card_text: "Popup Raw Card", detail_url: "https://www.zhipin.com/candidate/popup" }],
+        },
+        connection: {
+          modeApiBase: "http://127.0.0.1:17864",
+          webApiBase: "http://127.0.0.1:17864",
+          tokenFingerprint: stableHash("original-token"),
+          key: stableHash("http://127.0.0.1:17864|http://127.0.0.1:17864|original-token"),
+        },
+      },
+    },
+    completedBatches: {
+      "legacy-done": {
+        batchKey: "legacy-done",
+        idempotencyKey: "legacy-done-1",
+        payload: {
+          candidates: [{ name: "Done Name", raw_card_text: "Done Raw Card", detail_url: "https://www.zhipin.com/candidate/done" }],
+        },
+        webResult: { batch_id: 902, status: "completed", received_count: 1 },
+      },
+    },
+  };
+
+  await popup.api.refreshWebIntakeStatus({ apiBase: sharedStore.apiBase, apiToken: sharedStore.apiToken, jobTitle: "Legacy Popup" });
+  assert(popup.elements.webIntakeStatus.textContent.includes("存在属于旧连接的待发送批次，请切回原连接完成迁移。"));
+  assert.strictEqual(popup.elements.retryWebIntake.disabled, true);
+
+  const status = await popup.context.BossLocalWebIntake.getStatusView({
+    settings: { apiBase: sharedStore.apiBase, apiToken: sharedStore.apiToken, jobTitle: "Legacy Popup" },
+    storageArea: popup.chrome.storage.local,
+  });
+  assert.strictEqual(status.record.statusLabel, "等待原连接");
+  const safeSerialized = JSON.stringify(status);
+  assert(!safeSerialized.includes("Popup Name"));
+  assert(!safeSerialized.includes("Popup Raw Card"));
+  assert(!safeSerialized.includes("candidate/popup"));
+  assert(sharedStore[popup.context.BossLocalWebIntake.LEGACY_STATE_KEY]);
+
+  sharedStore.apiToken = "original-token";
+  await popup.api.refreshWebIntakeStatus({ apiBase: sharedStore.apiBase, apiToken: sharedStore.apiToken, jobTitle: "Legacy Popup" });
+  const state = await popup.context.BossLocalWebIntake.loadState(popup.chrome.storage.local, { apiBase: sharedStore.apiBase, apiToken: sharedStore.apiToken });
+  assert.strictEqual(sharedStore[popup.context.BossLocalWebIntake.LEGACY_STATE_KEY], undefined);
+  assert.strictEqual(state.pendingOrder.length, 1);
 }
 
 async function main() {
@@ -2114,11 +2353,15 @@ async function main() {
   await testWebIntakeSameRunIdDoesNotDuplicatePendingBatch();
   await testWebIntakeConcurrentCompletionDoesNotOverwriteQueuedBatch();
   await testSendingLeaseExpiryRecoversOnAlarm();
+  await testAlarmExistsBeforeInitialSendAndCrashRecoveryCompletesAfterLeaseExpires();
   await testSameBatchConcurrentSendLockTwentyTimes();
   await testAutomaticRetryStopsAtMaxAndManualRetryStillWorks();
+  await testManualRetryCreatesAlarmBeforeFetchStarts();
   await testPopupExpiredSendingEnablesManualRetry();
+  await testLegacyV2CompletedMigrationSanitizesSensitiveData();
   await testLegacyV2MigrationMatchesCurrentConnectionAndCanSend();
   await testLegacyV2MigrationKeepsMismatchedPendingUntilOriginalConnectionReturns();
+  await testLegacyV2MismatchShowsPopupBlockedStatusAndPreservesPayload();
   await testPendingLimitConcurrentEnqueueStaysWithinTen();
   await testWebIntakeSuccessSanitizesCompletedPayload();
   await testCompletedTransitionScrubsSensitivePendingBeforeDelete();

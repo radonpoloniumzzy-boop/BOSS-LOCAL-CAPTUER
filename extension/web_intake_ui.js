@@ -16,7 +16,11 @@
       ? globalThis.BossLocalWebIntakeSender.isLeaseExpired(record)
       : false;
 
-    if (belongsToCurrentConnection && String(record?.status || "") === "sending") {
+    if (record?.legacyBlocked) {
+      title = "等待原连接";
+      message = "存在属于旧连接的待发送批次，请切回原连接完成迁移。";
+      canRetry = false;
+    } else if (belongsToCurrentConnection && String(record?.status || "") === "sending") {
       if (leaseExpired) {
         title = "发送中断";
         message = "上次发送中断，可重新发送。";
@@ -37,7 +41,7 @@
       Number.isFinite(result.updated_candidates) ? `更新数: ${result.updated_candidates || 0}` : "",
       Number.isFinite(result.skipped_candidates) ? `跳过数: ${result.skipped_candidates || 0}` : "",
       Number.isFinite(result.failed_candidates) ? `失败数: ${result.failed_candidates || 0}` : "",
-      !belongsToCurrentConnection && record ? "该批次属于旧连接，当前模式不会误投到新人才库。" : "",
+      !record?.legacyBlocked && !belongsToCurrentConnection && record ? "该批次属于旧连接，当前模式不会误投到新人才库。" : "",
     ].filter(Boolean);
 
     return {
