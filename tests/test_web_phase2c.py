@@ -4,24 +4,30 @@ import re
 import subprocess
 import tempfile
 import threading
+import time
+import tkinter as tk
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
+from launch_web_workbench import LaunchWindow
 
 from core.bootstrap import BootstrapService, BootstrapSettings, BootstrapStore
 from core.config import ConfigService
 from web.backend.app import WEB_CAPABILITIES, create_web_app
 from web.backend.pairing import PairingCodeError, PluginPairingService
 from web.backend.workbench_launcher import (
+    LaunchCancelled,
     LaunchFailure,
     STEP_CHECK_FRONTEND,
     STEP_CHECK_PORT,
+    STEP_CHECK_RUNTIME,
     STEP_CONFIRM_DATABASE,
     STEP_CONNECT_DATABASE,
     STEP_OPEN_BROWSER,
+    STEP_READ_CONFIG,
     WorkbenchLauncher,
     _frontend_assets_ready,
     _request_json,
@@ -411,7 +417,7 @@ class WorkbenchLauncherBehaviorTest(unittest.TestCase):
         started: list[bool] = []
         launcher = WorkbenchLauncher(
             service_probe=lambda _url: self.current_health(),
-            status_probe=lambda _url: {"database_ready": True},
+            status_probe=lambda _url: {"status": "ready", "database_ready": True},
             port_in_use=lambda _port: True,
             process_start=lambda: started.append(True),
             browser_open=opened.append,
@@ -453,7 +459,7 @@ class WorkbenchLauncherBehaviorTest(unittest.TestCase):
 
         launcher = WorkbenchLauncher(
             service_probe=health,
-            status_probe=lambda _url: {"database_ready": True},
+            status_probe=lambda _url: {"status": "ready", "database_ready": True},
             port_in_use=lambda _port: False,
             process_start=Process,
             browser_open=opened.append,
@@ -499,7 +505,7 @@ class WorkbenchLauncherBehaviorTest(unittest.TestCase):
                 "service": "recruiting-talent-workbench",
                 "capabilities": ["older_pairing"],
             },
-            status_probe=lambda _url: {"database_ready": True},
+            status_probe=lambda _url: {"status": "ready", "database_ready": True},
             port_in_use=lambda _port: True,
             process_start=lambda: started.append(True),
             browser_open=lambda _url: None,
@@ -518,7 +524,7 @@ class WorkbenchLauncherBehaviorTest(unittest.TestCase):
         opened: list[str] = []
         launcher = WorkbenchLauncher(
             service_probe=lambda url: health_urls.append(url) or self.current_health(),
-            status_probe=lambda url: status_urls.append(url) or {"database_ready": True},
+            status_probe=lambda url: status_urls.append(url) or {"status": "ready", "database_ready": True},
             port_in_use=lambda port: checked_ports.append(port) or False,
             process_start=lambda: None,
             browser_open=opened.append,
@@ -779,11 +785,11 @@ class WorkbenchLauncherBehaviorTest(unittest.TestCase):
                 {"step": STEP_CHECK_FRONTEND, "state": "running", "detail": "正在检查网页资源"},
                 {"step": STEP_CHECK_FRONTEND, "state": "completed", "detail": "网页资源检查通过"},
                 {"step": STEP_CHECK_PORT, "state": "completed", "detail": "端口和已有服务检查完成"},
-                {"step": STEP_CONNECT_DATABASE, "state": "running", "detail": "本地服务已启动，正在连接人才库"},
-                {"step": STEP_CONNECT_DATABASE, "state": "completed", "detail": "本地服务已连接人才库"},
+                {"step": STEP_CONNECT_DATABASE, "state": "running", "detail": "本地服务已启动，正在确认人才库状态"},
                 {"step": STEP_CONFIRM_DATABASE, "state": "running", "detail": "正在确认数据库状态"},
+                {"step": STEP_CONNECT_DATABASE, "state": "completed", "detail": "人才库已连接"},
                 {"step": STEP_CONFIRM_DATABASE, "state": "completed", "detail": "人才库状态已确认"},
-                {"step": STEP_OPEN_BROWSER, "state": "running", "detail": "正在打开浏览器"},
+                {"step": STEP_OPEN_BROWSER, "state": "running", "detail": "正在提交打开浏览器"},
                 {"step": STEP_OPEN_BROWSER, "state": "completed", "detail": "浏览器已打开网页工作台"},
             ],
         )
@@ -801,18 +807,68 @@ class WorkbenchLauncherBehaviorTest(unittest.TestCase):
         )
 
         self.assertEqual(launcher.launch(), "already_running")
-        self.assertEqual(
-            [event["step"] for event in events],
-            [
-                STEP_CHECK_PORT,
-                STEP_CHECK_PORT,
-                STEP_CONNECT_DATABASE,
-                STEP_CONFIRM_DATABASE,
-                STEP_CONFIRM_DATABASE,
-                STEP_OPEN_BROWSER,
-                STEP_OPEN_BROWSER,
-            ],
+        self.assertEqual(events[2], {"step": STEP_CONNECT_DATABASE, "state": "running", "detail": "本地服务可访问，正在确认人才库状态"})
+        self.assertEqual(events[4], {"step": STEP_CONNECT_DATABASE, "state": "completed", "detail": "人才库已连接"})
+        self.assertEqual(events[5], {"step": STEP_CONFIRM_DATABASE, "state": "completed", "detail": "人才库状态已确认"})
+
+    def test_first_setup_path_uses_not_ready_copy_without_claiming_database_connected(self) -> None:
+        events: list[dict[str, str]] = []
+        launcher = WorkbenchLauncher(
+            service_probe=lambda _url: self.current_health(),
+            status_probe=lambda _url: {"error": {"code": "database_not_ready"}},
+            port_in_use=lambda _port: True,
+            process_start=lambda: None,
+            browser_open=lambda _url: True,
+            wait=lambda _seconds: None,
+            progress=events.append,
         )
+
+        self.assertEqual(launcher.launch(), "already_running")
+        details = [event["detail"] for event in events]
+        self.assertIn("本地服务可访问，尚未配置人才库，将进入首次设置", details)
+        self.assertIn("人才库状态已确认，将进入首次设置", details)
+        self.assertNotIn("已连接人才库", "".join(details))
+        self.assertNotIn("本地服务已连接人才库", "".join(details))
+
+    def test_database_fault_matrix_never_reports_connected_database_progress(self) -> None:
+        for fault_code in (
+            "database_corrupt",
+            "database_in_use",
+            "configured_database_missing",
+            "unsupported_schema",
+            "database_upgrade_failed",
+        ):
+            with self.subTest(fault_code=fault_code):
+                events: list[dict[str, str]] = []
+                health_calls = 0
+
+                class Process:
+                    def poll(self):
+                        return None
+
+                    def terminate(self):
+                        return None
+
+                def health(_url):
+                    nonlocal health_calls
+                    health_calls += 1
+                    return None if health_calls == 1 else self.current_health()
+
+                launcher = WorkbenchLauncher(
+                    service_probe=health,
+                    status_probe=lambda _url, code=fault_code: {"error": {"code": code}},
+                    port_in_use=lambda _port: False,
+                    process_start=Process,
+                    browser_open=lambda _url: None,
+                    wait=lambda _seconds: None,
+                    progress=events.append,
+                )
+                with self.assertRaises(LaunchFailure):
+                    launcher.launch()
+                details = [event["detail"] for event in events]
+                self.assertNotIn("已连接人才库", "".join(details))
+                self.assertNotIn("本地服务已连接人才库", "".join(details))
+                self.assertIn("正在确认数据库状态", details)
 
     def test_launcher_cancel_stops_only_started_process_and_skips_browser_open(self) -> None:
         events: list[str] = []
@@ -859,9 +915,93 @@ class WorkbenchLauncherBehaviorTest(unittest.TestCase):
         self.assertEqual(events, ["terminate", "wait:3", "kill", "wait:3"])
         self.assertNotIn("open-browser", events)
 
-    def test_cmd_launcher_is_saved_without_bom(self) -> None:
-        content = (Path(__file__).resolve().parents[1] / "launch_web_workbench.cmd").read_bytes()
+    def test_browser_open_commit_wins_over_late_cancel(self) -> None:
+        cancel = threading.Event()
+        opened: list[str] = []
+        launcher = WorkbenchLauncher(
+            service_probe=lambda _url: self.current_health(),
+            status_probe=lambda _url: {"status": "ready", "database_ready": True},
+            port_in_use=lambda _port: True,
+            process_start=lambda: None,
+            browser_open=lambda url: opened.append(url) or True,
+            wait=lambda _seconds: None,
+            cancel_requested=cancel.is_set,
+        )
+        launcher._on_browser_open_committed = cancel.set
+
+        self.assertEqual(launcher.launch(), "already_running")
+        self.assertEqual(opened, ["http://127.0.0.1:17864/"])
+
+    def test_create_default_launcher_can_cancel_during_config_read(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            store = BootstrapStore(root / "bootstrap.json")
+            store.save(BootstrapSettings(data_dir=str(root / "data"), web_port=17864))
+
+            with self.assertRaises(LaunchCancelled) as caught:
+                create_default_launcher(root, lambda _event: None, bootstrap_store=store, cancel_requested=lambda: True)
+
+        self.assertEqual(caught.exception.step, STEP_READ_CONFIG)
+
+    def test_create_default_launcher_can_cancel_during_runtime_check(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            store = BootstrapStore(root / "bootstrap.json")
+            store.save(BootstrapSettings(data_dir=str(root / "data"), web_port=17864))
+            calls = {"count": 0}
+
+            def cancelled() -> bool:
+                calls["count"] += 1
+                return calls["count"] >= 4
+
+            with self.assertRaises(LaunchCancelled) as caught:
+                create_default_launcher(root, lambda _event: None, bootstrap_store=store, cancel_requested=cancelled)
+
+        self.assertEqual(caught.exception.step, STEP_CHECK_RUNTIME)
+
+    def test_launch_window_shows_cancelled_state_when_factory_respects_cancel(self) -> None:
+        root = tk.Tk()
+        root.withdraw()
+
+        def launcher_factory(_project_root, progress, cancel_requested):
+            progress({"step": STEP_READ_CONFIG, "state": "running", "detail": "正在读取本机配置"})
+
+            class FakeLauncher:
+                def launch(self_nonlocal):
+                    while not cancel_requested():
+                        threading.Event().wait(0.01)
+                    raise LaunchCancelled(step=STEP_READ_CONFIG)
+
+            return FakeLauncher()
+
+        window = LaunchWindow(Path.cwd(), launcher_factory=launcher_factory, root=root)
+        try:
+            window.start_check()
+            root.update()
+            window.request_close()
+            for _ in range(200):
+                time.sleep(0.02)
+                root.update()
+                if not window.running:
+                    break
+            self.assertFalse(window.running)
+            self.assertEqual(window.message.get(), "已取消本轮启动检查。")
+            self.assertEqual(window.retry_button["state"], "normal")
+            self.assertEqual(window.close_button["text"], "关闭")
+        finally:
+            root.destroy()
+
+    def test_cmd_launcher_is_saved_without_bom_crlf_and_question_mark_fallback(self) -> None:
+        cmd = Path(__file__).resolve().parents[1] / "launch_web_workbench.cmd"
+        content = cmd.read_bytes()
         self.assertFalse(content.startswith(b"\xef\xbb\xbf"))
+        self.assertIn(b"\r\n", content)
+        text = content.decode("utf-8")
+        self.assertIn("启动网页工作台", text)
+        self.assertIn("缺少本地运行环境，请重新安装完整项目后再试。", text)
+        self.assertNotRegex(text, r"\?{3,}")
+        self.assertIn(".venv\\Scripts\\pythonw.exe", text)
+        self.assertNotIn(".venv\\Scripts\\python.exe", text)
 
 
 if __name__ == "__main__":

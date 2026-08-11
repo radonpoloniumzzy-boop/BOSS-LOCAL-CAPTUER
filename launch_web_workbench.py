@@ -82,6 +82,8 @@ class LaunchWindow:
         self.step_status: dict[str, tk.StringVar] = {
             step: tk.StringVar(value=STATE_LABELS["waiting"]) for step in STEP_ORDER
         }
+        self.current_step: str | None = None
+        self.current_state: str = "waiting"
         self._build_ui()
         self.root.after(80, self._poll)
 
@@ -186,6 +188,8 @@ class LaunchWindow:
         self.close_button.configure(text="取消启动")
         self.message.set("正在执行启动检查…")
         self.hint.set("会按真实检查结果逐步推进，不会伪造进度。")
+        self.current_step = None
+        self.current_state = "waiting"
         for variable in self.step_status.values():
             variable.set(STATE_LABELS["waiting"])
         self.detail.configure(state="normal")
@@ -220,6 +224,11 @@ class LaunchWindow:
     def cancel_startup(self) -> None:
         if not self.running or self.cancel_event.is_set():
             return
+        if self.current_step == STEP_OPEN_BROWSER and self.current_state == "running":
+            self.message.set("正在提交打开浏览器，请稍候。")
+            self.hint.set("浏览器打开阶段已经开始，当前不能再取消本轮启动。")
+            self.append_detail("浏览器打开阶段已提交，本轮启动不再接受取消。")
+            return
         self.cancel_event.set()
         self.message.set("正在取消启动检查…")
         self.hint.set("如果本轮已经启动了本地服务，会在退出前回收本轮进程。")
@@ -232,8 +241,15 @@ class LaunchWindow:
         step = event.get("step")
         state = event.get("state")
         detail = event.get("detail") or ""
+        if step:
+            self.current_step = step
+        if state:
+            self.current_state = state
         if step in self.step_status and state in STATE_LABELS:
             self.step_status[step].set(STATE_LABELS[state])
+        if step == STEP_OPEN_BROWSER and state == "running":
+            self.close_button.configure(state="disabled", text="请稍候")
+            self.hint.set("浏览器打开阶段已经开始，请等待本轮启动完成。")
         if detail:
             self.message.set(detail)
             self.append_detail(detail)
