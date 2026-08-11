@@ -217,6 +217,9 @@ function createPopupTestContext(options = {}) {
   if (options.apiToken !== undefined) {
     store.apiToken = options.apiToken;
   }
+  if (options.connectionMode !== undefined) {
+    store.connectionMode = options.connectionMode;
+  }
   if (options.jobTitle !== undefined) {
     store.jobTitle = options.jobTitle;
   }
@@ -403,8 +406,12 @@ function createPopupTestContext(options = {}) {
           return false;
         }
         return (
+          String(previous.connectionMode || (String(previous.apiBase || "").includes(":17864") ? "web" : "desktop"))
+            === String(next.connectionMode || (String(next.apiBase || "").includes(":17864") ? "web" : "desktop"))
+          && (
           String(previous.apiBase || "").replace(/\/+$/, "") === String(next.apiBase || "").replace(/\/+$/, "")
           && String(previous.apiToken || "") === String(next.apiToken || "")
+          )
         );
       },
       async downloadBatchCsv() {
@@ -928,17 +935,17 @@ function testPairingCodeParsesAndRejectsInvalidInput() {
     { ...context.BossLocalPairing.parsePairingCode(
       "boss-local://pair?apiBase=http%3A%2F%2F127.0.0.1%3A19001&apiToken=pair-token_123",
     ) },
-    { apiBase: "http://127.0.0.1:19001", apiToken: "pair-token_123" },
+    { apiBase: "http://127.0.0.1:19001", apiToken: "pair-token_123", connectionMode: "desktop" },
   );
   assert.deepStrictEqual(
     { ...context.BossLocalPairing.parsePairingCode("A1B2C3-D4E5F6") },
-    { pairingCode: "A1B2C3-D4E5F6", apiBase: "http://127.0.0.1:17864" },
+    { pairingCode: "A1B2C3-D4E5F6", apiBase: "http://127.0.0.1:17864", connectionMode: "web" },
   );
   assert.deepStrictEqual(
     { ...context.BossLocalPairing.parsePairingCode(
       "boss-local://web-pair?apiBase=http%3A%2F%2F127.0.0.1%3A19064&pairingCode=ABC123-DEF456",
     ) },
-    { pairingCode: "ABC123-DEF456", apiBase: "http://127.0.0.1:19064" },
+    { pairingCode: "ABC123-DEF456", apiBase: "http://127.0.0.1:19064", connectionMode: "web" },
   );
   for (const invalid of [
     "boss-local://web-pair?apiBase=https%3A%2F%2F127.0.0.1%3A19064&pairingCode=ABC123-DEF456",
@@ -998,6 +1005,7 @@ async function testPopupPairsWithSingleWebCodeAndRemembersConnection() {
   assert.strictEqual(popup.fetchCalls[0].url, "http://127.0.0.1:17864/api/plugin/pair");
   assert.strictEqual(popup.store.apiBase, "http://127.0.0.1:17864");
   assert.strictEqual(popup.store.apiToken, "remembered-web-token");
+  assert.strictEqual(popup.store.connectionMode, "web");
   assert(popup.elements.status.textContent.includes("已连接网页工作台"));
   assert(!popup.elements.status.textContent.includes("remembered-web-token"));
 }
@@ -1039,6 +1047,9 @@ async function testPopupPairsAndUsesConfiguredWebPortEndToEnd() {
           },
         };
       }
+      if (endpoint === "http://127.0.0.1:19064/api/health") {
+        return { ok: true, status: 200, async json() { return { status: "ok" }; } };
+      }
       throw new Error(`Unexpected fetch: ${endpoint}`);
     },
   });
@@ -1049,8 +1060,10 @@ async function testPopupPairsAndUsesConfiguredWebPortEndToEnd() {
   await popup.api.applyPairingCodeAndTest();
   assert.strictEqual(popup.store.apiBase, "http://127.0.0.1:19064", popup.elements.status.textContent);
   assert.strictEqual(popup.store.apiToken, "configured-port-token");
+  assert.strictEqual(popup.store.connectionMode, "web");
   await popup.api.runCollection(false);
   await popup.api.downloadCurrentBatch();
+  await popup.api.openWebWorkbench();
 
   assert.deepStrictEqual(popup.store.lastMarkdownExport, {
     apiBase: "http://127.0.0.1:19064",
@@ -1062,6 +1075,19 @@ async function testPopupPairsAndUsesConfiguredWebPortEndToEnd() {
   );
   assert(popup.fetchCalls.some((call) => call.url === "http://127.0.0.1:19064/api/plugin/connection/check"));
   assert(popup.fetchCalls.some((call) => call.url === "http://127.0.0.1:19064/api/intake/candidates"));
+  assert(popup.fetchCalls.some((call) => call.url === "http://127.0.0.1:19064/api/health"));
+  assert.strictEqual(popup.tabCreates[0]?.url, "http://127.0.0.1:19064/");
+
+  const reopened = createPopupTestContext({
+    store: popup.store,
+    runtimeHandler: createPopupWebRuntimeHandler(),
+    fetchImpl: popup.context.fetch,
+  });
+  await reopened.api.init();
+  assert.strictEqual(reopened.store.connectionMode, "web");
+  assert.strictEqual(reopened.elements.apiBase.value, "http://127.0.0.1:19064");
+  await reopened.api.runCollection(false);
+  assert(reopened.fetchCalls.some((call) => call.url === "http://127.0.0.1:19064/api/intake/candidates"));
 }
 
 function testCollectionCarriesCanonicalJobProfileId() {
@@ -1102,7 +1128,60 @@ async function testPopupPairingSuccessDoesNotReferenceCollectionVariables() {
 
   assert.strictEqual(popup.fetchCalls.length, 1);
   assert.strictEqual(popup.fetchCalls[0].url, "http://127.0.0.1:17863/api/connection/check");
+  assert.strictEqual(popup.store.connectionMode, "desktop");
   assert(popup.elements.status.textContent.includes("已连接桌面兼容模式"));
+}
+
+async function testPopupDesktopCustomPortRemainsDesktopMode() {
+  const popup = createPopupTestContext({
+    fetchImpl: async (url) => {
+      const textUrl = String(url);
+      if (textUrl.endsWith("/api/connection/check")) {
+        return { ok: true, status: 200, async json() { return { ok: true }; } };
+      }
+      if (textUrl.endsWith("/api/extension/config")) {
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return {
+              ok: true,
+              result: {
+                job_profile_id: 19,
+                recruitment_task_id: 31,
+                job_title: "Desktop 19001",
+              },
+            };
+          },
+        };
+      }
+      if (textUrl.endsWith("/api/import/cards")) {
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return { ok: true, result: { batch_id: 901, parsed_cards: 1, total_batch_items: 1 } };
+          },
+        };
+      }
+      throw new Error(`Unexpected fetch: ${textUrl}`);
+    },
+  });
+  popup.elements.pairingCode.value =
+    "boss-local://pair?apiBase=http%3A%2F%2F127.0.0.1%3A19001&apiToken=desktop-custom-token";
+
+  await popup.api.applyPairingCodeAndTest();
+  assert.strictEqual(popup.store.apiBase, "http://127.0.0.1:19001");
+  assert.strictEqual(popup.store.connectionMode, "desktop");
+  assert.strictEqual(popup.fetchCalls[0].url, "http://127.0.0.1:19001/api/connection/check");
+
+  await popup.api.runCollection(false);
+  assert(popup.fetchCalls.some((call) => call.url === "http://127.0.0.1:19001/api/import/cards"));
+  assert(!popup.fetchCalls.some((call) => call.url === "http://127.0.0.1:19001/api/intake/candidates"));
+  assert.strictEqual(
+    popup.api.isWebWorkbenchMode({ apiBase: "http://127.0.0.1:19001", apiToken: "desktop-custom-token", connectionMode: "desktop" }),
+    false,
+  );
 }
 
 async function testPopupWebModeCollectCurrentPostsDirectlyToWebIntake() {
@@ -1771,6 +1850,101 @@ function testWebIntakeIdentityUsesFullFieldsInsteadOfShortHash() {
     key: "deadbeef",
   };
   assert.strictEqual(context.BossLocalWebIntake.sameConnectionIdentity(left, right), false);
+  assert.strictEqual(
+    context.BossLocalWebIntake.sameConnectionIdentity(
+      {
+        mode: "web",
+        apiBase: "http://127.0.0.1:17864",
+        webApiBase: "http://127.0.0.1:17864",
+        tokenDigest: "same",
+      },
+      {
+        mode: "desktop",
+        apiBase: "http://127.0.0.1:17864",
+        webApiBase: "http://127.0.0.1:17864",
+        tokenDigest: "same",
+      },
+    ),
+    false,
+  );
+}
+
+async function testLegacyStorageConnectionModeMigrationRules() {
+  const popup = createPopupTestContext({
+    store: { apiBase: "http://127.0.0.1:19001", apiToken: "legacy-custom-token" },
+    runtimeHandler: createPopupWebRuntimeHandler(),
+  });
+  const identity = popup.context.BossLocalWebIntakeIdentity;
+  assert.strictEqual(identity.resolveConnectionMode({ apiBase: "http://127.0.0.1:17863" }), "desktop");
+  assert.strictEqual(identity.resolveConnectionMode({ apiBase: "http://127.0.0.1:17864" }), "web");
+  assert.strictEqual(identity.resolveConnectionMode({ apiBase: "http://127.0.0.1:19001" }), "desktop");
+  assert.strictEqual(identity.needsConnectionModeConfirmation({ apiBase: "http://127.0.0.1:19001" }), true);
+  assert.strictEqual(identity.needsConnectionModeConfirmation({ apiBase: "http://127.0.0.1:17863" }), false);
+  assert.strictEqual(identity.needsConnectionModeConfirmation({ apiBase: "http://127.0.0.1:17864" }), false);
+
+  await popup.api.refreshWebIntakeStatus({ apiBase: "http://127.0.0.1:19001", apiToken: "legacy-custom-token", jobTitle: "Legacy Custom" });
+  assert(popup.elements.webIntakeStatus.textContent.includes("请重新配对以确认连接模式"));
+}
+
+async function testConnectionModeKeepsWebAndDesktopStateIsolated() {
+  const popup = createPopupTestContext({
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "shared-token",
+    connectionMode: "web",
+    runtimeHandler: createPopupWebRuntimeHandler(),
+  });
+  const webSettings = {
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "shared-token",
+    connectionMode: "web",
+    jobTitle: "Shared Address",
+  };
+  const desktopSettings = {
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "shared-token",
+    connectionMode: "desktop",
+    jobTitle: "Shared Address",
+  };
+  const webIdentity = await popup.context.BossLocalWebIntake.connectionIdentity(webSettings);
+  await popup.context.BossLocalWebIntake.upsertPendingRecord(
+    {
+      batchKey: "shared-web-batch",
+      idempotencyKey: "shared-web-idem",
+      connection: webIdentity,
+      payload: {
+        source_platform: "boss",
+        source_url: "https://www.zhipin.com/web/geek/recommend",
+        source_job_title: "Shared Address",
+        idempotency_key: "shared-web-idem",
+        candidates: [{ raw_card_text: "shared-web-card" }],
+      },
+      status: "completed",
+      statusLabel: "入库成功",
+      webResult: { batch_id: 777, status: "completed", received_count: 1, inserted_candidates: 1, updated_candidates: 0, skipped_candidates: 0, failed_candidates: 0 },
+      updatedAt: new Date().toISOString(),
+    },
+    popup.chrome.storage.local,
+  );
+  await popup.context.BossLocalWebIntake.moveToCompleted(
+    await popup.context.BossLocalWebIntake.readPendingRecord("shared-web-batch", popup.chrome.storage.local),
+    popup.chrome.storage.local,
+  );
+
+  const webStatus = await popup.context.BossLocalWebIntake.getStatusView({ settings: webSettings, storageArea: popup.chrome.storage.local });
+  const desktopStatus = await popup.context.BossLocalWebIntake.getStatusView({ settings: desktopSettings, storageArea: popup.chrome.storage.local });
+  assert.strictEqual(webStatus.record?.webResult?.batch_id, 777);
+  assert.strictEqual(desktopStatus.record, null);
+
+  popup.store.lastCompletedBatchConnection = {
+    connectionMode: "desktop",
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "shared-token",
+  };
+  popup.store.lastCompletedBatchId = 55;
+  popup.store.connectionMode = "desktop";
+  await popup.api.init();
+  await popup.api.downloadCurrentBatch();
+  assert.strictEqual(popup.store.lastMarkdownExport, undefined);
 }
 
 function testCollectorDoesNotPromoteGenericDataIdToPlatformUid() {
@@ -1867,16 +2041,20 @@ async function testCompletedCollectionCanDownloadItsExactBatch() {
   vm.runInNewContext(source, context, { filename: "batch_export.js" });
 
   assert(context.BossLocalBatchExport.batchBelongsToConnection(
-    { apiBase: "http://127.0.0.1:17863/", apiToken: "secret-token" },
-    { apiBase: "http://127.0.0.1:17863", apiToken: "secret-token" },
+    { connectionMode: "desktop", apiBase: "http://127.0.0.1:17863/", apiToken: "secret-token" },
+    { connectionMode: "desktop", apiBase: "http://127.0.0.1:17863", apiToken: "secret-token" },
   ));
   assert(!context.BossLocalBatchExport.batchBelongsToConnection(
-    { apiBase: "http://127.0.0.1:17863", apiToken: "old-token" },
-    { apiBase: "http://127.0.0.1:17863", apiToken: "new-token" },
+    { connectionMode: "desktop", apiBase: "http://127.0.0.1:17863", apiToken: "old-token" },
+    { connectionMode: "desktop", apiBase: "http://127.0.0.1:17863", apiToken: "new-token" },
   ));
   assert(!context.BossLocalBatchExport.batchBelongsToConnection(
-    { apiBase: "http://127.0.0.1:17863", apiToken: "secret-token" },
-    { apiBase: "http://127.0.0.1:19000", apiToken: "secret-token" },
+    { connectionMode: "desktop", apiBase: "http://127.0.0.1:17863", apiToken: "secret-token" },
+    { connectionMode: "desktop", apiBase: "http://127.0.0.1:19000", apiToken: "secret-token" },
+  ));
+  assert(!context.BossLocalBatchExport.batchBelongsToConnection(
+    { connectionMode: "desktop", apiBase: "http://127.0.0.1:17864", apiToken: "secret-token" },
+    { connectionMode: "web", apiBase: "http://127.0.0.1:17864", apiToken: "secret-token" },
   ));
 
   const result = await context.BossLocalBatchExport.downloadBatchCsv({
@@ -1957,6 +2135,7 @@ async function testPopupReopenRestoresWebBatchMarkdownExport() {
   const store = {
     apiBase: "http://127.0.0.1:17864",
     apiToken: "reopen-web-token",
+    connectionMode: "web",
     jobTitle: "Reopen Web Batch",
   };
   const popup = createPopupTestContext({
@@ -2820,6 +2999,7 @@ async function main() {
   await testPopupPairsAndUsesConfiguredWebPortEndToEnd();
   testCollectionCarriesCanonicalJobProfileId();
   await testPopupPairingSuccessDoesNotReferenceCollectionVariables();
+  await testPopupDesktopCustomPortRemainsDesktopMode();
   await testPopupWebModeCollectCurrentPostsDirectlyToWebIntake();
   await testPopupWebModeCollectAutoPostsDirectlyToWebIntake();
   await testPopupDesktopModeStillUsesDesktopImportOnly();
@@ -2845,6 +3025,8 @@ async function main() {
   await testWebIntakeQuotaFailureIsReportedSeparately();
   await testServiceWorkerRestoresPendingBatchViaAlarm();
   testWebIntakeIdentityUsesFullFieldsInsteadOfShortHash();
+  await testLegacyStorageConnectionModeMigrationRules();
+  await testConnectionModeKeepsWebAndDesktopStateIsolated();
   testCollectorDoesNotPromoteGenericDataIdToPlatformUid();
   await testWebIntakeStatusMatrixFollowsServerStatus();
   await testPopupWebModeAutoShowsDesktopOnlyBoundary();

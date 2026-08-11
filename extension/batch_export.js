@@ -1,4 +1,13 @@
 (function initBatchExport(global) {
+  function normalizeConnectionMode(value, apiBase) {
+    const mode = String(value || "").trim().toLowerCase();
+    if (mode === "web" || mode === "desktop") {
+      return mode;
+    }
+    const normalizedApiBase = normalizeApiBase(apiBase);
+    return normalizedApiBase.endsWith(":17864") ? "web" : "desktop";
+  }
+
   function normalizeApiBase(value) {
     return String(value || "http://127.0.0.1:17863").trim().replace(/\/+$/, "");
   }
@@ -20,8 +29,12 @@
       return false;
     }
     return (
+      normalizeConnectionMode(batchConnection.connectionMode, batchConnection.apiBase)
+        === normalizeConnectionMode(currentConnection.connectionMode, currentConnection.apiBase)
+      && (
       normalizeApiBase(batchConnection.apiBase) === normalizeApiBase(currentConnection.apiBase)
       && String(batchConnection.apiToken || "") === String(currentConnection.apiToken || "")
+      )
     );
   }
 

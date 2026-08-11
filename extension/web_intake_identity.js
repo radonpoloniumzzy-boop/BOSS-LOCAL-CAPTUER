@@ -1,13 +1,15 @@
 (function (globalThis) {
   const WEB_INTAKE_PORT = 17864;
   const DESKTOP_COMPAT_PORT = 17863;
+  const DEFAULT_WEB_API_BASE = `http://127.0.0.1:${WEB_INTAKE_PORT}`;
+  const DEFAULT_DESKTOP_API_BASE = `http://127.0.0.1:${DESKTOP_COMPAT_PORT}`;
 
   function trimTrailingSlash(value) {
     return String(value || "").replace(/\/+$/, "");
   }
 
   function normalizeApiBase(value) {
-    let raw = String(value || "http://127.0.0.1:17863").trim() || "http://127.0.0.1:17863";
+    let raw = String(value || DEFAULT_DESKTOP_API_BASE).trim() || DEFAULT_DESKTOP_API_BASE;
     if (!/^[a-z][a-z\d+.-]*:\/\//i.test(raw)) {
       raw = `http://${raw}`;
     }
@@ -34,29 +36,40 @@
     }
   }
 
-  function isWebWorkbenchMode(settings) {
-    try {
-      const url = new URL(normalizeApiBase(settings?.apiBase));
-      return url.protocol === "http:"
-        && url.hostname === "127.0.0.1"
-        && getApiPort(url.toString()) !== DESKTOP_COMPAT_PORT;
-    } catch (_error) {
-      return false;
-    }
+  function normalizeConnectionMode(value) {
+    const mode = String(value || "").trim().toLowerCase();
+    return mode === "web" || mode === "desktop" ? mode : "";
   }
 
-  function deriveWebApiBase(apiBase) {
-    const normalized = normalizeApiBase(apiBase);
-    try {
-      const url = new URL(normalized);
-      url.port = String(WEB_INTAKE_PORT);
-      url.pathname = "";
-      url.search = "";
-      url.hash = "";
-      return trimTrailingSlash(url.toString());
-    } catch (_error) {
-      return `http://127.0.0.1:${WEB_INTAKE_PORT}`;
+  function inferStoredConnectionMode(apiBase) {
+    const port = getApiPort(apiBase);
+    if (port === WEB_INTAKE_PORT) {
+      return "web";
     }
+    return "desktop";
+  }
+
+  function resolveConnectionMode(settings) {
+    return normalizeConnectionMode(settings?.connectionMode) || inferStoredConnectionMode(settings?.apiBase || "");
+  }
+
+  function needsConnectionModeConfirmation(settings) {
+    return !normalizeConnectionMode(settings?.connectionMode)
+      && ![WEB_INTAKE_PORT, DESKTOP_COMPAT_PORT].includes(getApiPort(settings?.apiBase || ""));
+  }
+
+  function isWebWorkbenchMode(settings) {
+    return resolveConnectionMode(settings) === "web";
+  }
+
+  function deriveWebApiBase(settingsOrApiBase) {
+    if (settingsOrApiBase && typeof settingsOrApiBase === "object") {
+      if (resolveConnectionMode(settingsOrApiBase) === "web") {
+        return normalizeApiBase(settingsOrApiBase.apiBase || DEFAULT_WEB_API_BASE);
+      }
+      return DEFAULT_WEB_API_BASE;
+    }
+    return DEFAULT_WEB_API_BASE;
   }
 
   async function sha256Hex(value) {
@@ -72,9 +85,9 @@
   }
 
   async function connectionIdentity(settings) {
-    const mode = isWebWorkbenchMode(settings) ? "web" : "desktop";
+    const mode = resolveConnectionMode(settings);
     const apiBase = normalizeApiBase(settings?.apiBase || "");
-    const webApiBase = mode === "web" ? apiBase : deriveWebApiBase(apiBase);
+    const webApiBase = deriveWebApiBase({ connectionMode: mode, apiBase });
     return {
       mode,
       apiBase,
@@ -154,8 +167,15 @@
 
   globalThis.BossLocalWebIntakeIdentity = {
     WEB_INTAKE_PORT,
+    DESKTOP_COMPAT_PORT,
+    DEFAULT_WEB_API_BASE,
+    DEFAULT_DESKTOP_API_BASE,
     normalizeApiBase,
     getApiPort,
+    normalizeConnectionMode,
+    inferStoredConnectionMode,
+    resolveConnectionMode,
+    needsConnectionModeConfirmation,
     isWebWorkbenchMode,
     deriveWebApiBase,
     sha256Hex,

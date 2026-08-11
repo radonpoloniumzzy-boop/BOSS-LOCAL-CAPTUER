@@ -4,6 +4,7 @@ const DEFAULTS = {
   recruitmentTaskId: null,
   apiBase: "http://127.0.0.1:17863",
   apiToken: "",
+  connectionMode: "",
   scrollMode: "hold_end",
   scrollStep: 900,
   scrollWaitMs: 30,
@@ -72,6 +73,7 @@ const openWebWorkbenchButton = document.getElementById("openWebWorkbench");
 let batchStatusTimer = null;
 let activeJobProfileId = null;
 let activeRecruitmentTaskId = null;
+let activeConnectionMode = "";
 let lastCompletedBatchId = null;
 let lastCompletedBatchConnection = null;
 let lastCompletedWebBatch = null;
@@ -139,6 +141,7 @@ async function init() {
   syncConnectionControls();
   activeJobProfileId = stored.jobProfileId === null ? null : Number(stored.jobProfileId);
   activeRecruitmentTaskId = stored.recruitmentTaskId === null ? null : Number(stored.recruitmentTaskId);
+  activeConnectionMode = BossLocalWebIntake.normalizeConnectionMode(stored.connectionMode);
   lastCompletedBatchId = stored.lastCompletedBatchId === null ? null : Number(stored.lastCompletedBatchId);
   lastCompletedBatchConnection = stored.lastCompletedBatchConnection || null;
   if (!BossLocalBatchExport.batchBelongsToConnection(lastCompletedBatchConnection, collectSettings())) {
@@ -241,17 +244,20 @@ async function applyPairingCodeAndTest() {
         ...collectSettings(),
         apiBase: pairingApiBase,
         apiToken: String(payload.api_token || ""),
+        connectionMode: BossLocalWebIntake.normalizeConnectionMode(pairing.connectionMode) || "web",
       };
     } else {
       verifiedSettings = {
         ...collectSettings(),
         apiBase: normalizeLocalApiBase(pairing.apiBase),
         apiToken: pairing.apiToken,
+        connectionMode: BossLocalWebIntake.normalizeConnectionMode(pairing.connectionMode) || "desktop",
       };
     }
     await testLocalApiConnection(verifiedSettings);
     fields.apiBase.value = verifiedSettings.apiBase;
     fields.apiToken.value = verifiedSettings.apiToken;
+    activeConnectionMode = BossLocalWebIntake.normalizeConnectionMode(verifiedSettings.connectionMode);
     if (!BossLocalBatchExport.batchBelongsToConnection(lastCompletedBatchConnection, verifiedSettings)) {
       lastCompletedBatchId = null;
       lastCompletedBatchConnection = null;
@@ -259,6 +265,7 @@ async function applyPairingCodeAndTest() {
     await chrome.storage.local.set({
       apiBase: fields.apiBase.value,
       apiToken: fields.apiToken.value,
+      connectionMode: activeConnectionMode,
       lastCompletedBatchId,
       lastCompletedBatchConnection,
     });
@@ -412,7 +419,11 @@ async function retryWebIntake() {
 }
 
 async function openWebWorkbench() {
-  const url = `${BossLocalWebIntake.deriveWebApiBase(collectSettings().apiBase)}/`;
+  const settings = collectSettings();
+  const url = `${BossLocalWebIntake.deriveWebApiBase(settings)}/`;
+  if (!isWebWorkbenchMode(settings)) {
+    setStatus("褰撳墠鏄棫妗岄潰鍏煎妯″紡銆傚皢鎵撳紑榛樿缃戦〉宸ヤ綔鍙?17864 鍏ュ彛锛涘鏋滀綘鐨勭綉椤靛伐浣滃彴浣跨敤鑷畾涔夌鍙ｏ紝璇蜂娇鐢ㄧ綉椤佃繛鎺ョ爜閲嶆柊閰嶅銆?");
+  }
   try {
     const response = await fetch(`${url}api/health`);
     if (!response.ok) throw new Error("health failed");
@@ -512,6 +523,7 @@ async function runCollection(autoScroll, options = {}) {
     const imported = await importCards(settings, tab.url, merged, Boolean(options.automationRequested));
     lastCompletedBatchId = Number(imported.batch_id) || null;
     lastCompletedBatchConnection = {
+      connectionMode: settings.connectionMode,
       apiBase: settings.apiBase,
       apiToken: settings.apiToken,
     };
@@ -997,6 +1009,7 @@ function collectSettings() {
     jobTitle: fields.jobTitle.value.trim() || DEFAULTS.jobTitle,
     apiBase,
     apiToken: fields.apiToken.value.trim(),
+    connectionMode: activeConnectionMode,
     scrollMode: fields.scrollMode.value,
     scrollStep: Number(fields.scrollStep.value || DEFAULTS.scrollStep),
     scrollWaitMs: Math.max(Number(fields.scrollWaitMs.value || DEFAULTS.scrollWaitMs), 0),

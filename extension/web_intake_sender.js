@@ -395,11 +395,13 @@
     const values = await area.get({
       apiBase: "http://127.0.0.1:17863",
       apiToken: "",
+      connectionMode: "",
       jobTitle: "Boss 推荐牛人",
     });
     return {
       apiBase: values.apiBase,
       apiToken: values.apiToken,
+      connectionMode: values.connectionMode,
       jobTitle: values.jobTitle,
     };
   }

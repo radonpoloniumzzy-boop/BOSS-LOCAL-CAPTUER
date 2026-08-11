@@ -2,7 +2,11 @@
   function parsePairingCode(value) {
     const raw = String(value || "").trim();
     if (/^[A-F0-9]{6}-[A-F0-9]{6}$/i.test(raw)) {
-      return { pairingCode: raw.toUpperCase(), apiBase: "http://127.0.0.1:17864" };
+      return {
+        pairingCode: raw.toUpperCase(),
+        apiBase: "http://127.0.0.1:17864",
+        connectionMode: "web",
+      };
     }
     let pairingUrl;
     try {
@@ -49,7 +53,7 @@
       ) {
         throw new Error("网页连接码中的地址必须是 127.0.0.1 本机 HTTP 端口。");
       }
-      return { pairingCode, apiBase: webApiUrl.origin };
+      return { pairingCode, apiBase: webApiUrl.origin, connectionMode: "web" };
     }
     if (pairingUrl.protocol !== "boss-local:" || pairingUrl.hostname !== "pair") {
       throw new Error("连接码格式无效，请从桌面端设置页重新复制。");
@@ -76,6 +80,7 @@
     return {
       apiBase: apiUrl.toString().replace(/\/+$/, ""),
       apiToken,
+      connectionMode: "desktop",
     };
   }
 

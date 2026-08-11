@@ -4,6 +4,7 @@
     connectionIdentity,
     normalizeApiBase,
     deriveWebApiBase,
+    resolveConnectionMode,
     sha256Hex,
     createBatchKey,
   } = globalThis.BossLocalWebIntakeIdentity;
@@ -157,11 +158,14 @@
     const stored = settingsOverride || await storageArea.get({
       apiBase: "http://127.0.0.1:17863",
       apiToken: "",
+      connectionMode: "",
     });
     const apiBase = normalizeApiBase(stored?.apiBase || "");
-    const webApiBase = deriveWebApiBase(apiBase);
+    const mode = resolveConnectionMode(stored || {});
+    const webApiBase = deriveWebApiBase({ connectionMode: mode, apiBase });
     const token = String(stored?.apiToken || "");
     return {
+      mode,
       apiBase,
       webApiBase,
       tokenFingerprint: stableHash(token),
@@ -210,9 +214,7 @@
       };
     }
     const connection = {
-      mode: normalizeApiBase(safe.connection.modeApiBase || safe.connection.apiBase || "") === currentConnection.webApiBase
-        ? "web"
-        : "desktop",
+      mode: currentConnection.mode,
       apiBase: currentConnection.apiBase,
       webApiBase: currentConnection.webApiBase,
       tokenDigest: currentConnection.tokenDigest,
