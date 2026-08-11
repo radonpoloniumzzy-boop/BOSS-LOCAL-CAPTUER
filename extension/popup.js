@@ -222,9 +222,10 @@ async function applyPairingCodeAndTest() {
     const pairing = BossLocalPairing.parsePairingCode(pairingCodeInput.value);
     let verifiedSettings;
     if (pairing.pairingCode) {
+      const pairingApiBase = normalizeLocalApiBase(pairing.apiBase || "http://127.0.0.1:17864");
       let response;
       try {
-        response = await fetch("http://127.0.0.1:17864/api/plugin/pair", {
+        response = await fetch(`${pairingApiBase}/api/plugin/pair`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ pairing_code: pairing.pairingCode }),
@@ -238,7 +239,7 @@ async function applyPairingCodeAndTest() {
       }
       verifiedSettings = {
         ...collectSettings(),
-        apiBase: normalizeLocalApiBase(payload.api_base),
+        apiBase: pairingApiBase,
         apiToken: String(payload.api_token || ""),
       };
     } else {

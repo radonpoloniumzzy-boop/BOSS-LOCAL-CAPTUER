@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
@@ -211,8 +211,11 @@ def create_web_app(
         if runtime.config_service is None:
             raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。")
         pairing = runtime.pairing.create_code(ttl_seconds=300)
+        configured = bootstrap.store.load()
+        api_base = f"http://127.0.0.1:{configured.web_port if configured else 17864}"
         return {
             "pairing_code": pairing.code,
+            "pairing_uri": f"boss-local://web-pair?{urlencode({'apiBase': api_base, 'pairingCode': pairing.code})}",
             "expires_at": pairing.expires_at.isoformat(timespec="seconds"),
             "expires_in_seconds": 300,
         }

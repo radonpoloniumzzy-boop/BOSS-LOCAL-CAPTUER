@@ -96,6 +96,22 @@ class Phase2CWebApiTest(unittest.TestCase):
         self.assertEqual(health.status_code, 200)
         self.assertTrue(set(WEB_CAPABILITIES).issubset(set(health.json()["capabilities"])))
 
+    def test_pairing_code_serializes_configured_port_without_token(self) -> None:
+        configured = self.store.load()
+        self.store.save(BootstrapSettings(data_dir=configured.data_dir, web_port=19064))
+        response = self.client.post(
+            "/api/plugin-connection/pairing-code",
+            headers={"Origin": "http://127.0.0.1:19064", "Host": "127.0.0.1:19064"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(
+            payload["pairing_uri"],
+            "boss-local://web-pair?apiBase=http%3A%2F%2F127.0.0.1%3A19064&pairingCode="
+            + payload["pairing_code"],
+        )
+        self.assertNotIn("token", payload["pairing_uri"].lower())
+
     def test_tracked_production_frontend_opens_without_node_modules(self) -> None:
         self.assertTrue(_frontend_assets_ready(Path(__file__).resolve().parents[1]))
         root = self.client.get("/")
@@ -634,6 +650,30 @@ class WorkbenchLauncherBehaviorTest(unittest.TestCase):
         with self.assertRaises(LaunchFailure) as caught:
             launcher.launch()
         self.assertEqual(caught.exception.code, "service_start_failed")
+
+    def test_launcher_waits_for_child_that_already_exited(self) -> None:
+        waits: list[int] = []
+
+        class Process:
+            def poll(self):
+                return 2
+
+            def wait(self, timeout=None):
+                waits.append(timeout)
+                raise PermissionError("already reaped")
+
+        launcher = WorkbenchLauncher(
+            service_probe=lambda _url: None,
+            status_probe=lambda _url: None,
+            port_in_use=lambda _port: False,
+            process_start=Process,
+            browser_open=lambda _url: None,
+            wait=lambda _seconds: None,
+        )
+        with self.assertRaises(LaunchFailure) as caught:
+            launcher.launch()
+        self.assertEqual(caught.exception.code, "service_start_failed")
+        self.assertEqual(waits, [0])
 
     def test_database_lock_stops_at_recovery_message(self) -> None:
         health_calls = 0

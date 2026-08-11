@@ -36,7 +36,11 @@ describe("workbench candidate intake views", () => {
         });
       }
       if (url.endsWith("/api/plugin-connection/pairing-code") && init?.method === "POST") {
-        return response({ pairing_code: "ABC123-DEF456", expires_at: "2026-08-11T12:05:00" });
+        return response({
+          pairing_code: "ABC123-DEF456",
+          pairing_uri: "boss-local://web-pair?apiBase=http%3A%2F%2F127.0.0.1%3A19064&pairingCode=ABC123-DEF456",
+          expires_at: "2026-08-11T12:05:00",
+        });
       }
       throw new Error(`unexpected request: ${url}`);
     });
@@ -51,7 +55,10 @@ describe("workbench candidate intake views", () => {
     expect(await screen.findByText("ABC123-DEF456")).toBeInTheDocument();
     expect(document.body.textContent).not.toContain("api_token");
     await user.click(screen.getByRole("button", { name: "复制连接码" }));
-    expect(writeText).toHaveBeenCalledWith("ABC123-DEF456");
+    expect(writeText).toHaveBeenCalledWith(
+      "boss-local://web-pair?apiBase=http%3A%2F%2F127.0.0.1%3A19064&pairingCode=ABC123-DEF456",
+    );
+    expect(writeText.mock.calls.flat().join("|")).not.toContain("apiToken");
   });
 
   it("refreshes newest batches on focus, announces the new batch, and exposes snapshot export", async () => {

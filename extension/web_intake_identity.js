@@ -1,5 +1,6 @@
 (function (globalThis) {
   const WEB_INTAKE_PORT = 17864;
+  const DESKTOP_COMPAT_PORT = 17863;
 
   function trimTrailingSlash(value) {
     return String(value || "").replace(/\/+$/, "");
@@ -34,7 +35,14 @@
   }
 
   function isWebWorkbenchMode(settings) {
-    return getApiPort(settings?.apiBase) === WEB_INTAKE_PORT;
+    try {
+      const url = new URL(normalizeApiBase(settings?.apiBase));
+      return url.protocol === "http:"
+        && url.hostname === "127.0.0.1"
+        && getApiPort(url.toString()) !== DESKTOP_COMPAT_PORT;
+    } catch (_error) {
+      return false;
+    }
   }
 
   function deriveWebApiBase(apiBase) {

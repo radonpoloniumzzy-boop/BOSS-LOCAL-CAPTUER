@@ -412,18 +412,8 @@ function createPopupTestContext(options = {}) {
       },
       async downloadBatchMarkdown(options) {
         store.lastMarkdownExport = { apiBase: options.apiBase, batchId: options.batchId };
+        store.lastMarkdownExportUrl = `${options.apiBase}/api/capture-batches/${options.batchId}/export.md`;
         return { batchId: options.batchId, filename: `boss-batch-${options.batchId}.md` };
-      },
-    },
-    BossLocalPairing: {
-      parsePairingCode(value) {
-        if (/^[A-F0-9]{6}-[A-F0-9]{6}$/i.test(String(value || "").trim())) {
-          return { pairingCode: String(value).trim().toUpperCase() };
-        }
-        if (String(value || "").includes("pair-token")) {
-          return { apiBase: "http://127.0.0.1:17863", apiToken: "pair-token_123" };
-        }
-        throw new Error("连接码格式无效，请从桌面端设置页重新复制。");
       },
     },
     globalThis: {},
@@ -433,6 +423,7 @@ function createPopupTestContext(options = {}) {
   context.globalThis = context;
 
   for (const script of [
+    "pairing.js",
     "web_intake_identity.js",
     "web_intake_storage.js",
     "web_intake_ui.js",
@@ -941,8 +932,24 @@ function testPairingCodeParsesAndRejectsInvalidInput() {
   );
   assert.deepStrictEqual(
     { ...context.BossLocalPairing.parsePairingCode("A1B2C3-D4E5F6") },
-    { pairingCode: "A1B2C3-D4E5F6" },
+    { pairingCode: "A1B2C3-D4E5F6", apiBase: "http://127.0.0.1:17864" },
   );
+  assert.deepStrictEqual(
+    { ...context.BossLocalPairing.parsePairingCode(
+      "boss-local://web-pair?apiBase=http%3A%2F%2F127.0.0.1%3A19064&pairingCode=ABC123-DEF456",
+    ) },
+    { pairingCode: "ABC123-DEF456", apiBase: "http://127.0.0.1:19064" },
+  );
+  for (const invalid of [
+    "boss-local://web-pair?apiBase=https%3A%2F%2F127.0.0.1%3A19064&pairingCode=ABC123-DEF456",
+    "boss-local://web-pair?apiBase=http%3A%2F%2Flocalhost%3A19064&pairingCode=ABC123-DEF456",
+    "boss-local://web-pair?apiBase=http%3A%2F%2Fexample.com%3A19064&pairingCode=ABC123-DEF456",
+    "boss-local://web-pair?apiBase=http%3A%2F%2Fuser%3Apass%40127.0.0.1%3A19064&pairingCode=ABC123-DEF456",
+    "boss-local://web-pair?apiBase=http%3A%2F%2F127.0.0.1%3A99999&pairingCode=ABC123-DEF456",
+    "boss-local://web-pair?apiBase=http%3A%2F%2F127.0.0.1%3A19064&pairingCode=ABC123-DEF456&apiToken=stolen",
+  ]) {
+    assert.throws(() => context.BossLocalPairing.parsePairingCode(invalid));
+  }
   assert.throws(
     () => context.BossLocalPairing.parsePairingCode("http://127.0.0.1:17863"),
     /连接码格式无效/,
@@ -988,10 +995,73 @@ async function testPopupPairsWithSingleWebCodeAndRemembersConnection() {
   });
   popup.elements.pairingCode.value = "A1B2C3-D4E5F6";
   await popup.api.applyPairingCodeAndTest();
+  assert.strictEqual(popup.fetchCalls[0].url, "http://127.0.0.1:17864/api/plugin/pair");
   assert.strictEqual(popup.store.apiBase, "http://127.0.0.1:17864");
   assert.strictEqual(popup.store.apiToken, "remembered-web-token");
   assert(popup.elements.status.textContent.includes("已连接网页工作台"));
   assert(!popup.elements.status.textContent.includes("remembered-web-token"));
+}
+
+async function testPopupPairsAndUsesConfiguredWebPortEndToEnd() {
+  const popup = createPopupTestContext({
+    runtimeHandler: createPopupWebRuntimeHandler(),
+    fetchImpl: async (url, options = {}) => {
+      const endpoint = String(url);
+      if (endpoint === "http://127.0.0.1:19064/api/plugin/pair") {
+        assert.strictEqual(JSON.parse(options.body).pairing_code, "ABC123-DEF456");
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return { api_base: "http://127.0.0.1:19064", api_token: "configured-port-token" };
+          },
+        };
+      }
+      if (endpoint === "http://127.0.0.1:19064/api/plugin/connection/check") {
+        assert.strictEqual(options.headers["X-Boss-Local-Token"], "configured-port-token");
+        return { ok: true, status: 200, async json() { return { ok: true }; } };
+      }
+      if (endpoint === "http://127.0.0.1:19064/api/intake/candidates") {
+        assert.strictEqual(options.headers["X-Boss-Local-Token"], "configured-port-token");
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return {
+              batch_id: 19064,
+              status: "completed",
+              received_count: 1,
+              inserted_candidates: 1,
+              updated_candidates: 0,
+              skipped_candidates: 0,
+              failed_candidates: 0,
+            };
+          },
+        };
+      }
+      throw new Error(`Unexpected fetch: ${endpoint}`);
+    },
+  });
+  assert.strictEqual(popup.elements.apiBase.value, "http://127.0.0.1:17863");
+  popup.elements.pairingCode.value =
+    "boss-local://web-pair?apiBase=http%3A%2F%2F127.0.0.1%3A19064&pairingCode=ABC123-DEF456";
+
+  await popup.api.applyPairingCodeAndTest();
+  assert.strictEqual(popup.store.apiBase, "http://127.0.0.1:19064", popup.elements.status.textContent);
+  assert.strictEqual(popup.store.apiToken, "configured-port-token");
+  await popup.api.runCollection(false);
+  await popup.api.downloadCurrentBatch();
+
+  assert.deepStrictEqual(popup.store.lastMarkdownExport, {
+    apiBase: "http://127.0.0.1:19064",
+    batchId: 19064,
+  });
+  assert.strictEqual(
+    popup.store.lastMarkdownExportUrl,
+    "http://127.0.0.1:19064/api/capture-batches/19064/export.md",
+  );
+  assert(popup.fetchCalls.some((call) => call.url === "http://127.0.0.1:19064/api/plugin/connection/check"));
+  assert(popup.fetchCalls.some((call) => call.url === "http://127.0.0.1:19064/api/intake/candidates"));
 }
 
 function testCollectionCarriesCanonicalJobProfileId() {
@@ -2747,6 +2817,7 @@ async function main() {
   testPairingCodeParsesAndRejectsInvalidInput();
   testPopupSupportsPairingAndAuthenticatedConnectionCheck();
   await testPopupPairsWithSingleWebCodeAndRemembersConnection();
+  await testPopupPairsAndUsesConfiguredWebPortEndToEnd();
   testCollectionCarriesCanonicalJobProfileId();
   await testPopupPairingSuccessDoesNotReferenceCollectionVariables();
   await testPopupWebModeCollectCurrentPostsDirectlyToWebIntake();

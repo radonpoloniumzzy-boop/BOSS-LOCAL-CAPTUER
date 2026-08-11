@@ -133,6 +133,13 @@ class WorkbenchLauncher:
         except (OSError, subprocess.SubprocessError):
             pass
 
+    @staticmethod
+    def _reap_exited_process(process: object) -> None:
+        try:
+            getattr(process, "wait", lambda timeout=None: None)(timeout=0)
+        except (OSError, subprocess.SubprocessError):
+            pass
+
     def launch(self) -> str:
         self.progress("正在检查运行环境")
         if not self.frontend_ready():
@@ -160,6 +167,7 @@ class WorkbenchLauncher:
         self.progress("正在等待网页工作台")
         for _ in range(self.attempts):
             if getattr(process, "poll", lambda: None)() is not None:
+                self._reap_exited_process(process)
                 raise LaunchFailure("service_start_failed")
             service_kind = self._service_kind(self.service_probe(f"{self.url}api/health"))
             if service_kind == "stale":
