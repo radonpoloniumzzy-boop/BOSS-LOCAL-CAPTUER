@@ -457,7 +457,7 @@ function createPopupWebRuntimeHandler() {
           settings: message.settings || {},
           storageArea: context.chrome.storage.local,
         });
-        return { ok: true, record: result.record, view: result.view };
+        return { ok: true, record: result.record, legacyBlocked: result.legacyBlocked, view: result.view };
       }
       case "web_intake_enqueue_and_send": {
         const queued = await context.BossLocalWebIntake.queueCapturedBatch({
@@ -2320,6 +2320,280 @@ async function testLegacyV2MismatchShowsPopupBlockedStatusAndPreservesPayload() 
   assert.strictEqual(state.pendingOrder.length, 1);
 }
 
+async function testLegacyWarningRemainsVisibleAlongsideCurrentCompleted() {
+  const sharedStore = {
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "current-token",
+  };
+  const popup = createPopupTestContext({
+    store: sharedStore,
+    runtimeHandler: createPopupWebRuntimeHandler(),
+  });
+  const settings = {
+    apiBase: sharedStore.apiBase,
+    apiToken: sharedStore.apiToken,
+    jobTitle: "Legacy Popup",
+  };
+  const stableHash = popup.context.BossLocalWebIntake.stableHash;
+  const currentIdentity = await popup.context.BossLocalWebIntake.connectionIdentity(settings);
+  await popup.context.BossLocalWebIntake.upsertPendingRecord(
+    {
+      batchKey: "current-completed",
+      idempotencyKey: "current-completed-idem",
+      connection: currentIdentity,
+      payload: {
+        source_platform: "boss",
+        source_url: "https://www.zhipin.com/web/geek/recommend",
+        source_job_title: "Current Completed",
+        idempotency_key: "current-completed-idem",
+        candidates: [{ raw_card_text: "Current Completed Card" }],
+      },
+      webResult: {
+        batch_id: 910,
+        status: "completed",
+        received_count: 1,
+        inserted_candidates: 1,
+        updated_candidates: 0,
+        skipped_candidates: 0,
+        failed_candidates: 0,
+      },
+      status: "completed",
+      statusLabel: "入库成功",
+      message: "网页工作台已接收批次 #910",
+      updatedAt: new Date().toISOString(),
+    },
+    popup.chrome.storage.local,
+  );
+  await popup.context.BossLocalWebIntake.moveToCompleted(
+    await popup.context.BossLocalWebIntake.readPendingRecord("current-completed", popup.chrome.storage.local),
+    popup.chrome.storage.local,
+  );
+  sharedStore[popup.context.BossLocalWebIntake.LEGACY_STATE_KEY] = {
+    pendingBatches: {
+      "legacy-pending": {
+        batchKey: "legacy-pending",
+        idempotencyKey: "legacy-popup-1",
+        payload: {
+          source_platform: "boss",
+          source_url: "https://www.zhipin.com/web/geek/recommend",
+          source_job_title: "Legacy Popup",
+          idempotency_key: "legacy-popup-1",
+          candidates: [{ name: "Popup Name", raw_card_text: "Popup Raw Card", detail_url: "https://www.zhipin.com/candidate/popup" }],
+        },
+        connection: {
+          modeApiBase: "http://127.0.0.1:17864",
+          webApiBase: "http://127.0.0.1:17864",
+          tokenFingerprint: stableHash("original-token"),
+          key: stableHash("http://127.0.0.1:17864|http://127.0.0.1:17864|original-token"),
+        },
+      },
+    },
+    completedBatches: {},
+  };
+
+  await popup.api.refreshWebIntakeStatus(settings);
+  assert(popup.elements.webIntakeStatus.textContent.includes("存在属于旧连接的待发送批次，请切回原连接完成迁移。"));
+  assert(popup.elements.webIntakeStatus.textContent.includes("910"));
+  assert.strictEqual(popup.elements.retryWebIntake.disabled, true);
+
+  const status = await popup.context.BossLocalWebIntake.getStatusView({
+    settings,
+    storageArea: popup.chrome.storage.local,
+  });
+  assert.strictEqual(status.record.status, "completed");
+  assert(status.legacyBlocked);
+  const safeSerialized = JSON.stringify(status);
+  assert(!safeSerialized.includes("Popup Name"));
+  assert(!safeSerialized.includes("Popup Raw Card"));
+  assert(!safeSerialized.includes("candidate/popup"));
+  assert(!safeSerialized.includes("\"payload\""));
+}
+
+async function testLegacyWarningRemainsVisibleAlongsideCurrentWaitingRetry() {
+  const sharedStore = {
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "current-retry-token",
+  };
+  let fetchCount = 0;
+  const popup = createPopupTestContext({
+    store: sharedStore,
+    fetchImpl: async () => {
+      fetchCount += 1;
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {
+            batch_id: 911,
+            status: "completed",
+            received_count: 1,
+            inserted_candidates: 1,
+            updated_candidates: 0,
+            skipped_candidates: 0,
+            failed_candidates: 0,
+          };
+        },
+      };
+    },
+    runtimeHandler: createPopupWebRuntimeHandler(),
+  });
+  const settings = {
+    apiBase: sharedStore.apiBase,
+    apiToken: sharedStore.apiToken,
+    jobTitle: "Legacy Popup Retry",
+  };
+  const stableHash = popup.context.BossLocalWebIntake.stableHash;
+  const currentIdentity = await popup.context.BossLocalWebIntake.connectionIdentity(settings);
+  await popup.context.BossLocalWebIntake.upsertPendingRecord(
+    {
+      batchKey: "current-waiting",
+      idempotencyKey: "current-waiting-idem",
+      connection: currentIdentity,
+      payload: {
+        source_platform: "boss",
+        source_url: "https://www.zhipin.com/web/geek/recommend",
+        source_job_title: "Current Waiting Retry",
+        idempotency_key: "current-waiting-idem",
+        candidates: [{ raw_card_text: "Current Waiting Card" }],
+      },
+      webResult: {
+        batch_id: 0,
+        status: "failed",
+        received_count: 1,
+        inserted_candidates: 0,
+        updated_candidates: 0,
+        skipped_candidates: 0,
+        failed_candidates: 1,
+      },
+      status: "waiting_retry",
+      statusLabel: "等待重试",
+      message: "等待重试",
+      attemptCount: 1,
+      updatedAt: new Date().toISOString(),
+    },
+    popup.chrome.storage.local,
+  );
+  sharedStore[popup.context.BossLocalWebIntake.LEGACY_STATE_KEY] = {
+    pendingBatches: {
+      "legacy-pending": {
+        batchKey: "legacy-pending",
+        idempotencyKey: "legacy-popup-2",
+        payload: {
+          source_platform: "boss",
+          source_url: "https://www.zhipin.com/web/geek/recommend",
+          source_job_title: "Legacy Popup Retry",
+          idempotency_key: "legacy-popup-2",
+          candidates: [{ name: "Legacy Name", raw_card_text: "Legacy Raw Card", detail_url: "https://www.zhipin.com/candidate/legacy" }],
+        },
+        connection: {
+          modeApiBase: "http://127.0.0.1:17864",
+          webApiBase: "http://127.0.0.1:17864",
+          tokenFingerprint: stableHash("other-token"),
+          key: stableHash("http://127.0.0.1:17864|http://127.0.0.1:17864|other-token"),
+        },
+      },
+    },
+    completedBatches: {},
+  };
+  const legacyBeforePayload = JSON.stringify(
+    sharedStore[popup.context.BossLocalWebIntake.LEGACY_STATE_KEY].pendingBatches["legacy-pending"].payload,
+  );
+
+  await popup.api.refreshWebIntakeStatus(settings);
+  assert(popup.elements.webIntakeStatus.textContent.includes("存在属于旧连接的待发送批次，请切回原连接完成迁移。"));
+  assert.strictEqual(popup.elements.retryWebIntake.disabled, false);
+
+  await popup.api.retryWebIntake();
+  assert.strictEqual(fetchCount, 1);
+  assert.strictEqual(
+    JSON.stringify(sharedStore[popup.context.BossLocalWebIntake.LEGACY_STATE_KEY].pendingBatches["legacy-pending"].payload),
+    legacyBeforePayload,
+  );
+  const state = await popup.context.BossLocalWebIntake.loadState(popup.chrome.storage.local, settings);
+  assert.strictEqual(state.completedOrder.length, 1);
+  const completed = state.completedBatches[state.completedOrder[0]];
+  assert.strictEqual(completed.batchKey, "current-waiting");
+  const safeSerialized = JSON.stringify(
+    await popup.context.BossLocalWebIntake.getStatusView({
+      settings,
+      storageArea: popup.chrome.storage.local,
+    }),
+  );
+  assert(!safeSerialized.includes("Legacy Name"));
+  assert(!safeSerialized.includes("Legacy Raw Card"));
+  assert(!safeSerialized.includes("candidate/legacy"));
+}
+
+async function testLegacyWarningDisappearsAfterSwitchingBackAndMigrating() {
+  const sharedStore = {
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "other-token",
+  };
+  const popup = createPopupTestContext({
+    store: sharedStore,
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      async json() {
+        return {
+          batch_id: 912,
+          status: "completed",
+          received_count: 1,
+          inserted_candidates: 1,
+          updated_candidates: 0,
+          skipped_candidates: 0,
+          failed_candidates: 0,
+        };
+      },
+    }),
+    runtimeHandler: createPopupWebRuntimeHandler(),
+  });
+  const stableHash = popup.context.BossLocalWebIntake.stableHash;
+  sharedStore[popup.context.BossLocalWebIntake.LEGACY_STATE_KEY] = {
+    pendingBatches: {
+      "legacy-pending": {
+        batchKey: "legacy-pending",
+        idempotencyKey: "legacy-popup-3",
+        payload: {
+          source_platform: "boss",
+          source_url: "https://www.zhipin.com/web/geek/recommend",
+          source_job_title: "Legacy Popup Switch",
+          idempotency_key: "legacy-popup-3",
+          candidates: [{ name: "Switch Name", raw_card_text: "Switch Raw Card", detail_url: "https://www.zhipin.com/candidate/switch" }],
+        },
+        connection: {
+          modeApiBase: "http://127.0.0.1:17864",
+          webApiBase: "http://127.0.0.1:17864",
+          tokenFingerprint: stableHash("original-token"),
+          key: stableHash("http://127.0.0.1:17864|http://127.0.0.1:17864|original-token"),
+        },
+      },
+    },
+    completedBatches: {},
+  };
+
+  await popup.api.refreshWebIntakeStatus({ apiBase: sharedStore.apiBase, apiToken: sharedStore.apiToken, jobTitle: "Legacy Popup Switch" });
+  assert(popup.elements.webIntakeStatus.textContent.includes("存在属于旧连接的待发送批次，请切回原连接完成迁移。"));
+
+  sharedStore.apiToken = "original-token";
+  const originalSettings = {
+    apiBase: sharedStore.apiBase,
+    apiToken: sharedStore.apiToken,
+    jobTitle: "Legacy Popup Switch",
+  };
+  await popup.api.refreshWebIntakeStatus(originalSettings);
+  await popup.api.retryWebIntake();
+  await popup.api.refreshWebIntakeStatus(originalSettings);
+
+  assert(!popup.elements.webIntakeStatus.textContent.includes("存在属于旧连接的待发送批次，请切回原连接完成迁移。"));
+  const status = await popup.context.BossLocalWebIntake.getStatusView({
+    settings: originalSettings,
+    storageArea: popup.chrome.storage.local,
+  });
+  assert.strictEqual(status.legacyBlocked, null);
+  assert.strictEqual(sharedStore[popup.context.BossLocalWebIntake.LEGACY_STATE_KEY], undefined);
+}
+
 async function main() {
   await testDownloadEndpointValidation();
   await testStopGuardIgnoresStaleProgress();
@@ -2361,7 +2635,9 @@ async function main() {
   await testLegacyV2CompletedMigrationSanitizesSensitiveData();
   await testLegacyV2MigrationMatchesCurrentConnectionAndCanSend();
   await testLegacyV2MigrationKeepsMismatchedPendingUntilOriginalConnectionReturns();
-  await testLegacyV2MismatchShowsPopupBlockedStatusAndPreservesPayload();
+  await testLegacyWarningRemainsVisibleAlongsideCurrentCompleted();
+  await testLegacyWarningRemainsVisibleAlongsideCurrentWaitingRetry();
+  await testLegacyWarningDisappearsAfterSwitchingBackAndMigrating();
   await testPendingLimitConcurrentEnqueueStaysWithinTen();
   await testWebIntakeSuccessSanitizesCompletedPayload();
   await testCompletedTransitionScrubsSensitivePendingBeforeDelete();

@@ -421,7 +421,16 @@
     if (completed) {
       return completed;
     }
-    return readLegacyBlockedRecord(storageArea, settings);
+    return null;
+  }
+
+  async function getStatusRecordsForConnection(settings, storageArea) {
+    const record = await currentRecordForConnection(settings, storageArea);
+    const legacyBlocked = await readLegacyBlockedRecord(storageArea, settings);
+    return {
+      record,
+      legacyBlocked,
+    };
   }
 
   globalThis.BossLocalWebIntakeStorage = {
@@ -441,6 +450,7 @@
     readPendingRecord,
     readCompletedRecord,
     currentRecordForConnection,
+    getStatusRecordsForConnection,
     migrateLegacyState,
     createScrubbedPendingTransition,
     readLegacyBlockedRecord,

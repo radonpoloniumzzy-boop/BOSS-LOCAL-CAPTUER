@@ -1116,6 +1116,7 @@ async function getWebIntakeStatus(settings) {
   return {
     ok: true,
     record: result.record,
+    legacyBlocked: result.legacyBlocked,
     view: result.view,
   };
 }

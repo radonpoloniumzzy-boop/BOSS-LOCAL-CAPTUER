@@ -8,6 +8,7 @@
     readPendingRecord,
     readCompletedRecord,
     currentRecordForConnection,
+    getStatusRecordsForConnection,
     createScrubbedPendingTransition,
     WebIntakeStorageError,
   } = globalThis.BossLocalWebIntakeStorage;
@@ -457,9 +458,9 @@
   }
 
   async function getStatusView({ settings, storageArea }) {
-    const record = await currentRecordForConnection(settings, storageArea);
-    const view = await formatStatus(record, settings);
-    return { record, view };
+    const { record, legacyBlocked } = await getStatusRecordsForConnection(settings, storageArea);
+    const view = await formatStatus(record, settings, legacyBlocked);
+    return { record, legacyBlocked, view };
   }
 
   globalThis.BossLocalWebIntakeSender = {
