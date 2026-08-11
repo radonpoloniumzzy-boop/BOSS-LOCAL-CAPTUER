@@ -262,8 +262,16 @@ class LocalApiServer:
                     content_length = int(self.headers.get("Content-Length", "0"))
                 except ValueError:
                     return
-                if 0 < content_length <= parent.max_body_bytes:
+                if not 0 < content_length <= min(parent.max_body_bytes, 64_000):
+                    return
+                previous_timeout = self.connection.gettimeout()
+                try:
+                    self.connection.settimeout(0.25)
                     self.rfile.read(content_length)
+                except OSError:
+                    pass
+                finally:
+                    self.connection.settimeout(previous_timeout)
 
         self._server = ThreadingHTTPServer((self.host, self.port), Handler)
         self.port = int(self._server.server_address[1])

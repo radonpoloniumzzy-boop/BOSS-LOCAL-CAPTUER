@@ -86,6 +86,13 @@ class WorkbenchLauncher:
     def launch(self) -> str:
         self.progress("正在检查运行环境")
         if self._is_workbench_service(self.service_probe(f"{self.url}api/health")):
+            status = self.status_probe(f"{self.url}api/app/status")
+            if status is None:
+                raise LaunchFailure("service_start_failed")
+            fault = status.get("error") if isinstance(status, dict) else None
+            code = str(fault.get("code") or "") if isinstance(fault, dict) else ""
+            if code and code != "database_not_ready":
+                raise LaunchFailure(code)
             self.progress("网页工作台已经运行，正在打开浏览器")
             self.browser_open(self.url)
             return "already_running"

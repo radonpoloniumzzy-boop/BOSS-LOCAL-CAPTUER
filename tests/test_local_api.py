@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import http.client
 import json
+import socket
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -336,6 +338,23 @@ class LocalApiServerTest(unittest.TestCase):
         self.assertEqual(response.status, 401)
         self.assertFalse(payload["ok"])
         self.assertEqual(len(self.repository.list_candidates()), 0)
+
+    def test_missing_token_does_not_wait_forever_for_a_slow_request_body(self) -> None:
+        connection = socket.create_connection(("127.0.0.1", self.server.port), timeout=2)
+        try:
+            connection.sendall(
+                b"POST /api/import/cards HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Content-Type: application/json\r\n"
+                b"Content-Length: 100\r\n\r\n"
+            )
+            started = time.monotonic()
+            response = connection.recv(4096)
+            elapsed = time.monotonic() - started
+        finally:
+            connection.close()
+        self.assertIn(b"401", response)
+        self.assertLess(elapsed, 1.0)
 
     def test_import_error_reports_request_task_id(self) -> None:
         errors: list[dict[str, object]] = []

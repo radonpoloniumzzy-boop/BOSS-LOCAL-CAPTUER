@@ -266,6 +266,24 @@ class WorkbenchLauncherBehaviorTest(unittest.TestCase):
         self.assertEqual(started, [])
         self.assertEqual(opened, ["http://127.0.0.1:17864/"])
 
+    def test_running_service_with_database_fault_is_not_opened(self) -> None:
+        opened: list[str] = []
+        launcher = WorkbenchLauncher(
+            service_probe=lambda _url: {
+                "status": "ok",
+                "service": "recruiting-talent-workbench",
+            },
+            status_probe=lambda _url: {"error": {"code": "database_corrupt"}},
+            port_in_use=lambda _port: True,
+            process_start=lambda: None,
+            browser_open=opened.append,
+            wait=lambda _seconds: None,
+        )
+        with self.assertRaises(LaunchFailure) as caught:
+            launcher.launch()
+        self.assertEqual(caught.exception.code, "database_corrupt")
+        self.assertEqual(opened, [])
+
     def test_stopped_service_is_started_checked_and_opened(self) -> None:
         health_calls = 0
         opened: list[str] = []
