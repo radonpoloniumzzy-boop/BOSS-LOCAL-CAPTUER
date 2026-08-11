@@ -19,6 +19,7 @@ from web.backend.workbench_launcher import (
     STEP_LABELS,
     STEP_OPEN_BROWSER,
     STEP_READ_CONFIG,
+    StartupCancellationGate,
     create_default_launcher,
 )
 
@@ -76,7 +77,7 @@ class LaunchWindow:
         self.logger = LauncherLog(project_root)
         self.running = False
         self.failure: LaunchFailure | None = None
-        self.cancel_event = threading.Event()
+        self.gate = StartupCancellationGate()
         self.message = tk.StringVar(value="正在准备启动检查…")
         self.hint = tk.StringVar(value="网页端与桌面端不能同时使用同一人才库。")
         self.step_status: dict[str, tk.StringVar] = {
@@ -182,7 +183,7 @@ class LaunchWindow:
             return
         self.running = True
         self.failure = None
-        self.cancel_event.clear()
+        self.gate = StartupCancellationGate()
         self.retry_button.configure(state="disabled")
         self.help_button.configure(state="disabled")
         self.close_button.configure(text="取消启动")
@@ -202,7 +203,7 @@ class LaunchWindow:
                 launcher = self.launcher_factory(
                     self.project_root,
                     self.progress,
-                    cancel_requested=self.cancel_event.is_set,
+                    gate=self.gate,
                 )
                 launcher.launch()
                 self.events.put(("done", None))
@@ -222,14 +223,18 @@ class LaunchWindow:
         self.root.destroy()
 
     def cancel_startup(self) -> None:
-        if not self.running or self.cancel_event.is_set():
+        if not self.running:
+            return
+        if not self.gate.request_cancel():
+            if self.gate.current_state()["browser_open_committed"]:
+                self.message.set("正在打开浏览器，请稍候。")
+                self.hint.set("浏览器打开阶段已经开始，当前不能再取消本轮启动。")
+                self.append_detail("浏览器打开阶段已提交，本轮启动不再接受取消。")
             return
         if self.current_step == STEP_OPEN_BROWSER and self.current_state == "running":
             self.message.set("正在提交打开浏览器，请稍候。")
             self.hint.set("浏览器打开阶段已经开始，当前不能再取消本轮启动。")
             self.append_detail("浏览器打开阶段已提交，本轮启动不再接受取消。")
-            return
-        self.cancel_event.set()
         self.message.set("正在取消启动检查…")
         self.hint.set("如果本轮已经启动了本地服务，会在退出前回收本轮进程。")
         self.close_button.configure(state="disabled")

@@ -28,6 +28,7 @@ from web.backend.workbench_launcher import (
     STEP_CONNECT_DATABASE,
     STEP_OPEN_BROWSER,
     STEP_READ_CONFIG,
+    StartupCancellationGate,
     WorkbenchLauncher,
     _frontend_assets_ready,
     _request_json,
@@ -380,6 +381,83 @@ class Phase2CWebApiTest(unittest.TestCase):
 
 
 class WorkbenchLauncherBehaviorTest(unittest.TestCase):
+    class FakeStringVar:
+        def __init__(self, value: str = "") -> None:
+            self.value = value
+
+        def set(self, value: str) -> None:
+            self.value = value
+
+        def get(self) -> str:
+            return self.value
+
+    class FakeWidget:
+        def __init__(self, master=None, **kwargs) -> None:
+            self.master = master
+            self.options = dict(kwargs)
+            self.textvariable = kwargs.get("textvariable")
+            self.command = kwargs.get("command")
+
+        def pack(self, *args, **kwargs) -> None:
+            return None
+
+        def configure(self, **kwargs) -> None:
+            self.options.update(kwargs)
+            if "command" in kwargs:
+                self.command = kwargs["command"]
+
+        def __getitem__(self, key: str):
+            return self.options[key]
+
+    class FakeText(FakeWidget):
+        def __init__(self, master=None, **kwargs) -> None:
+            super().__init__(master, **kwargs)
+            self.value = ""
+
+        def insert(self, _index: str, text: str) -> None:
+            self.value += text
+
+        def delete(self, _start: str, _end: str) -> None:
+            self.value = ""
+
+        def see(self, _index: str) -> None:
+            return None
+
+    class FakeRoot:
+        def __init__(self) -> None:
+            self.queue: list[callable] = []
+            self.destroyed = False
+
+        def title(self, _value: str) -> None:
+            return None
+
+        def geometry(self, _value: str) -> None:
+            return None
+
+        def resizable(self, _x: bool, _y: bool) -> None:
+            return None
+
+        def configure(self, **_kwargs) -> None:
+            return None
+
+        def protocol(self, _name: str, _callback) -> None:
+            return None
+
+        def after(self, _ms: int, callback) -> None:
+            self.queue.append(callback)
+
+        def update(self) -> None:
+            callbacks = list(self.queue)
+            self.queue.clear()
+            for callback in callbacks:
+                callback()
+
+        def destroy(self) -> None:
+            self.destroyed = True
+
+        def withdraw(self) -> None:
+            return None
+
     @staticmethod
     def current_health() -> dict[str, object]:
         return {
@@ -387,6 +465,20 @@ class WorkbenchLauncherBehaviorTest(unittest.TestCase):
             "service": "recruiting-talent-workbench",
             "capabilities": WEB_CAPABILITIES,
         }
+
+    def build_fake_launch_window(self, launcher_factory):
+        root = self.FakeRoot()
+        patches = [
+            patch("launch_web_workbench.tk.Frame", self.FakeWidget),
+            patch("launch_web_workbench.tk.Label", self.FakeWidget),
+            patch("launch_web_workbench.tk.Text", self.FakeText),
+            patch("launch_web_workbench.tk.Button", self.FakeWidget),
+            patch("launch_web_workbench.tk.StringVar", self.FakeStringVar),
+        ]
+        for current in patches:
+            current.start()
+        self.addCleanup(lambda: [current.stop() for current in reversed(patches)])
+        return LaunchWindow(Path.cwd(), launcher_factory=launcher_factory, root=root), root
 
     def test_http_503_database_fault_body_remains_available_to_launcher(self) -> None:
         class FaultHandler(BaseHTTPRequestHandler):
@@ -869,11 +961,15 @@ class WorkbenchLauncherBehaviorTest(unittest.TestCase):
                 self.assertNotIn("已连接人才库", "".join(details))
                 self.assertNotIn("本地服务已连接人才库", "".join(details))
                 self.assertIn("正在确认数据库状态", details)
+                final_states = {event["step"]: event["state"] for event in events}
+                self.assertEqual(final_states[STEP_CONNECT_DATABASE], "failed")
+                self.assertEqual(final_states[STEP_CONFIRM_DATABASE], "failed")
+                self.assertNotIn("running", final_states.values())
 
     def test_launcher_cancel_stops_only_started_process_and_skips_browser_open(self) -> None:
         events: list[str] = []
         wait_calls = 0
-        cancel_checks = 0
+        gate = StartupCancellationGate()
 
         class Process:
             def poll(self):
@@ -895,11 +991,6 @@ class WorkbenchLauncherBehaviorTest(unittest.TestCase):
         def health(_url):
             return None
 
-        def cancelled():
-            nonlocal cancel_checks
-            cancel_checks += 1
-            return cancel_checks >= 4
-
         launcher = WorkbenchLauncher(
             service_probe=health,
             status_probe=lambda _url: {"status": "ready", "database_ready": True},
@@ -907,8 +998,18 @@ class WorkbenchLauncherBehaviorTest(unittest.TestCase):
             process_start=Process,
             browser_open=lambda _url: events.append("open-browser"),
             wait=lambda _seconds: None,
-            cancel_requested=cancelled,
+            gate=gate,
         )
+
+        health_calls = {"count": 0}
+
+        def health_with_cancel(_url):
+            health_calls["count"] += 1
+            if health_calls["count"] == 2:
+                gate.request_cancel()
+            return None
+
+        launcher.service_probe = health_with_cancel
 
         with self.assertRaisesRegex(RuntimeError, "启动已取消"):
             launcher.launch()
@@ -916,21 +1017,31 @@ class WorkbenchLauncherBehaviorTest(unittest.TestCase):
         self.assertNotIn("open-browser", events)
 
     def test_browser_open_commit_wins_over_late_cancel(self) -> None:
-        cancel = threading.Event()
         opened: list[str] = []
+        gate = StartupCancellationGate()
+
+        class CommitOpen:
+            def __call__(self, url):
+                gate.request_cancel()
+                opened.append(url)
+                return True
+
         launcher = WorkbenchLauncher(
             service_probe=lambda _url: self.current_health(),
             status_probe=lambda _url: {"status": "ready", "database_ready": True},
             port_in_use=lambda _port: True,
             process_start=lambda: None,
-            browser_open=lambda url: opened.append(url) or True,
+            browser_open=CommitOpen(),
             wait=lambda _seconds: None,
-            cancel_requested=cancel.is_set,
+            gate=gate,
         )
-        launcher._on_browser_open_committed = cancel.set
 
         self.assertEqual(launcher.launch(), "already_running")
         self.assertEqual(opened, ["http://127.0.0.1:17864/"])
+        self.assertEqual(
+            gate.current_state(),
+            {"cancellable": False, "cancelled": False, "browser_open_committed": True},
+        )
 
     def test_create_default_launcher_can_cancel_during_config_read(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -939,7 +1050,9 @@ class WorkbenchLauncherBehaviorTest(unittest.TestCase):
             store.save(BootstrapSettings(data_dir=str(root / "data"), web_port=17864))
 
             with self.assertRaises(LaunchCancelled) as caught:
-                create_default_launcher(root, lambda _event: None, bootstrap_store=store, cancel_requested=lambda: True)
+                gate = StartupCancellationGate()
+                gate.request_cancel()
+                create_default_launcher(root, lambda _event: None, bootstrap_store=store, gate=gate)
 
         self.assertEqual(caught.exception.step, STEP_READ_CONFIG)
 
@@ -948,33 +1061,30 @@ class WorkbenchLauncherBehaviorTest(unittest.TestCase):
             root = Path(temp)
             store = BootstrapStore(root / "bootstrap.json")
             store.save(BootstrapSettings(data_dir=str(root / "data"), web_port=17864))
-            calls = {"count": 0}
+            gate = StartupCancellationGate()
 
-            def cancelled() -> bool:
-                calls["count"] += 1
-                return calls["count"] >= 4
+            def progress(event: dict[str, str]) -> None:
+                if event["step"] == STEP_CHECK_RUNTIME and event["state"] == "running":
+                    gate.request_cancel()
 
             with self.assertRaises(LaunchCancelled) as caught:
-                create_default_launcher(root, lambda _event: None, bootstrap_store=store, cancel_requested=cancelled)
+                create_default_launcher(root, progress, bootstrap_store=store, gate=gate)
 
         self.assertEqual(caught.exception.step, STEP_CHECK_RUNTIME)
 
     def test_launch_window_shows_cancelled_state_when_factory_respects_cancel(self) -> None:
-        root = tk.Tk()
-        root.withdraw()
-
-        def launcher_factory(_project_root, progress, cancel_requested):
+        def launcher_factory(_project_root, progress, gate):
             progress({"step": STEP_READ_CONFIG, "state": "running", "detail": "正在读取本机配置"})
 
             class FakeLauncher:
                 def launch(self_nonlocal):
-                    while not cancel_requested():
+                    while not gate.current_state()["cancelled"]:
                         threading.Event().wait(0.01)
                     raise LaunchCancelled(step=STEP_READ_CONFIG)
 
             return FakeLauncher()
 
-        window = LaunchWindow(Path.cwd(), launcher_factory=launcher_factory, root=root)
+        window, root = self.build_fake_launch_window(launcher_factory)
         try:
             window.start_check()
             root.update()
@@ -990,6 +1100,152 @@ class WorkbenchLauncherBehaviorTest(unittest.TestCase):
             self.assertEqual(window.close_button["text"], "关闭")
         finally:
             root.destroy()
+
+    def test_launch_window_does_not_claim_cancelled_after_browser_open_is_committed(self) -> None:
+        def launcher_factory(_project_root, progress, gate):
+            class FakeLauncher:
+                def launch(self_nonlocal):
+                    progress({"step": STEP_OPEN_BROWSER, "state": "running", "detail": "正在提交打开浏览器"})
+                    self.assertTrue(gate.commit_browser_open())
+                    threading.Event().wait(0.3)
+
+            return FakeLauncher()
+
+        window, root = self.build_fake_launch_window(launcher_factory)
+        try:
+            window.start_check()
+            for _ in range(20):
+                time.sleep(0.01)
+                root.update()
+                if window.current_step == STEP_OPEN_BROWSER:
+                    break
+            window.request_close()
+            for _ in range(5):
+                time.sleep(0.01)
+                root.update()
+            self.assertNotIn("已取消", window.message.get())
+            self.assertNotIn("正在取消", window.message.get())
+            self.assertEqual(window.close_button["text"], "请稍候")
+        finally:
+            root.destroy()
+
+    def test_startup_cancellation_gate_allows_exactly_one_winner_across_100_races(self) -> None:
+        for _ in range(100):
+            gate = StartupCancellationGate()
+            barrier = threading.Barrier(3)
+            results: list[tuple[str, bool]] = []
+
+            def request_cancel() -> None:
+                barrier.wait()
+                results.append(("cancel", gate.request_cancel()))
+
+            def commit_browser_open() -> None:
+                barrier.wait()
+                results.append(("commit", gate.commit_browser_open()))
+
+            threads = [
+                threading.Thread(target=request_cancel),
+                threading.Thread(target=commit_browser_open),
+            ]
+            for thread in threads:
+                thread.start()
+            barrier.wait()
+            for thread in threads:
+                thread.join()
+
+            self.assertEqual(sum(1 for _, won in results if won), 1)
+            self.assertIn(
+                gate.current_state(),
+                (
+                    {"cancellable": False, "cancelled": True, "browser_open_committed": False},
+                    {"cancellable": False, "cancelled": False, "browser_open_committed": True},
+                ),
+            )
+
+    def test_launcher_cancel_race_can_win_without_opening_browser(self) -> None:
+        opened: list[str] = []
+
+        class CancelFirstGate(StartupCancellationGate):
+            def __init__(self) -> None:
+                super().__init__()
+                self.barrier = threading.Barrier(2)
+
+            def request_cancel(self) -> bool:
+                self.barrier.wait()
+                return super().request_cancel()
+
+            def commit_browser_open(self) -> bool:
+                self.barrier.wait()
+                time.sleep(0.01)
+                return super().commit_browser_open()
+
+        gate = CancelFirstGate()
+        launcher = WorkbenchLauncher(
+            service_probe=lambda _url: self.current_health(),
+            status_probe=lambda _url: {"status": "ready", "database_ready": True},
+            port_in_use=lambda _port: True,
+            process_start=lambda: None,
+            browser_open=lambda url: opened.append(url) or True,
+            wait=lambda _seconds: None,
+            gate=gate,
+        )
+
+        outcome: list[str] = []
+
+        def run_launch() -> None:
+            try:
+                launcher.launch()
+            except LaunchCancelled:
+                outcome.append("cancelled")
+
+        thread = threading.Thread(target=run_launch)
+        thread.start()
+        gate.request_cancel()
+        thread.join()
+
+        self.assertEqual(outcome, ["cancelled"])
+        self.assertEqual(opened, [])
+
+    def test_launcher_commit_race_can_win_and_open_browser_once(self) -> None:
+        opened: list[str] = []
+
+        class CommitFirstGate(StartupCancellationGate):
+            def __init__(self) -> None:
+                super().__init__()
+                self.barrier = threading.Barrier(2)
+
+            def request_cancel(self) -> bool:
+                self.barrier.wait()
+                time.sleep(0.01)
+                return super().request_cancel()
+
+            def commit_browser_open(self) -> bool:
+                self.barrier.wait()
+                return super().commit_browser_open()
+
+        gate = CommitFirstGate()
+        launcher = WorkbenchLauncher(
+            service_probe=lambda _url: self.current_health(),
+            status_probe=lambda _url: {"status": "ready", "database_ready": True},
+            port_in_use=lambda _port: True,
+            process_start=lambda: None,
+            browser_open=lambda url: opened.append(url) or True,
+            wait=lambda _seconds: None,
+            gate=gate,
+        )
+
+        result: list[str] = []
+
+        def run_launch() -> None:
+            result.append(launcher.launch())
+
+        thread = threading.Thread(target=run_launch)
+        thread.start()
+        gate.request_cancel()
+        thread.join()
+
+        self.assertEqual(result, ["already_running"])
+        self.assertEqual(opened, ["http://127.0.0.1:17864/"])
 
     def test_cmd_launcher_is_saved_without_bom_crlf_and_question_mark_fallback(self) -> None:
         cmd = Path(__file__).resolve().parents[1] / "launch_web_workbench.cmd"

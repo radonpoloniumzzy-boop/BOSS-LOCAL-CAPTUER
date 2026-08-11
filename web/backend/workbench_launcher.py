@@ -3,6 +3,7 @@
 import json
 import socket
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -89,6 +90,38 @@ class LaunchCancelled(RuntimeError):
         super().__init__("启动已取消")
 
 
+class StartupCancellationGate:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._cancellable = True
+        self._cancelled = False
+        self._browser_open_committed = False
+
+    def request_cancel(self) -> bool:
+        with self._lock:
+            if not self._cancellable or self._cancelled or self._browser_open_committed:
+                return False
+            self._cancelled = True
+            self._cancellable = False
+            return True
+
+    def commit_browser_open(self) -> bool:
+        with self._lock:
+            if not self._cancellable or self._cancelled or self._browser_open_committed:
+                return False
+            self._browser_open_committed = True
+            self._cancellable = False
+            return True
+
+    def current_state(self) -> dict[str, bool]:
+        with self._lock:
+            return {
+                "cancellable": self._cancellable,
+                "cancelled": self._cancelled,
+                "browser_open_committed": self._browser_open_committed,
+            }
+
+
 def progress_event(step: str, state: str, detail: str | None = None) -> dict[str, str]:
     return {
         "step": step,
@@ -134,7 +167,7 @@ class WorkbenchLauncher:
         attempts: int = 50,
         port: int = 17864,
         frontend_ready: Callable[[], bool] | None = None,
-        cancel_requested: Callable[[], bool] | None = None,
+        gate: StartupCancellationGate | None = None,
     ) -> None:
         self.service_probe = service_probe
         self.status_probe = status_probe
@@ -147,10 +180,8 @@ class WorkbenchLauncher:
         self.port = int(port)
         self.url = f"http://127.0.0.1:{self.port}/"
         self.frontend_ready = frontend_ready or (lambda: True)
-        self.cancel_requested = cancel_requested or (lambda: False)
+        self.gate = gate or StartupCancellationGate()
         self._started_process: object | None = None
-        self._browser_open_committed = False
-        self._on_browser_open_committed: Callable[[], None] | None = None
 
     def _emit(self, step: str, state: str, detail: str | None = None) -> None:
         self.progress(progress_event(step, state, detail))
@@ -193,14 +224,17 @@ class WorkbenchLauncher:
             pass
 
     def _cancel_if_requested(self, *, step: str) -> None:
-        if self._browser_open_committed:
-            return
-        if not self.cancel_requested():
+        if not self.gate.current_state()["cancelled"]:
             return
         if self._started_process is not None:
             self._stop_process(self._started_process)
             self._started_process = None
         raise LaunchCancelled(step=step)
+
+    def _emit_database_failure(self, code: str) -> None:
+        detail = str(LaunchFailure(code, port=self.port, step=STEP_CONFIRM_DATABASE))
+        self._emit(STEP_CONNECT_DATABASE, "failed", "人才库连接未完成")
+        self._emit(STEP_CONFIRM_DATABASE, "failed", detail)
 
     @staticmethod
     def _database_result(status: dict[str, object] | None) -> tuple[str, str | None]:
@@ -218,9 +252,9 @@ class WorkbenchLauncher:
 
     def _open_browser(self) -> None:
         self._cancel_if_requested(step=STEP_OPEN_BROWSER)
-        self._browser_open_committed = True
-        if self._on_browser_open_committed is not None:
-            self._on_browser_open_committed()
+        if not self.gate.commit_browser_open():
+            self._cancel_if_requested(step=STEP_OPEN_BROWSER)
+            raise LaunchCancelled(step=STEP_OPEN_BROWSER)
         self._emit(STEP_OPEN_BROWSER, "running", "正在提交打开浏览器")
         opened = self.browser_open(self.url)
         if opened is False:
@@ -243,6 +277,7 @@ class WorkbenchLauncher:
             if result == "unavailable":
                 raise LaunchFailure("service_start_failed", port=self.port, step=STEP_CONFIRM_DATABASE)
             if result == "error" and code is not None:
+                self._emit_database_failure(code)
                 raise LaunchFailure(code, port=self.port, step=STEP_CONFIRM_DATABASE)
             if result == "not_ready":
                 self._emit(STEP_CONNECT_DATABASE, "completed", "本地服务可访问，尚未配置人才库，将进入首次设置")
@@ -288,6 +323,7 @@ class WorkbenchLauncher:
                     self.wait(0.2)
                     continue
                 if result == "error" and code is not None:
+                    self._emit_database_failure(code)
                     self._stop_process(process)
                     self._started_process = None
                     raise LaunchFailure(code, port=self.port, step=STEP_CONFIRM_DATABASE)
@@ -331,12 +367,12 @@ def create_default_launcher(
     progress: Callable[[dict[str, str]], None],
     *,
     bootstrap_store: BootstrapStore | None = None,
-    cancel_requested: Callable[[], bool] | None = None,
+    gate: StartupCancellationGate | None = None,
 ) -> WorkbenchLauncher:
-    cancel = cancel_requested or (lambda: False)
+    shared_gate = gate or StartupCancellationGate()
 
     def cancel_if_requested(step: str) -> None:
-        if cancel():
+        if shared_gate.current_state()["cancelled"]:
             raise LaunchCancelled(step=step)
 
     cancel_if_requested(STEP_READ_CONFIG)
@@ -378,5 +414,5 @@ def create_default_launcher(
         progress=progress,
         port=port,
         frontend_ready=lambda: _frontend_assets_ready(project_root),
-        cancel_requested=cancel_requested,
+        gate=shared_gate,
     )
