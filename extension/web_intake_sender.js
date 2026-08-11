@@ -18,8 +18,15 @@
   const SEND_LEASE_MS = 60 * 1000;
   const sendLocks = new Map();
 
+  function nowMs() {
+    if (typeof globalThis.__bossLocalWebIntakeNow === "function") {
+      return Number(globalThis.__bossLocalWebIntakeNow()) || Date.now();
+    }
+    return Date.now();
+  }
+
   function nowIso() {
-    return new Date().toISOString();
+    return new Date(nowMs()).toISOString();
   }
 
   function sanitizeResult(result) {
@@ -37,9 +44,35 @@
     };
   }
 
-  function isLeaseExpired(record, now = Date.now()) {
+  function createLeaseOwner() {
+    return `${nowMs().toString(36)}-${Math.random().toString(16).slice(2, 8)}`;
+  }
+
+  function hasBrokenLeaseTiming(record, currentNow = nowMs()) {
+    const startedAt = Date.parse(record?.sendingStartedAt || "");
     const expiresAt = Date.parse(record?.leaseExpiresAt || "");
-    return !expiresAt || expiresAt <= now;
+    if (!Number.isFinite(startedAt) || !Number.isFinite(expiresAt)) {
+      return true;
+    }
+    if (currentNow < startedAt) {
+      return true;
+    }
+    const leaseSpan = expiresAt - startedAt;
+    if (leaseSpan <= 0 || leaseSpan > SEND_LEASE_MS * 2) {
+      return true;
+    }
+    return false;
+  }
+
+  function isLeaseExpired(record, currentNow = nowMs()) {
+    const expiresAt = Date.parse(record?.leaseExpiresAt || "");
+    if (!Number.isFinite(expiresAt)) {
+      return true;
+    }
+    if (hasBrokenLeaseTiming(record, currentNow)) {
+      return true;
+    }
+    return expiresAt <= currentNow;
   }
 
   function clearLeaseFields(record) {
@@ -177,10 +210,7 @@
       errorCode: failure.code,
       updatedAt: nowIso(),
     });
-    if (
-      failure.autoRetry
-      && Number(failedRecord.attemptCount || 0) >= MAX_AUTO_ATTEMPTS
-    ) {
+    if (failure.autoRetry && Number(failedRecord.attemptCount || 0) >= MAX_AUTO_ATTEMPTS) {
       failedRecord.status = "failed";
       failedRecord.statusLabel = "发送失败";
       failedRecord.message = "自动重试次数已达上限，请手动重试。";
@@ -235,7 +265,7 @@
       attemptCount: manualRetry ? 1 : Number(record.attemptCount || 0) + 1,
       sendingStartedAt: nowIso(),
       leaseOwner,
-      leaseExpiresAt: new Date(Date.now() + SEND_LEASE_MS).toISOString(),
+      leaseExpiresAt: new Date(nowMs() + SEND_LEASE_MS).toISOString(),
     };
     await upsertPendingRecord(record, storageArea);
 
@@ -282,7 +312,7 @@
             ...record,
             status: "waiting_retry",
             statusLabel: "等待重试",
-            message: "已收到服务端成功结果，但本地完成记录写入失败，请重试恢复状态。",
+            message: "服务端已成功接收，但本地完成状态写入失败，请重试恢复。",
             errorCode: "complete_write_failed",
             updatedAt: nowIso(),
             webResult: safeResult,
@@ -304,7 +334,7 @@
     if (existingPromise) {
       return existingPromise;
     }
-    const leaseOwner = `${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 8)}`;
+    const leaseOwner = createLeaseOwner();
     const promise = performSend({ settings, batchKey, storageArea, fetchImpl, manualRetry, leaseOwner }).finally(() => {
       if (sendLocks.get(batchKey) === promise) {
         sendLocks.delete(batchKey);
@@ -392,7 +422,7 @@
       if (String(record.status || "") === "waiting_retry" && Number(record.attemptCount || 0) < MAX_AUTO_ATTEMPTS) {
         return true;
       }
-      if (String(record.status || "") === "sending" && isLeaseExpired(record)) {
+      if (String(record.status || "") === "sending") {
         return true;
       }
       return false;
@@ -422,6 +452,8 @@
     recoverExpiredLease,
     clearLeaseFields,
     isLeaseExpired,
+    hasBrokenLeaseTiming,
+    nowMs,
     WebIntakeStorageError,
   };
 })(globalThis);

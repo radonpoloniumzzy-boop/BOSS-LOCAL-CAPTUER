@@ -182,9 +182,16 @@ globalThis.__serviceTest = {
   saveBatchStatus,
   shouldVerifyPdfBeforeDownload,
   stopBatch,
+  waitForLastWebIntakeAlarm,
 };`;
   vm.runInNewContext(code, context, { filename: "service_worker.js" });
   return { chrome, api: context.__serviceTest, context };
+}
+
+async function triggerRetryAlarm(worker) {
+  const listener = worker.chrome.__alarmListeners[0];
+  listener({ name: worker.context.BossLocalWebIntake.RETRY_ALARM_NAME });
+  await worker.api.waitForLastWebIntakeAlarm();
 }
 
 function createPopupElement(initial = {}) {
@@ -1265,30 +1272,9 @@ async function testWebIntakeConcurrentCompletionDoesNotOverwriteQueuedBatch() {
 }
 
 async function testSendingLeaseExpiryRecoversOnAlarm() {
+  let fakeNow = Date.now();
   const settings = { apiBase: "http://127.0.0.1:17864", apiToken: "lease-token", jobTitle: "Lease Test" };
-  const first = loadServiceWorker(async () => {
-    throw new Error("worker terminated before completion");
-  });
-  const queued = await first.context.BossLocalWebIntake.queueCapturedBatch({
-    settings,
-    merged: { platform: "boss", cards: [{ source_candidate_id: "lease-1", raw_card_text: "candidate-lease" }] },
-    sourceUrl: "https://www.zhipin.com/web/geek/recommend",
-    idempotencyKey: "lease-batch",
-    storageArea: first.chrome.storage.local,
-  });
-  await first.context.BossLocalWebIntake.upsertPendingRecord(
-    {
-      ...(await first.context.BossLocalWebIntake.readPendingRecord(queued.batchKey, first.chrome.storage.local)),
-      status: "sending",
-      attemptCount: 1,
-      sendingStartedAt: new Date(Date.now() - 120000).toISOString(),
-      leaseOwner: "dead-worker",
-      leaseExpiresAt: new Date(Date.now() - 60000).toISOString(),
-    },
-    first.chrome.storage.local,
-  );
-
-  const second = loadServiceWorker(async () => ({
+  const worker = loadServiceWorker(async () => ({
     ok: true,
     status: 200,
     async json() {
@@ -1303,12 +1289,38 @@ async function testSendingLeaseExpiryRecoversOnAlarm() {
       };
     },
   }));
-  Object.assign(second.chrome.__store, first.chrome.__store, settings);
-  await second.chrome.__alarmListeners[0]({ name: second.context.BossLocalWebIntake.RETRY_ALARM_NAME });
-  await second.api.restorePendingWebIntake();
-  const state = await second.context.BossLocalWebIntake.loadState(second.chrome.storage.local);
+  worker.context.__bossLocalWebIntakeNow = () => fakeNow;
+  Object.assign(worker.chrome.__store, settings);
+  const queued = await worker.context.BossLocalWebIntake.queueCapturedBatch({
+    settings,
+    merged: { platform: "boss", cards: [{ source_candidate_id: "lease-1", raw_card_text: "candidate-lease" }] },
+    sourceUrl: "https://www.zhipin.com/web/geek/recommend",
+    idempotencyKey: "lease-batch",
+    storageArea: worker.chrome.storage.local,
+  });
+  await worker.context.BossLocalWebIntake.upsertPendingRecord(
+    {
+      ...(await worker.context.BossLocalWebIntake.readPendingRecord(queued.batchKey, worker.chrome.storage.local)),
+      status: "sending",
+      attemptCount: 1,
+      sendingStartedAt: new Date(fakeNow - 30000).toISOString(),
+      leaseOwner: "dead-worker",
+      leaseExpiresAt: new Date(fakeNow + 30000).toISOString(),
+    },
+    worker.chrome.storage.local,
+  );
+
+  await triggerRetryAlarm(worker);
+  let state = await worker.context.BossLocalWebIntake.loadState(worker.chrome.storage.local);
+  assert.strictEqual(state.pendingBatches[queued.batchKey].status, "sending");
+  assert(worker.chrome.__alarms.some((alarm) => alarm.name === worker.context.BossLocalWebIntake.RETRY_ALARM_NAME));
+
+  fakeNow += 31000;
+  await triggerRetryAlarm(worker);
+  state = await worker.context.BossLocalWebIntake.loadState(worker.chrome.storage.local);
   assert.strictEqual(state.pendingOrder.length, 0);
   assert.strictEqual(state.completedOrder.length, 1);
+  assert(!worker.chrome.__alarms.some((alarm) => alarm.name === worker.context.BossLocalWebIntake.RETRY_ALARM_NAME));
 }
 
 async function testSameBatchConcurrentSendLockTwentyTimes() {
@@ -1616,8 +1628,7 @@ async function testServiceWorkerRestoresPendingBatchViaAlarm() {
     },
   }));
   Object.assign(second.chrome.__store, first.chrome.__store, { apiBase: "http://127.0.0.1:17864", apiToken: "web-token", jobTitle: "Boss ????" });
-  await second.chrome.__alarmListeners[0]({ name: second.context.BossLocalWebIntake.RETRY_ALARM_NAME });
-  await second.api.restorePendingWebIntake();
+  await triggerRetryAlarm(second);
   const state = await second.context.BossLocalWebIntake.loadState(second.chrome.storage.local);
   assert.strictEqual(state.pendingOrder.length, 0);
   assert.strictEqual(state.completedOrder.length, 1);
@@ -1867,6 +1878,209 @@ async function testDesktopRemoteAutoExecutesAgainstMatchedTaskTab() {
   assert.strictEqual(message, "采集完成：识别 1 人，导入批次 #88");
 }
 
+
+
+async function testPopupExpiredSendingEnablesManualRetry() {
+  const sharedStore = {
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "retry-ui-token",
+  };
+  const popup = createPopupTestContext({
+    store: sharedStore,
+    runtimeHandler: createPopupWebRuntimeHandler(),
+  });
+  const settings = { apiBase: "http://127.0.0.1:17864", apiToken: "retry-ui-token", jobTitle: "Retry UI" };
+  const queued = await popup.context.BossLocalWebIntake.queueCapturedBatch({
+    settings,
+    merged: { platform: "boss", cards: [{ source_candidate_id: "retry-ui-1", raw_card_text: "retry-ui-card" }] },
+    sourceUrl: "https://www.zhipin.com/web/geek/recommend",
+    idempotencyKey: "retry-ui-batch",
+    storageArea: popup.chrome.storage.local,
+  });
+  await popup.context.BossLocalWebIntake.upsertPendingRecord(
+    {
+      ...(await popup.context.BossLocalWebIntake.readPendingRecord(queued.batchKey, popup.chrome.storage.local)),
+      status: "sending",
+      attemptCount: 1,
+      sendingStartedAt: new Date(Date.now() - 1000).toISOString(),
+      leaseOwner: "live-worker",
+      leaseExpiresAt: new Date(Date.now() + 30000).toISOString(),
+    },
+    popup.chrome.storage.local,
+  );
+  await popup.api.refreshWebIntakeStatus(settings);
+  assert.strictEqual(popup.elements.retryWebIntake.disabled, true);
+  assert(popup.elements.webIntakeStatus.textContent.length > 0);
+
+  await popup.context.BossLocalWebIntake.upsertPendingRecord(
+    {
+      ...(await popup.context.BossLocalWebIntake.readPendingRecord(queued.batchKey, popup.chrome.storage.local)),
+      sendingStartedAt: new Date(Date.now() - 120000).toISOString(),
+      leaseExpiresAt: new Date(Date.now() - 60000).toISOString(),
+    },
+    popup.chrome.storage.local,
+  );
+  await popup.api.refreshWebIntakeStatus(settings);
+  assert.strictEqual(popup.elements.retryWebIntake.disabled, false);
+  assert.notStrictEqual(popup.elements.webIntakeStatus.textContent, "");
+}
+
+async function testLegacyV2MigrationMatchesCurrentConnectionAndCanSend() {
+  const worker = loadServiceWorker(async () => ({
+    ok: true,
+    status: 200,
+    async json() {
+      return {
+        batch_id: 901,
+        status: "completed",
+        received_count: 1,
+        inserted_candidates: 1,
+        updated_candidates: 0,
+        skipped_candidates: 0,
+        failed_candidates: 0,
+      };
+    },
+  }));
+  const apiBase = "http://127.0.0.1:17864";
+  const webApiBase = "http://127.0.0.1:17864";
+  const apiToken = "legacy-token";
+  Object.assign(worker.chrome.__store, { apiBase, apiToken, jobTitle: "Legacy Test" });
+  const stableHash = worker.context.BossLocalWebIntake.stableHash;
+  worker.chrome.__store[worker.context.BossLocalWebIntake.LEGACY_STATE_KEY] = {
+    pendingBatches: {
+      "legacy-pending": {
+        batchKey: "legacy-pending",
+        idempotencyKey: "legacy-idem-1",
+        payload: {
+          source_platform: "boss",
+          source_url: "https://www.zhipin.com/web/geek/recommend",
+          source_job_title: "Legacy Test",
+          idempotency_key: "legacy-idem-1",
+          candidates: [{ name: "Legacy Name", raw_card_text: "Legacy Raw Card", detail_url: "https://www.zhipin.com/candidate/legacy" }],
+        },
+        connection: {
+          modeApiBase: apiBase,
+          webApiBase,
+          tokenFingerprint: stableHash(apiToken),
+          key: stableHash(apiBase + "|" + webApiBase + "|" + apiToken),
+        },
+      },
+    },
+    completedBatches: {},
+  };
+  let state = await worker.context.BossLocalWebIntake.loadState(worker.chrome.storage.local);
+  assert.strictEqual(worker.chrome.__store[worker.context.BossLocalWebIntake.LEGACY_STATE_KEY], undefined);
+  assert.strictEqual(state.pendingOrder.length, 1);
+  const pending = state.pendingBatches[state.pendingOrder[0]];
+  assert.strictEqual(pending.idempotencyKey, "legacy-idem-1");
+  await worker.context.BossLocalWebIntake.sendQueuedBatch({
+    settings: { apiBase, apiToken, jobTitle: "Legacy Test" },
+    batchKey: pending.batchKey,
+    storageArea: worker.chrome.storage.local,
+    fetchImpl: worker.context.fetch,
+  });
+  state = await worker.context.BossLocalWebIntake.loadState(worker.chrome.storage.local);
+  assert.strictEqual(state.pendingOrder.length, 0);
+  assert.strictEqual(state.completedOrder.length, 1);
+  const serialized = JSON.stringify(worker.chrome.__store);
+  assert(!serialized.includes("Legacy Name"));
+  assert(!serialized.includes("Legacy Raw Card"));
+}
+
+async function testLegacyV2MigrationKeepsMismatchedPendingUntilOriginalConnectionReturns() {
+  const worker = loadServiceWorker();
+  const stableHash = worker.context.BossLocalWebIntake.stableHash;
+  worker.chrome.__store[worker.context.BossLocalWebIntake.LEGACY_STATE_KEY] = {
+    pendingBatches: {
+      "legacy-pending": {
+        batchKey: "legacy-pending",
+        idempotencyKey: "legacy-idem-keep",
+        payload: {
+          source_platform: "boss",
+          source_url: "https://www.zhipin.com/web/geek/recommend",
+          source_job_title: "Legacy Keep",
+          idempotency_key: "legacy-idem-keep",
+          candidates: [{ name: "Keep Name", raw_card_text: "Keep Raw Card", detail_url: "https://www.zhipin.com/candidate/keep" }],
+        },
+        connection: {
+          modeApiBase: "http://127.0.0.1:17864",
+          webApiBase: "http://127.0.0.1:17864",
+          tokenFingerprint: stableHash("original-token"),
+          key: stableHash("http://127.0.0.1:17864|http://127.0.0.1:17864|original-token"),
+        },
+      },
+    },
+    completedBatches: {},
+  };
+  Object.assign(worker.chrome.__store, { apiBase: "http://127.0.0.1:17864", apiToken: "other-token" });
+  let state = await worker.context.BossLocalWebIntake.loadState(worker.chrome.storage.local);
+  assert.strictEqual(state.pendingOrder.length, 0);
+  assert(worker.chrome.__store[worker.context.BossLocalWebIntake.LEGACY_STATE_KEY]);
+  let serialized = JSON.stringify(worker.chrome.__store[worker.context.BossLocalWebIntake.LEGACY_STATE_KEY]);
+  assert(serialized.includes("Keep Name"));
+  assert(serialized.includes("Keep Raw Card"));
+
+  worker.chrome.__store.apiToken = "original-token";
+  state = await worker.context.BossLocalWebIntake.loadState(worker.chrome.storage.local);
+  assert.strictEqual(worker.chrome.__store[worker.context.BossLocalWebIntake.LEGACY_STATE_KEY], undefined);
+  assert.strictEqual(state.pendingOrder.length, 1);
+  const pending = state.pendingBatches[state.pendingOrder[0]];
+  assert.strictEqual(pending.idempotencyKey, "legacy-idem-keep");
+}
+
+async function testCompletedTransitionScrubsSensitivePendingBeforeDelete() {
+  const popup = createPopupTestContext({ apiBase: "http://127.0.0.1:17864", apiToken: "web-token" });
+  const settings = { apiBase: "http://127.0.0.1:17864", apiToken: "web-token", jobTitle: "Safe Transition" };
+  const queued = await popup.context.BossLocalWebIntake.queueCapturedBatch({
+    settings,
+    merged: {
+      platform: "boss",
+      cards: [{ source_candidate_id: "boss-safe", detail_url: "https://www.zhipin.com/candidate/safe", raw_card_text: "Sensitive Raw Card", name: "Sensitive Name" }],
+    },
+    sourceUrl: "https://www.zhipin.com/web/geek/recommend",
+    idempotencyKey: "safe-transition",
+    storageArea: popup.chrome.storage.local,
+  });
+  let removeCalls = 0;
+  const originalRemove = popup.chrome.storage.local.remove;
+  popup.chrome.storage.local.remove = async (key) => {
+    removeCalls += 1;
+    if (removeCalls === 1) {
+      throw new Error("remove failed once");
+    }
+    return originalRemove.call(popup.chrome.storage.local, key);
+  };
+  const completed = await popup.context.BossLocalWebIntake.sendQueuedBatch({
+      settings,
+      batchKey: queued.batchKey,
+      storageArea: popup.chrome.storage.local,
+      fetchImpl: async () => ({
+        ok: true,
+        status: 200,
+        async json() {
+          return {
+            batch_id: 777,
+            status: "completed",
+            received_count: 1,
+            inserted_candidates: 1,
+            updated_candidates: 0,
+            skipped_candidates: 0,
+            failed_candidates: 0,
+          };
+        },
+      }),
+    });
+  assert.strictEqual(completed.status, "completed");
+  let serialized = JSON.stringify(popup.store);
+  assert(!serialized.includes("Sensitive Name"));
+  assert(!serialized.includes("Sensitive Raw Card"));
+  assert(!serialized.includes("candidate/safe"));
+  await popup.context.BossLocalWebIntake.loadState(popup.chrome.storage.local);
+  serialized = JSON.stringify(popup.store);
+  assert(!serialized.includes("Sensitive Name"));
+  assert(!serialized.includes("Sensitive Raw Card"));
+}
+
 async function main() {
   await testDownloadEndpointValidation();
   await testStopGuardIgnoresStaleProgress();
@@ -1902,9 +2116,12 @@ async function main() {
   await testSendingLeaseExpiryRecoversOnAlarm();
   await testSameBatchConcurrentSendLockTwentyTimes();
   await testAutomaticRetryStopsAtMaxAndManualRetryStillWorks();
-  await testLegacyV2MigrationSanitizesSensitiveData();
+  await testPopupExpiredSendingEnablesManualRetry();
+  await testLegacyV2MigrationMatchesCurrentConnectionAndCanSend();
+  await testLegacyV2MigrationKeepsMismatchedPendingUntilOriginalConnectionReturns();
   await testPendingLimitConcurrentEnqueueStaysWithinTen();
   await testWebIntakeSuccessSanitizesCompletedPayload();
+  await testCompletedTransitionScrubsSensitivePendingBeforeDelete();
   await testWebIntakeQuotaFailureIsReportedSeparately();
   await testServiceWorkerRestoresPendingBatchViaAlarm();
   testWebIntakeIdentityUsesFullFieldsInsteadOfShortHash();

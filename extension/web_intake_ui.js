@@ -9,22 +9,41 @@
     const currentIdentity = await connectionIdentity(settings);
     const belongsToCurrentConnection = sameConnectionIdentity(record?.connection, currentIdentity);
     const result = record?.webResult || {};
-    const title = record?.statusLabel || "等待发送";
+    let title = record?.statusLabel || "等待发送";
+    let message = record?.message || "采集完成后会自动尝试发送到网页工作台。";
+    let canRetry = false;
+    const leaseExpired = globalThis.BossLocalWebIntakeSender?.isLeaseExpired
+      ? globalThis.BossLocalWebIntakeSender.isLeaseExpired(record)
+      : false;
+
+    if (belongsToCurrentConnection && String(record?.status || "") === "sending") {
+      if (leaseExpired) {
+        title = "发送中断";
+        message = "上次发送中断，可重新发送。";
+        canRetry = true;
+      } else {
+        message = "正在等待当前发送完成。";
+      }
+    } else if (belongsToCurrentConnection) {
+      canRetry = ["waiting_retry", "failed"].includes(String(record?.status || ""));
+    }
+
     const lines = [
       `当前模式：${modeLabel(settings)}`,
-      record?.message || "采集完成后会自动尝试发送到网页工作台。",
+      message,
       result.batch_id ? `Web 批次 ID: ${result.batch_id}` : "",
       Number.isFinite(result.received_count) ? `接收数: ${result.received_count || 0}` : "",
       Number.isFinite(result.inserted_candidates) ? `新增数: ${result.inserted_candidates || 0}` : "",
       Number.isFinite(result.updated_candidates) ? `更新数: ${result.updated_candidates || 0}` : "",
       Number.isFinite(result.skipped_candidates) ? `跳过数: ${result.skipped_candidates || 0}` : "",
       Number.isFinite(result.failed_candidates) ? `失败数: ${result.failed_candidates || 0}` : "",
-      !belongsToCurrentConnection && record ? "该批次属于旧连接，当前模式不会误投到新的工作台。" : "",
+      !belongsToCurrentConnection && record ? "该批次属于旧连接，当前模式不会误投到新人才库。" : "",
     ].filter(Boolean);
+
     return {
       title,
       message: lines.join("\n"),
-      canRetry: belongsToCurrentConnection && ["waiting_retry", "failed"].includes(String(record?.status || "")),
+      canRetry,
       mode: modeLabel(settings),
     };
   }

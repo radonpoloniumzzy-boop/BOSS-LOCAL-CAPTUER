@@ -43,6 +43,7 @@ const DEFAULT_BATCH_STATUS = {
 const STOP_GUARD_MS = 10 * 60 * 1000;
 const stoppedBatchTabs = new Map();
 let webIntakeOperationQueue = Promise.resolve();
+let lastWebIntakeAlarmPromise = Promise.resolve([]);
 
 chrome.runtime.onInstalled.addListener(() => {
   void ensureBatchStatus();
@@ -58,7 +59,7 @@ chrome.runtime.onStartup.addListener(() => {
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm?.name === globalThis.BossLocalWebIntake?.RETRY_ALARM_NAME) {
-    void withWebIntakeQueue(() => restorePendingWebIntake());
+    lastWebIntakeAlarmPromise = withWebIntakeQueue(() => restorePendingWebIntake());
   }
 });
 
@@ -1071,6 +1072,10 @@ function withWebIntakeQueue(work) {
     () => undefined,
   );
   return next;
+}
+
+function waitForLastWebIntakeAlarm() {
+  return lastWebIntakeAlarmPromise;
 }
 
 async function restorePendingWebIntake() {

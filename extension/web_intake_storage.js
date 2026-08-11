@@ -1,11 +1,19 @@
 (function (globalThis) {
-  const { sameConnectionIdentity, connectionIdentity } = globalThis.BossLocalWebIntakeIdentity;
+  const {
+    sameConnectionIdentity,
+    connectionIdentity,
+    normalizeApiBase,
+    deriveWebApiBase,
+    sha256Hex,
+    createBatchKey,
+  } = globalThis.BossLocalWebIntakeIdentity;
 
   const LEGACY_STATE_KEY = "boss_web_intake_state_v2";
   const PENDING_PREFIX = "boss_web_intake_pending_v4:";
   const COMPLETED_PREFIX = "boss_web_intake_completed_v4:";
   const MAX_PENDING_BATCHES = 10;
   const MAX_COMPLETED_BATCHES = 20;
+  const LEGACY_PENDING_BLOCKED_MESSAGE = "请切回原连接完成旧批次迁移。";
 
   class WebIntakeStorageError extends Error {
     constructor(code, message) {
@@ -17,6 +25,16 @@
 
   function nowIso() {
     return new Date().toISOString();
+  }
+
+  function stableHash(value) {
+    const text = String(value || "");
+    let hash = 2166136261;
+    for (let index = 0; index < text.length; index += 1) {
+      hash ^= text.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(16);
   }
 
   function pendingStorageKey(batchKey) {
@@ -44,7 +62,7 @@
       if (isQuotaError(error)) {
         throw new WebIntakeStorageError(
           "storage_quota_exceeded",
-          "扩展本地缓存空间已满，无法继续暂存待发送批次。请先完成发送或清理历史记录后再试。",
+          "扩展本地缓存空间已满，请先完成发送或清理历史记录后再试。",
         );
       }
       throw error;
@@ -120,8 +138,7 @@
   }
 
   function sanitizeLegacyPendingRecord(record, fallbackBatchKey) {
-    const connection = record?.connection || null;
-    const safe = {
+    return {
       ...record,
       batchKey: String(record?.batchKey || fallbackBatchKey || ""),
       idempotencyKey: String(record?.idempotencyKey || record?.idempotency_key || ""),
@@ -132,21 +149,102 @@
       statusLabel: String(record?.statusLabel || "等待发送"),
       message: String(record?.message || "采集批次已完成，等待发送到网页工作台。"),
       errorCode: String(record?.errorCode || ""),
-      connection,
+      connection: record?.connection || null,
     };
-    if (
-      !connection
-      || !String(connection.mode || "")
-      || !String(connection.apiBase || "")
-      || !String(connection.webApiBase || "")
-      || !String(connection.tokenDigest || "")
-    ) {
-      safe.status = "failed";
-      safe.statusLabel = "等待原连接";
-      safe.message = "该旧批次缺少可验证的连接身份，已阻止自动重发，请切回原连接后手动处理。";
-      safe.payload = null;
+  }
+
+  async function resolveCurrentConnection(storageArea) {
+    const stored = await storageArea.get({
+      apiBase: "http://127.0.0.1:17863",
+      apiToken: "",
+    });
+    const apiBase = normalizeApiBase(stored.apiBase || "");
+    const webApiBase = deriveWebApiBase(apiBase);
+    const token = String(stored.apiToken || "");
+    return {
+      apiBase,
+      webApiBase,
+      tokenFingerprint: stableHash(token),
+      tokenDigest: await sha256Hex(token),
+      legacyKey: stableHash(`${apiBase}|${webApiBase}|${token}`),
+    };
+  }
+
+  function legacyConnectionMatches(connection, currentConnection) {
+    if (!connection || !currentConnection) {
+      return false;
     }
-    return safe;
+    const legacyApiBase = normalizeApiBase(connection.modeApiBase || connection.apiBase || "");
+    const legacyWebApiBase = normalizeApiBase(connection.webApiBase || deriveWebApiBase(legacyApiBase));
+    const legacyFingerprint = String(connection.tokenFingerprint || "");
+    const legacyKey = String(connection.key || "");
+    if (!legacyApiBase || !legacyWebApiBase || !legacyFingerprint) {
+      return false;
+    }
+    if (legacyApiBase !== currentConnection.apiBase) {
+      return false;
+    }
+    if (legacyWebApiBase !== currentConnection.webApiBase) {
+      return false;
+    }
+    if (legacyFingerprint !== currentConnection.tokenFingerprint) {
+      return false;
+    }
+    if (legacyKey && legacyKey !== currentConnection.legacyKey) {
+      return false;
+    }
+    return true;
+  }
+
+  async function migrateLegacyPendingRecord(record, currentConnection) {
+    const safe = sanitizeLegacyPendingRecord(record, record?.batchKey || "");
+    if (!safe.connection || !legacyConnectionMatches(safe.connection, currentConnection)) {
+      return {
+        migrated: null,
+        blocked: {
+          ...safe,
+          status: "failed",
+          statusLabel: "等待原连接",
+          message: LEGACY_PENDING_BLOCKED_MESSAGE,
+        },
+      };
+    }
+    const connection = {
+      mode: normalizeApiBase(safe.connection.modeApiBase || safe.connection.apiBase || "") === currentConnection.webApiBase
+        ? "web"
+        : "desktop",
+      apiBase: currentConnection.apiBase,
+      webApiBase: currentConnection.webApiBase,
+      tokenDigest: currentConnection.tokenDigest,
+    };
+    return {
+      migrated: {
+        ...safe,
+        batchKey: await createBatchKey(connection, safe.idempotencyKey),
+        connection,
+      },
+      blocked: null,
+    };
+  }
+
+  function createScrubbedPendingTransition(record) {
+    return {
+      batchKey: String(record?.batchKey || ""),
+      idempotencyKey: String(record?.idempotencyKey || ""),
+      connection: record?.connection || null,
+      createdAt: String(record?.createdAt || nowIso()),
+      updatedAt: String(record?.updatedAt || nowIso()),
+      attemptCount: Number(record?.attemptCount || 0),
+      status: String(record?.status || ""),
+      statusLabel: String(record?.statusLabel || ""),
+      message: String(record?.message || ""),
+      errorCode: String(record?.errorCode || ""),
+      sendingStartedAt: "",
+      leaseOwner: "",
+      leaseExpiresAt: "",
+      webResult: sanitizeCompletedRecord(record).webResult,
+      scrubbedPendingTransition: true,
+    };
   }
 
   async function migrateLegacyState(storageArea) {
@@ -158,39 +256,56 @@
     }
 
     const state = parseStoredEntries(allEntries);
+    const currentConnection = await resolveCurrentConnection(area);
     const pendingWrites = {};
     const completedWrites = {};
-    const completedRemovals = [];
+    const blockedLegacy = {};
 
     for (const [batchKey, record] of Object.entries(legacy.pendingBatches || {})) {
-      const finalBatchKey = String(record?.batchKey || batchKey);
-      if (state.pendingBatches[finalBatchKey] || state.completedBatches[finalBatchKey]) {
+      const safeRecord = sanitizeLegacyPendingRecord(record, batchKey);
+      if (state.pendingBatches[safeRecord.batchKey] || state.completedBatches[safeRecord.batchKey]) {
         continue;
       }
-      pendingWrites[pendingStorageKey(finalBatchKey)] = sanitizeLegacyPendingRecord(record, finalBatchKey);
+      const migrated = await migrateLegacyPendingRecord(safeRecord, currentConnection);
+      if (migrated.migrated) {
+        pendingWrites[pendingStorageKey(migrated.migrated.batchKey)] = migrated.migrated;
+      } else if (migrated.blocked) {
+        blockedLegacy[safeRecord.batchKey] = migrated.blocked;
+      }
     }
 
     for (const [batchKey, record] of Object.entries(legacy.completedBatches || {})) {
-      const finalBatchKey = String(record?.batchKey || batchKey);
-      if (state.completedBatches[finalBatchKey]) {
+      const safeRecord = sanitizeLegacyCompletedRecord(record, batchKey);
+      if (state.completedBatches[safeRecord.batchKey]) {
         continue;
       }
-      completedWrites[completedStorageKey(finalBatchKey)] = sanitizeLegacyCompletedRecord(record, finalBatchKey);
+      completedWrites[completedStorageKey(safeRecord.batchKey)] = safeRecord;
     }
 
     const writes = { ...pendingWrites, ...completedWrites };
     if (Object.keys(writes).length) {
       await withStorageWrite(() => area.set(writes));
     }
-    await area.remove(LEGACY_STATE_KEY);
 
-    const migrated = parseStoredEntries(await area.get(null));
-    const overflow = migrated.completedOrder.slice(MAX_COMPLETED_BATCHES);
-    if (overflow.length) {
-      completedRemovals.push(...overflow.map((batchKey) => completedStorageKey(batchKey)));
+    if (Object.keys(blockedLegacy).length) {
+      await withStorageWrite(() =>
+        area.set({
+          [LEGACY_STATE_KEY]: {
+            ...legacy,
+            pendingBatches: blockedLegacy,
+            pendingOrder: Object.keys(blockedLegacy),
+            completedBatches: {},
+            completedOrder: [],
+          },
+        }));
+    } else {
+      await area.remove(LEGACY_STATE_KEY);
     }
-    if (completedRemovals.length) {
-      await area.remove(completedRemovals);
+
+    const migratedState = parseStoredEntries(await area.get(null));
+    const overflow = migratedState.completedOrder.slice(MAX_COMPLETED_BATCHES);
+    if (overflow.length) {
+      await area.remove(overflow.map((batchKey) => completedStorageKey(batchKey)));
     }
   }
 
@@ -198,7 +313,16 @@
     const area = storageArea || chrome.storage.local;
     await migrateLegacyState(area);
     const entries = await area.get(null);
-    return parseStoredEntries(entries);
+    const state = parseStoredEntries(entries);
+    const duplicatePendingKeys = state.pendingOrder.filter(
+      (batchKey) => state.completedBatches[batchKey] && state.pendingBatches[batchKey]?.scrubbedPendingTransition,
+    );
+    if (duplicatePendingKeys.length) {
+      await area.remove(duplicatePendingKeys.map((batchKey) => pendingStorageKey(batchKey)));
+      const refreshed = await area.get(null);
+      return parseStoredEntries(refreshed);
+    }
+    return state;
   }
 
   async function enforcePendingLimit(state, batchKey) {
@@ -208,7 +332,7 @@
     if (state.pendingOrder.length >= MAX_PENDING_BATCHES) {
       throw new WebIntakeStorageError(
         "pending_limit_exceeded",
-        `待发送批次已达到上限 ${MAX_PENDING_BATCHES}，请先完成发送或清理旧批次后再继续。`,
+        `待发送批次已达到上限 ${MAX_PENDING_BATCHES}，请先完成发送或清理旧批次后继续。`,
       );
     }
   }
@@ -228,7 +352,9 @@
 
   async function moveToCompleted(record, storageArea) {
     const area = storageArea || chrome.storage.local;
+    const scrubbedPending = createScrubbedPendingTransition(record);
     const sanitized = sanitizeCompletedRecord(record);
+    await withStorageWrite(() => area.set({ [pendingStorageKey(record.batchKey)]: scrubbedPending }));
     await withStorageWrite(() => area.set({ [completedStorageKey(record.batchKey)]: sanitized }));
     await area.remove(pendingStorageKey(record.batchKey));
     const state = await loadState(area);
@@ -285,5 +411,8 @@
     readCompletedRecord,
     currentRecordForConnection,
     migrateLegacyState,
+    createScrubbedPendingTransition,
+    stableHash,
+    LEGACY_PENDING_BLOCKED_MESSAGE,
   };
 })(globalThis);
