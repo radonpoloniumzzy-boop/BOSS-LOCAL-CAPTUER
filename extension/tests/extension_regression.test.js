@@ -278,8 +278,8 @@ function createPopupTestContext(options = {}) {
   ];
   const elements = Object.fromEntries(ids.map((id) => [id, createPopupElement()]));
   elements.chatAutomationEnabled.type = "checkbox";
-  elements.apiBase.value = String(options.apiBase || store.apiBase || "http://127.0.0.1:17863");
-  elements.apiToken.value = String(options.apiToken || store.apiToken || "token");
+  elements.apiBase.value = String(options.initialApiBase || options.apiBase || "http://127.0.0.1:17863");
+  elements.apiToken.value = String(options.initialApiToken || options.apiToken || "token");
   elements.jobTitle.value = String(options.jobTitle || store.jobTitle || "Boss 推荐牛人");
   elements.scrollMode.value = "hold_end";
   elements.scrollStep.value = "900";
@@ -1878,6 +1878,58 @@ async function testCompletedCollectionCanDownloadItsExactBatch() {
   assert(popup.includes("BossLocalBatchExport.downloadBatchMarkdown"));
 }
 
+async function testPopupReopenRestoresWebBatchMarkdownExport() {
+  const html = fs.readFileSync(path.join(EXTENSION_DIR, "popup.html"), "utf8");
+  assert(html.includes('id="apiBase" type="text" value="http://127.0.0.1:17863"'));
+  assert(html.includes('<details class="advanced-settings" id="desktopAdvanced">'));
+  assert(html.includes('id="apiToken" type="password"'));
+
+  const store = {
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "reopen-web-token",
+    jobTitle: "Reopen Web Batch",
+  };
+  const popup = createPopupTestContext({
+    store,
+    runtimeHandler: createPopupWebRuntimeHandler(),
+  });
+  assert.strictEqual(popup.elements.apiBase.value, "http://127.0.0.1:17863");
+
+  const connection = await popup.context.BossLocalWebIntake.connectionIdentity({
+    apiBase: store.apiBase,
+    apiToken: store.apiToken,
+  });
+  const batchKey = "reopen-web-batch-160";
+  store[`${popup.context.BossLocalWebIntake.COMPLETED_PREFIX}${batchKey}`] = {
+    batchKey,
+    idempotencyKey: "reopen-idempotency-160",
+    connection,
+    status: "completed",
+    statusLabel: "入库成功",
+    webResult: {
+      batch_id: 160,
+      status: "completed",
+      received_count: 1,
+      inserted_candidates: 1,
+      updated_candidates: 0,
+      skipped_candidates: 0,
+      failed_candidates: 0,
+    },
+    completedAt: "2026-08-11T10:00:00.000Z",
+  };
+
+  await popup.api.init();
+
+  assert.strictEqual(popup.elements.apiBase.value, "http://127.0.0.1:17864");
+  assert.strictEqual(popup.elements.applyPairingCode.textContent, "重新配对");
+  assert.strictEqual(popup.elements.downloadCurrentBatch.textContent, "导出本批次 #160 Markdown");
+  await popup.api.downloadCurrentBatch();
+  assert.deepStrictEqual(store.lastMarkdownExport, {
+    apiBase: "http://127.0.0.1:17864",
+    batchId: 160,
+  });
+}
+
 function testFilenameTemplatesMatchDesktopFixtures() {
   const source = fs.readFileSync(path.join(EXTENSION_DIR, "chat_batch_runner.js"), "utf8");
   const start = source.indexOf("function renderFilenameTemplate(");
@@ -2575,6 +2627,7 @@ async function testLegacyWarningRemainsVisibleAlongsideCurrentWaitingRetry() {
     sharedStore[popup.context.BossLocalWebIntake.LEGACY_STATE_KEY].pendingBatches["legacy-pending"].payload,
   );
 
+  await popup.api.init();
   await popup.api.refreshWebIntakeStatus(settings);
   assert(popup.elements.webIntakeStatus.textContent.includes("存在属于旧连接的待发送批次，请切回原连接完成迁移。"));
   assert.strictEqual(popup.elements.retryWebIntake.disabled, false);
@@ -2724,6 +2777,7 @@ async function main() {
   testCollectorDoesNotPromoteGenericDataIdToPlatformUid();
   await testWebIntakeStatusMatrixFollowsServerStatus();
   await testPopupWebModeAutoShowsDesktopOnlyBoundary();
+  await testPopupReopenRestoresWebBatchMarkdownExport();
   await testCompletedCollectionCanDownloadItsExactBatch();
   testFilenameTemplatesMatchDesktopFixtures();
   testDesktopRemoteControlKeepsPopupControlsAndUsesTaskScopedCommands();

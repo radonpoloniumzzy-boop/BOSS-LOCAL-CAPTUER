@@ -109,17 +109,6 @@ async function init() {
     scrollWaitDefaultVersion: null,
     scrollModeDefaultVersion: null,
   });
-  activeJobProfileId = stored.jobProfileId === null ? null : Number(stored.jobProfileId);
-  activeRecruitmentTaskId = stored.recruitmentTaskId === null ? null : Number(stored.recruitmentTaskId);
-  lastCompletedBatchId = stored.lastCompletedBatchId === null ? null : Number(stored.lastCompletedBatchId);
-  lastCompletedBatchConnection = stored.lastCompletedBatchConnection || null;
-  if (!BossLocalBatchExport.batchBelongsToConnection(lastCompletedBatchConnection, stored)) {
-    lastCompletedBatchId = null;
-    lastCompletedBatchConnection = null;
-    await chrome.storage.local.set({ lastCompletedBatchId: null, lastCompletedBatchConnection: null });
-  }
-  updateBatchDownloadButton();
-  await refreshWebIntakeStatus(stored);
   if (stored.scrollWaitDefaultVersion === null && Number(stored.scrollWaitMs) === OLD_DEFAULT_SCROLL_WAIT_MS) {
     stored.scrollWaitMs = DEFAULTS.scrollWaitMs;
     await chrome.storage.local.set({
@@ -147,6 +136,18 @@ async function init() {
       }
     }
   }
+  syncConnectionControls();
+  activeJobProfileId = stored.jobProfileId === null ? null : Number(stored.jobProfileId);
+  activeRecruitmentTaskId = stored.recruitmentTaskId === null ? null : Number(stored.recruitmentTaskId);
+  lastCompletedBatchId = stored.lastCompletedBatchId === null ? null : Number(stored.lastCompletedBatchId);
+  lastCompletedBatchConnection = stored.lastCompletedBatchConnection || null;
+  if (!BossLocalBatchExport.batchBelongsToConnection(lastCompletedBatchConnection, collectSettings())) {
+    lastCompletedBatchId = null;
+    lastCompletedBatchConnection = null;
+    await chrome.storage.local.set({ lastCompletedBatchId: null, lastCompletedBatchConnection: null });
+  }
+  await refreshWebIntakeStatus(collectSettings(), { updateDownloadButton: false });
+  updateBatchDownloadButton();
   await refreshBatchStatus();
   batchStatusTimer = window.setInterval(() => {
     void refreshBatchStatus();
@@ -260,6 +261,7 @@ async function applyPairingCodeAndTest() {
       lastCompletedBatchId,
       lastCompletedBatchConnection,
     });
+    syncConnectionControls(verifiedSettings);
     updateBatchDownloadButton();
     pairingCodeInput.value = "";
     const target = isWebWorkbenchMode(verifiedSettings) ? "网页工作台" : "桌面兼容模式";
@@ -341,7 +343,14 @@ function syncModeHints(settings = collectSettings()) {
     : "桌面兼容模式下可直接触发桌面 AUTO 流程。";
 }
 
-async function refreshWebIntakeStatus(settingsOverride = null) {
+function syncConnectionControls(settings = collectSettings()) {
+  applyPairingCodeButton.textContent = isWebWorkbenchMode(settings) && Boolean(settings.apiToken)
+    ? "重新配对"
+    : "连接并记住";
+}
+
+async function refreshWebIntakeStatus(settingsOverride = null, options = {}) {
+  const { updateDownloadButton: shouldUpdateDownloadButton = true } = options;
   const settings = settingsOverride ? { ...DEFAULTS, ...settingsOverride } : collectSettings();
   syncModeHints(settings);
   const response = await chrome.runtime.sendMessage({
@@ -360,7 +369,9 @@ async function refreshWebIntakeStatus(settingsOverride = null) {
   if (["completed", "partial", "reused"].includes(String(record?.status || "")) && Number(record?.webResult?.batch_id) > 0) {
     lastCompletedWebBatch = record;
   }
-  updateBatchDownloadButton();
+  if (shouldUpdateDownloadButton) {
+    updateBatchDownloadButton();
+  }
 }
 
 async function queueAndSendWebBatch(settings, sourceUrl, merged, runId) {

@@ -4,6 +4,8 @@ __pycache__/
 .pytest_cache/
 build/
 dist/
+!web/frontend/dist/
+!web/frontend/dist/**
 web/frontend/node_modules/
 logs/*.log
 data/*.db

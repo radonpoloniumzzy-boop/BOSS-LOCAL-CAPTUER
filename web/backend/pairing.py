@@ -4,6 +4,7 @@ import secrets
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Callable
 
 
 @dataclass(frozen=True)
@@ -29,10 +30,11 @@ class PluginPairingService:
         code = f"{secrets.token_hex(3).upper()}-{secrets.token_hex(3).upper()}"
         expires_at = now + timedelta(seconds=ttl_seconds)
         with self._lock:
+            self._codes.clear()
             self._codes[code] = {"expires_at": expires_at, "used": False}
         return PairingCode(code=code, expires_at=expires_at)
 
-    def consume(self, code: str) -> None:
+    def consume(self, code: str, before_commit: Callable[[str], None] | None = None) -> str:
         normalized = str(code or "").strip().upper()
         with self._lock:
             record = self._codes.get(normalized)
@@ -41,13 +43,22 @@ class PluginPairingService:
             if bool(record["used"]):
                 raise PairingCodeError("pairing_code_used", "连接码已经使用，请重新生成。")
             if datetime.now() >= record["expires_at"]:
+                self._codes.pop(normalized, None)
                 raise PairingCodeError("pairing_code_expired", "连接码已过期，请重新生成。")
+            verified_at = datetime.now().isoformat(timespec="seconds")
+            if before_commit is not None:
+                before_commit(verified_at)
             record["used"] = True
-            self.last_verified_at = datetime.now().isoformat(timespec="seconds")
+            self.last_verified_at = verified_at
+            return verified_at
 
-    def mark_verified(self) -> None:
+    def mark_verified(self, before_commit: Callable[[str], None] | None = None) -> str:
         with self._lock:
-            self.last_verified_at = datetime.now().isoformat(timespec="seconds")
+            verified_at = datetime.now().isoformat(timespec="seconds")
+            if before_commit is not None:
+                before_commit(verified_at)
+            self.last_verified_at = verified_at
+            return verified_at
 
     def restore_last_verified(self, value: str) -> None:
         with self._lock:

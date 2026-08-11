@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-import secrets
 from pathlib import Path
 from urllib.parse import quote
 
@@ -22,6 +21,7 @@ from web.backend.runtime import WebRuntime
 
 
 SERVICE_NAME = "recruiting-talent-workbench"
+WEB_CAPABILITIES = ["phase2c_pairing", "batch_markdown_export"]
 
 
 class ApiError(RuntimeError):
@@ -149,8 +149,13 @@ def create_web_app(
         return error_response(500, "internal_error", "本地服务处理请求时发生错误。")
 
     @app.get("/api/health")
-    def health() -> dict[str, str]:
-        return {"status": "ok", "service": SERVICE_NAME, "version": APP_VERSION}
+    def health() -> dict[str, object]:
+        return {
+            "status": "ok",
+            "service": SERVICE_NAME,
+            "version": APP_VERSION,
+            "capabilities": WEB_CAPABILITIES,
+        }
 
     @app.get("/api/setup/status")
     def setup_status() -> dict[str, object]:
@@ -183,11 +188,11 @@ def create_web_app(
         }
 
     def require_local_api_token(x_boss_local_token: str = Header(default="")) -> None:
-        if runtime.config_service is None:
-            raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。")
-        config = runtime.config_service.load()
-        supplied = str(x_boss_local_token or "")
-        if not supplied or not secrets.compare_digest(supplied, config.local_api_token):
+        try:
+            runtime.authenticate_plugin_token(str(x_boss_local_token or ""))
+        except RuntimeError as exc:
+            raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。") from exc
+        except PermissionError as exc:
             raise ApiError(401, "unauthorized", "本地写入鉴权失败。")
 
     @app.get("/api/plugin-connection/status")
@@ -216,39 +221,34 @@ def create_web_app(
     def pair_plugin(payload: PairingRequest) -> dict[str, object]:
         if runtime.config_service is None:
             raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。")
+        configured = bootstrap.store.load()
         try:
-            runtime.pairing.consume(payload.pairing_code)
+            api_token, verified_at = runtime.pair_plugin(payload.pairing_code)
         except PairingCodeError as exc:
             status = 410 if exc.code in {"pairing_code_expired", "pairing_code_used"} else 400
             raise ApiError(status, exc.code, str(exc)) from exc
-        configured = bootstrap.store.load()
-        config = runtime.config_service.load()
-        config.web_plugin_last_verified_at = runtime.pairing.last_verified_at
-        runtime.config_service.save(config)
         return {
             "api_base": f"http://127.0.0.1:{configured.web_port if configured else 17864}",
-            "api_token": config.local_api_token,
-            "verified_at": runtime.pairing.last_verified_at,
+            "api_token": api_token,
+            "verified_at": verified_at,
             "remember_connection": True,
         }
 
     @app.get("/api/plugin/connection/check")
-    def check_plugin_connection(_auth: None = Depends(require_local_api_token)) -> dict[str, object]:
-        runtime.pairing.mark_verified()
-        config = runtime.config_service.load()
-        config.web_plugin_last_verified_at = runtime.pairing.last_verified_at
-        runtime.config_service.save(config)
-        return {"ok": True, "verified_at": runtime.pairing.last_verified_at}
+    def check_plugin_connection(x_boss_local_token: str = Header(default="")) -> dict[str, object]:
+        try:
+            verified_at = runtime.verify_plugin_connection(str(x_boss_local_token or ""))
+        except RuntimeError as exc:
+            raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。") from exc
+        except PermissionError as exc:
+            raise ApiError(401, "unauthorized", "本地写入鉴权失败。") from exc
+        return {"ok": True, "verified_at": verified_at}
 
     @app.post("/api/plugin-connection/revoke")
     def revoke_plugin_connection() -> dict[str, object]:
         if runtime.config_service is None:
             raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。")
-        config = runtime.config_service.load()
-        config.local_api_token = secrets.token_urlsafe(24)
-        config.web_plugin_last_verified_at = ""
-        runtime.config_service.save(config)
-        runtime.pairing.revoke()
+        runtime.revoke_plugin_connection()
         return {"revoked": True, "message": "现有插件连接已撤销，请重新配对。"}
 
     @app.post("/api/intake/candidates")

@@ -1,17 +1,27 @@
 from __future__ import annotations
 
+import re
+import subprocess
 import tempfile
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from core.bootstrap import BootstrapService, BootstrapStore
+from core.bootstrap import BootstrapService, BootstrapSettings, BootstrapStore
 from core.config import ConfigService
-from web.backend.app import create_web_app
-from web.backend.workbench_launcher import LaunchFailure, WorkbenchLauncher, _request_json
+from web.backend.app import WEB_CAPABILITIES, create_web_app
+from web.backend.pairing import PairingCodeError, PluginPairingService
+from web.backend.workbench_launcher import (
+    LaunchFailure,
+    WorkbenchLauncher,
+    _frontend_assets_ready,
+    _request_json,
+    create_default_launcher,
+)
 
 
 class Phase2CWebApiTest(unittest.TestCase):
@@ -29,7 +39,12 @@ class Phase2CWebApiTest(unittest.TestCase):
         )
         self.data_dir = self.root / "data"
         self.bootstrap.setup(self.data_dir)
-        self.app = create_web_app(self.bootstrap, lock_root=self.root / "locks")
+        self.frontend_dist = Path(__file__).resolve().parents[1] / "web" / "frontend" / "dist"
+        self.app = create_web_app(
+            self.bootstrap,
+            lock_root=self.root / "locks",
+            frontend_dist=self.frontend_dist,
+        )
         self.client = TestClient(self.app, base_url="http://127.0.0.1:17864")
         self.client.__enter__()
 
@@ -75,6 +90,78 @@ class Phase2CWebApiTest(unittest.TestCase):
         )
         self.assertEqual(verified.status_code, 200)
         self.assertNotIn(token, verified.text)
+
+    def test_health_exposes_phase2c_capabilities(self) -> None:
+        health = self.client.get("/api/health")
+        self.assertEqual(health.status_code, 200)
+        self.assertTrue(set(WEB_CAPABILITIES).issubset(set(health.json()["capabilities"])))
+
+    def test_tracked_production_frontend_opens_without_node_modules(self) -> None:
+        self.assertTrue(_frontend_assets_ready(Path(__file__).resolve().parents[1]))
+        root = self.client.get("/")
+        self.assertEqual(root.status_code, 200)
+        asset_paths = re.findall(r'(?:src|href)="(/assets/[^"]+\.(?:js|css))"', root.text)
+        self.assertGreaterEqual(len(asset_paths), 2)
+        for asset_path in asset_paths:
+            with self.subTest(asset_path=asset_path):
+                asset = self.client.get(asset_path)
+                self.assertEqual(asset.status_code, 200)
+                self.assertTrue(asset.content)
+
+    def test_new_pairing_code_immediately_invalidates_previous_code(self) -> None:
+        first = self.client.post("/api/plugin-connection/pairing-code", headers=self.same_origin).json()
+        second = self.client.post("/api/plugin-connection/pairing-code", headers=self.same_origin).json()
+        rejected = self.client.post(
+            "/api/plugin/pair",
+            json={"pairing_code": first["pairing_code"]},
+            headers=self.extension_origin,
+        )
+        self.assertEqual(rejected.status_code, 400)
+        accepted = self.client.post(
+            "/api/plugin/pair",
+            json={"pairing_code": second["pairing_code"]},
+            headers=self.extension_origin,
+        )
+        self.assertEqual(accepted.status_code, 200)
+
+    def test_concurrent_pairing_code_consumption_succeeds_once(self) -> None:
+        pairing = PluginPairingService()
+        code = pairing.create_code().code
+        barrier = threading.Barrier(3)
+        outcomes: list[str] = []
+
+        def consume() -> None:
+            barrier.wait()
+            try:
+                pairing.consume(code)
+                outcomes.append("success")
+            except PairingCodeError as exc:
+                outcomes.append(exc.code)
+
+        threads = [threading.Thread(target=consume) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        barrier.wait()
+        for thread in threads:
+            thread.join()
+        self.assertCountEqual(outcomes, ["success", "pairing_code_used"])
+
+    def test_pairing_and_verification_state_wait_for_durable_config_write(self) -> None:
+        runtime = self.app.state.runtime
+        code = runtime.pairing.create_code().code
+        with patch.object(runtime.config_service, "update", side_effect=PermissionError("denied")):
+            with self.assertRaises(PermissionError):
+                runtime.pair_plugin(code)
+        self.assertEqual(runtime.pairing.last_verified_at, "")
+        token, verified_at = runtime.pair_plugin(code)
+        self.assertTrue(token)
+        self.assertEqual(runtime.pairing.last_verified_at, verified_at)
+
+        runtime.pairing.restore_last_verified("previous-verification")
+        with patch.object(runtime.config_service, "update", side_effect=PermissionError("denied")):
+            with self.assertRaises(PermissionError):
+                runtime.verify_plugin_connection(token)
+        self.assertEqual(runtime.pairing.last_verified_at, "previous-verification")
 
     def test_last_plugin_verification_survives_service_restart(self) -> None:
         created = self.client.post("/api/plugin-connection/pairing-code", headers=self.same_origin)
@@ -127,6 +214,48 @@ class Phase2CWebApiTest(unittest.TestCase):
             headers={**self.extension_origin, "X-Boss-Local-Token": old_token},
         )
         self.assertEqual(rejected.status_code, 401)
+
+    def test_check_and_pair_cannot_restore_token_after_concurrent_revoke(self) -> None:
+        runtime = self.app.state.runtime
+
+        def race(*operations) -> None:
+            barrier = threading.Barrier(len(operations) + 1)
+            threads = []
+            for operation in operations:
+                def run(current=operation) -> None:
+                    barrier.wait()
+                    try:
+                        current()
+                    except (PairingCodeError, PermissionError):
+                        pass
+
+                threads.append(threading.Thread(target=run))
+            for thread in threads:
+                thread.start()
+            barrier.wait()
+            for thread in threads:
+                thread.join()
+
+        old_token = ConfigService(data_dir=self.data_dir).load().local_api_token
+        race(lambda: runtime.verify_plugin_connection(old_token), runtime.revoke_plugin_connection)
+        after_check_race = ConfigService(data_dir=self.data_dir).load().local_api_token
+        self.assertNotEqual(after_check_race, old_token)
+        rejected = self.client.get(
+            "/api/plugin/connection/check",
+            headers={**self.extension_origin, "X-Boss-Local-Token": old_token},
+        )
+        self.assertEqual(rejected.status_code, 401)
+
+        code = runtime.pairing.create_code().code
+        before_pair_race = ConfigService(data_dir=self.data_dir).load().local_api_token
+        race(lambda: runtime.pair_plugin(code), runtime.revoke_plugin_connection)
+        after_pair_race = ConfigService(data_dir=self.data_dir).load().local_api_token
+        self.assertNotEqual(after_pair_race, before_pair_race)
+        rejected_again = self.client.get(
+            "/api/plugin/connection/check",
+            headers={**self.extension_origin, "X-Boss-Local-Token": before_pair_race},
+        )
+        self.assertEqual(rejected_again.status_code, 401)
 
     def test_extension_origin_is_limited_to_plugin_endpoints(self) -> None:
         blocked = self.client.post(
@@ -224,6 +353,14 @@ class Phase2CWebApiTest(unittest.TestCase):
 
 
 class WorkbenchLauncherBehaviorTest(unittest.TestCase):
+    @staticmethod
+    def current_health() -> dict[str, object]:
+        return {
+            "status": "ok",
+            "service": "recruiting-talent-workbench",
+            "capabilities": WEB_CAPABILITIES,
+        }
+
     def test_http_503_database_fault_body_remains_available_to_launcher(self) -> None:
         class FaultHandler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:
@@ -252,10 +389,7 @@ class WorkbenchLauncherBehaviorTest(unittest.TestCase):
         opened: list[str] = []
         started: list[bool] = []
         launcher = WorkbenchLauncher(
-            service_probe=lambda _url: {
-                "status": "ok",
-                "service": "recruiting-talent-workbench",
-            },
+            service_probe=lambda _url: self.current_health(),
             status_probe=lambda _url: {"database_ready": True},
             port_in_use=lambda _port: True,
             process_start=lambda: started.append(True),
@@ -269,10 +403,7 @@ class WorkbenchLauncherBehaviorTest(unittest.TestCase):
     def test_running_service_with_database_fault_is_not_opened(self) -> None:
         opened: list[str] = []
         launcher = WorkbenchLauncher(
-            service_probe=lambda _url: {
-                "status": "ok",
-                "service": "recruiting-talent-workbench",
-            },
+            service_probe=lambda _url: self.current_health(),
             status_probe=lambda _url: {"error": {"code": "database_corrupt"}},
             port_in_use=lambda _port: True,
             process_start=lambda: None,
@@ -297,7 +428,7 @@ class WorkbenchLauncherBehaviorTest(unittest.TestCase):
             health_calls += 1
             if health_calls == 1:
                 return None
-            return {"status": "ok", "service": "recruiting-talent-workbench"}
+            return self.current_health()
 
         launcher = WorkbenchLauncher(
             service_probe=health,
@@ -339,6 +470,171 @@ class WorkbenchLauncherBehaviorTest(unittest.TestCase):
         self.assertEqual(caught.exception.code, "port_in_use")
         self.assertEqual(opened, [])
 
+    def test_same_service_without_phase2c_capabilities_is_stale(self) -> None:
+        started: list[bool] = []
+        launcher = WorkbenchLauncher(
+            service_probe=lambda _url: {
+                "status": "ok",
+                "service": "recruiting-talent-workbench",
+                "capabilities": ["older_pairing"],
+            },
+            status_probe=lambda _url: {"database_ready": True},
+            port_in_use=lambda _port: True,
+            process_start=lambda: started.append(True),
+            browser_open=lambda _url: None,
+            wait=lambda _seconds: None,
+        )
+        with self.assertRaises(LaunchFailure) as caught:
+            launcher.launch()
+        self.assertEqual(caught.exception.code, "stale_service")
+        self.assertEqual(str(caught.exception), "检测到旧版网页工作台仍在运行，请关闭旧实例后重新启动。")
+        self.assertEqual(started, [])
+
+    def test_nondefault_bootstrap_port_drives_all_launcher_urls(self) -> None:
+        health_urls: list[str] = []
+        status_urls: list[str] = []
+        checked_ports: list[int] = []
+        opened: list[str] = []
+        launcher = WorkbenchLauncher(
+            service_probe=lambda url: health_urls.append(url) or self.current_health(),
+            status_probe=lambda url: status_urls.append(url) or {"database_ready": True},
+            port_in_use=lambda port: checked_ports.append(port) or False,
+            process_start=lambda: None,
+            browser_open=opened.append,
+            wait=lambda _seconds: None,
+            port=19064,
+        )
+        self.assertEqual(launcher.launch(), "already_running")
+        self.assertEqual(health_urls, ["http://127.0.0.1:19064/api/health"])
+        self.assertEqual(status_urls, ["http://127.0.0.1:19064/api/app/status"])
+        self.assertEqual(checked_ports, [])
+        self.assertEqual(opened, ["http://127.0.0.1:19064/"])
+
+    def test_default_launcher_reads_nondefault_port_from_bootstrap(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            pythonw = root / ".venv" / "Scripts" / "pythonw.exe"
+            pythonw.parent.mkdir(parents=True)
+            pythonw.write_bytes(b"")
+            assets = root / "web" / "frontend" / "dist" / "assets"
+            assets.mkdir(parents=True)
+            (assets.parent / "index.html").write_text(
+                '<link rel="stylesheet" href="/assets/app.css"><script src="/assets/app.js"></script>',
+                encoding="utf-8",
+            )
+            (assets / "app.js").write_text("", encoding="utf-8")
+            (assets / "app.css").write_text("", encoding="utf-8")
+            store = BootstrapStore(root / "bootstrap.json")
+            store.save(BootstrapSettings(data_dir=str(root / "data"), web_port=19064))
+            launcher = create_default_launcher(root, lambda _message: None, bootstrap_store=store)
+            self.assertEqual(launcher.port, 19064)
+            self.assertEqual(launcher.url, "http://127.0.0.1:19064/")
+
+    def test_default_launcher_reports_invalid_bootstrap_without_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            store = BootstrapStore(root / "bootstrap.json")
+            store.path.write_text('{"web_port": 70000}', encoding="utf-8")
+            with self.assertRaises(LaunchFailure) as caught:
+                create_default_launcher(root, lambda _message: None, bootstrap_store=store)
+            self.assertEqual(caught.exception.code, "bootstrap_invalid")
+
+    def test_default_launcher_reports_unreadable_bootstrap_without_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            store = BootstrapStore(root / "bootstrap.json")
+            store.path.write_text("{}", encoding="utf-8")
+            with patch.object(Path, "read_text", side_effect=PermissionError("denied")):
+                with self.assertRaises(LaunchFailure) as caught:
+                    create_default_launcher(root, lambda _message: None, bootstrap_store=store)
+            self.assertEqual(caught.exception.code, "bootstrap_invalid")
+
+    def test_frontend_assets_are_checked_before_process_start(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.assertFalse(_frontend_assets_ready(root))
+            started: list[bool] = []
+            launcher = WorkbenchLauncher(
+                service_probe=lambda _url: None,
+                status_probe=lambda _url: None,
+                port_in_use=lambda _port: False,
+                process_start=lambda: started.append(True),
+                browser_open=lambda _url: None,
+                wait=lambda _seconds: None,
+                frontend_ready=lambda: False,
+            )
+            with self.assertRaises(LaunchFailure) as caught:
+                launcher.launch()
+            self.assertEqual(caught.exception.code, "frontend_missing")
+            self.assertEqual(started, [])
+
+            assets = root / "web" / "frontend" / "dist" / "assets"
+            assets.mkdir(parents=True)
+            (assets.parent / "index.html").write_text(
+                '<link rel="stylesheet" href="/assets/main.css"><script src="/assets/main.js"></script>',
+                encoding="utf-8",
+            )
+            (assets / "main.js").write_text("js", encoding="utf-8")
+            (assets / "main.css").write_text("css", encoding="utf-8")
+            self.assertTrue(_frontend_assets_ready(root))
+            (assets / "main.js").unlink()
+            self.assertFalse(_frontend_assets_ready(root))
+
+    def test_launcher_waits_after_terminate_and_kill(self) -> None:
+        events: list[str] = []
+
+        class Process:
+            waits = 0
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                events.append("terminate")
+
+            def wait(self, timeout=None):
+                self.waits += 1
+                events.append(f"wait-{self.waits}")
+                if self.waits == 1:
+                    raise subprocess.TimeoutExpired("web", timeout)
+
+            def kill(self):
+                events.append("kill")
+
+        launcher = WorkbenchLauncher(
+            service_probe=lambda _url: None,
+            status_probe=lambda _url: None,
+            port_in_use=lambda _port: False,
+            process_start=Process,
+            browser_open=lambda _url: None,
+            wait=lambda _seconds: None,
+            attempts=1,
+        )
+        with self.assertRaises(LaunchFailure):
+            launcher.launch()
+        self.assertEqual(events, ["terminate", "wait-1", "kill", "wait-2"])
+
+    def test_launcher_cleanup_failure_does_not_mask_launch_error(self) -> None:
+        class Process:
+            def poll(self):
+                return None
+
+            def terminate(self):
+                raise PermissionError("denied")
+
+        launcher = WorkbenchLauncher(
+            service_probe=lambda _url: None,
+            status_probe=lambda _url: None,
+            port_in_use=lambda _port: False,
+            process_start=Process,
+            browser_open=lambda _url: None,
+            wait=lambda _seconds: None,
+            attempts=1,
+        )
+        with self.assertRaises(LaunchFailure) as caught:
+            launcher.launch()
+        self.assertEqual(caught.exception.code, "service_start_failed")
+
     def test_database_lock_stops_at_recovery_message(self) -> None:
         health_calls = 0
         terminated: list[bool] = []
@@ -353,10 +649,7 @@ class WorkbenchLauncherBehaviorTest(unittest.TestCase):
         def health(_url):
             nonlocal health_calls
             health_calls += 1
-            return None if health_calls == 1 else {
-                "status": "ok",
-                "service": "recruiting-talent-workbench",
-            }
+            return None if health_calls == 1 else self.current_health()
 
         launcher = WorkbenchLauncher(
             service_probe=health,
@@ -395,7 +688,7 @@ class WorkbenchLauncherBehaviorTest(unittest.TestCase):
                     health_calls += 1
                     if health_calls == 1:
                         return None
-                    return {"status": "ok", "service": "recruiting-talent-workbench"}
+                    return self.current_health()
 
                 launcher = WorkbenchLauncher(
                     service_probe=health,

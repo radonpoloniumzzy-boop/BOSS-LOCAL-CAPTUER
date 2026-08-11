@@ -8,12 +8,35 @@ import time
 import urllib.error
 import urllib.request
 import webbrowser
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Callable
+from urllib.parse import urlsplit
+
+from core.bootstrap import BootstrapConfigurationError, BootstrapStore
+
+
+REQUIRED_CAPABILITIES = frozenset({"phase2c_pairing", "batch_markdown_export"})
+
+
+class _FrontendAssetParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.references: list[str] = []
+
+    def handle_starttag(self, _tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        for name, value in attrs:
+            if name in {"src", "href"} and value:
+                path = urlsplit(value).path
+                if path.startswith("/assets/") or path.startswith("assets/"):
+                    self.references.append(path.lstrip("/"))
 
 
 RECOVERY_MESSAGES = {
-    "port_in_use": "本地端口 17864 已被其他程序占用。请关闭占用程序后重新启动网页工作台。",
+    "port_in_use": "本地端口 {port} 已被其他程序占用。请关闭占用程序后重新启动网页工作台。",
+    "stale_service": "检测到旧版网页工作台仍在运行，请关闭旧实例后重新启动。",
+    "frontend_missing": "网页工作台前端资源不完整，请重新安装完整版本后再启动。",
+    "bootstrap_invalid": "网页工作台启动配置损坏或无法读取，请检查 bootstrap.json 后重新启动。",
     "configured_database_missing": "已配置的人才库文件不存在。请检查 D 盘、移动盘或数据库文件位置，恢复后重新启动。",
     "database_corrupt": "人才库文件损坏或无法读取。请停止操作并从可用备份恢复。",
     "database_in_use": "人才库正在被其他实例使用。请关闭桌面端或另一个网页工作台后重试。",
@@ -24,9 +47,10 @@ RECOVERY_MESSAGES = {
 
 
 class LaunchFailure(RuntimeError):
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, *, port: int = 17864) -> None:
         self.code = code
-        super().__init__(RECOVERY_MESSAGES.get(code, RECOVERY_MESSAGES["service_start_failed"]))
+        template = RECOVERY_MESSAGES.get(code, RECOVERY_MESSAGES["service_start_failed"])
+        super().__init__(template.format(port=port))
 
 
 def _request_json(url: str) -> dict[str, object] | None:
@@ -64,6 +88,8 @@ class WorkbenchLauncher:
         wait: Callable[[float], None],
         progress: Callable[[str], None] | None = None,
         attempts: int = 50,
+        port: int = 17864,
+        frontend_ready: Callable[[], bool] | None = None,
     ) -> None:
         self.service_probe = service_probe
         self.status_probe = status_probe
@@ -73,19 +99,48 @@ class WorkbenchLauncher:
         self.wait = wait
         self.progress = progress or (lambda _message: None)
         self.attempts = attempts
-        self.url = "http://127.0.0.1:17864/"
+        self.port = int(port)
+        self.url = f"http://127.0.0.1:{self.port}/"
+        self.frontend_ready = frontend_ready or (lambda: True)
 
     @staticmethod
-    def _is_workbench_service(payload: dict[str, object] | None) -> bool:
-        return bool(
-            payload
-            and payload.get("status") == "ok"
-            and payload.get("service") == "recruiting-talent-workbench"
-        )
+    def _service_kind(payload: dict[str, object] | None) -> str:
+        if not payload or payload.get("status") != "ok":
+            return "none"
+        if payload.get("service") != "recruiting-talent-workbench":
+            return "other"
+        capabilities = payload.get("capabilities")
+        available = {str(value) for value in capabilities} if isinstance(capabilities, list) else set()
+        return "current" if REQUIRED_CAPABILITIES.issubset(available) else "stale"
+
+    @staticmethod
+    def _stop_process(process: object) -> None:
+        try:
+            getattr(process, "terminate", lambda: None)()
+        except (OSError, subprocess.SubprocessError):
+            return
+        try:
+            getattr(process, "wait", lambda timeout=None: None)(timeout=3)
+        except subprocess.TimeoutExpired:
+            try:
+                getattr(process, "kill", lambda: None)()
+            except (OSError, subprocess.SubprocessError):
+                return
+            try:
+                getattr(process, "wait", lambda timeout=None: None)(timeout=3)
+            except (OSError, subprocess.SubprocessError):
+                pass
+        except (OSError, subprocess.SubprocessError):
+            pass
 
     def launch(self) -> str:
         self.progress("正在检查运行环境")
-        if self._is_workbench_service(self.service_probe(f"{self.url}api/health")):
+        if not self.frontend_ready():
+            raise LaunchFailure("frontend_missing", port=self.port)
+        service_kind = self._service_kind(self.service_probe(f"{self.url}api/health"))
+        if service_kind == "stale":
+            raise LaunchFailure("stale_service", port=self.port)
+        if service_kind == "current":
             status = self.status_probe(f"{self.url}api/app/status")
             if status is None:
                 raise LaunchFailure("service_start_failed")
@@ -96,8 +151,8 @@ class WorkbenchLauncher:
             self.progress("网页工作台已经运行，正在打开浏览器")
             self.browser_open(self.url)
             return "already_running"
-        if self.port_in_use(17864):
-            raise LaunchFailure("port_in_use")
+        if self.port_in_use(self.port):
+            raise LaunchFailure("port_in_use", port=self.port)
         self.progress("正在读取人才库配置")
         self.progress("正在检查数据库")
         self.progress("正在启动本地服务")
@@ -106,7 +161,11 @@ class WorkbenchLauncher:
         for _ in range(self.attempts):
             if getattr(process, "poll", lambda: None)() is not None:
                 raise LaunchFailure("service_start_failed")
-            if self._is_workbench_service(self.service_probe(f"{self.url}api/health")):
+            service_kind = self._service_kind(self.service_probe(f"{self.url}api/health"))
+            if service_kind == "stale":
+                self._stop_process(process)
+                raise LaunchFailure("stale_service", port=self.port)
+            if service_kind == "current":
                 status = self.status_probe(f"{self.url}api/app/status")
                 if status is None:
                     self.wait(0.2)
@@ -114,17 +173,44 @@ class WorkbenchLauncher:
                 fault = status.get("error") if isinstance(status, dict) else None
                 code = str(fault.get("code") or "") if isinstance(fault, dict) else ""
                 if code and code != "database_not_ready":
-                    getattr(process, "terminate", lambda: None)()
+                    self._stop_process(process)
                     raise LaunchFailure(code)
                 self.progress("启动成功，正在打开浏览器")
                 self.browser_open(self.url)
                 return "started"
             self.wait(0.2)
-        getattr(process, "terminate", lambda: None)()
+        self._stop_process(process)
         raise LaunchFailure("service_start_failed")
 
 
-def create_default_launcher(project_root: Path, progress: Callable[[str], None]) -> WorkbenchLauncher:
+def _frontend_assets_ready(project_root: Path) -> bool:
+    dist = project_root / "web" / "frontend" / "dist"
+    index = dist / "index.html"
+    try:
+        parser = _FrontendAssetParser()
+        parser.feed(index.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError):
+        return False
+    referenced = [dist / path for path in parser.references]
+    return bool(
+        referenced
+        and any(path.suffix == ".js" for path in referenced)
+        and any(path.suffix == ".css" for path in referenced)
+        and all(path.is_file() for path in referenced)
+    )
+
+
+def create_default_launcher(
+    project_root: Path,
+    progress: Callable[[str], None],
+    *,
+    bootstrap_store: BootstrapStore | None = None,
+) -> WorkbenchLauncher:
+    try:
+        configured = (bootstrap_store or BootstrapStore()).load()
+    except BootstrapConfigurationError as exc:
+        raise LaunchFailure("bootstrap_invalid") from exc
+    port = configured.web_port if configured else 17864
     pythonw = project_root / ".venv" / "Scripts" / "pythonw.exe"
     if not pythonw.is_file():
         raise LaunchFailure("service_start_failed")
@@ -145,4 +231,6 @@ def create_default_launcher(project_root: Path, progress: Callable[[str], None])
         browser_open=lambda url: webbrowser.open(url, new=2),
         wait=time.sleep,
         progress=progress,
+        port=port,
+        frontend_ready=lambda: _frontend_assets_ready(project_root),
     )

@@ -81,7 +81,8 @@ describe("workbench candidate intake views", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
-    render(<Workbench status={status} />);
+    const clearTimeoutSpy = vi.spyOn(window, "clearTimeout");
+    const view = render(<Workbench status={status} />);
 
     await user.click(screen.getByRole("button", { name: "最近批次" }));
     expect(await screen.findByText("#159")).toBeInTheDocument();
@@ -91,6 +92,54 @@ describe("workbench candidate intake views", () => {
     const exportLink = screen.getByRole("link", { name: "导出 Markdown" });
     expect(exportLink).toHaveAttribute("href", "/api/capture-batches/161/export.md");
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    view.unmount();
+    expect(clearTimeoutSpy).toHaveBeenCalled();
+  });
+
+  it("pauses batch list polling while viewing detail and resumes after returning", async () => {
+    let listRequests = 0;
+    const fetchMock = vi.fn((input: string | URL) => {
+      const url = String(input);
+      if (url.includes("/api/capture-batches?")) {
+        listRequests += 1;
+        return response({
+          rows: [{
+            id: 9,
+            start_time: "2026-08-11T11:35:20",
+            source_platform: "boss",
+            total_collected: 1,
+            total_new: 1,
+            total_updated: 0,
+            total_skipped: 0,
+            total_failed: 0,
+            status: "completed",
+            role_id: null,
+          }],
+          total: 1,
+          page: 1,
+          page_size: 20,
+        });
+      }
+      if (url.includes("/api/capture-batches/9/candidates")) {
+        return response({ rows: [], total: 0, page: 1, page_size: 50 });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    render(<Workbench status={status} />);
+
+    await user.click(screen.getByRole("button", { name: "最近批次" }));
+    await user.click(await screen.findByRole("button", { name: "查看候选人" }));
+    expect(await screen.findByRole("heading", { name: "批次 #9" })).toBeInTheDocument();
+    const beforeDetailFocus = listRequests;
+    window.dispatchEvent(new Event("focus"));
+    await Promise.resolve();
+    expect(listRequests).toBe(beforeDetailFocus);
+
+    await user.click(screen.getByRole("button", { name: "返回批次列表" }));
+    window.dispatchEvent(new Event("focus"));
+    await waitFor(() => expect(listRequests).toBeGreaterThan(beforeDetailFocus));
   });
 
   it("opens an older candidate batch directly without requiring it on the first page", async () => {

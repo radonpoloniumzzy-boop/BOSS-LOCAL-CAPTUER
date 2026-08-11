@@ -18,7 +18,19 @@ export function BatchesPage({ initialBatchId = null, onInitialBatchConsumed }: {
   const latest = useRef(0);
   const directRequest = useRef(0);
   const knownLatest = useRef(0);
+  const noticeTimer = useRef<number | null>(null);
   const load = useCallback(() => setRefresh((value) => value + 1), []);
+  const showNotice = useCallback((message: string) => {
+    if (noticeTimer.current !== null) window.clearTimeout(noticeTimer.current);
+    setNotice(message);
+    noticeTimer.current = window.setTimeout(() => {
+      noticeTimer.current = null;
+      setNotice("");
+    }, 4000);
+  }, []);
+  useEffect(() => () => {
+    if (noticeTimer.current !== null) window.clearTimeout(noticeTimer.current);
+  }, []);
   useEffect(() => setPage(1), [platform]);
   useEffect(() => {
     const requestId = ++latest.current;
@@ -29,8 +41,7 @@ export function BatchesPage({ initialBatchId = null, onInitialBatchConsumed }: {
       if (latest.current !== requestId) return;
       const newest = Number(payload.rows[0]?.id || 0);
       if (knownLatest.current && newest > knownLatest.current) {
-        setNotice(`已接收新批次 #${newest}`);
-        window.setTimeout(() => setNotice(""), 4000);
+        showNotice(`已接收新批次 #${newest}`);
       }
       knownLatest.current = Math.max(knownLatest.current, newest);
       setData({ ...payload, loading: false, error: "" });
@@ -38,7 +49,7 @@ export function BatchesPage({ initialBatchId = null, onInitialBatchConsumed }: {
     }).catch((error: unknown) => {
       if (latest.current === requestId) setData((current) => ({ ...current, loading: false, error: error instanceof ApiRequestError ? error.message : "采集批次加载失败。" }));
     });
-  }, [page, platform, refresh]);
+  }, [page, platform, refresh, showNotice]);
   useEffect(() => {
     if (!initialBatchId) return;
     const requestId = ++directRequest.current;
@@ -47,20 +58,21 @@ export function BatchesPage({ initialBatchId = null, onInitialBatchConsumed }: {
         if (directRequest.current === requestId) setSelected(batch);
       })
       .catch(() => {
-        if (directRequest.current === requestId) setNotice(`批次 #${initialBatchId} 不存在或已不可用。`);
+        if (directRequest.current === requestId) showNotice(`批次 #${initialBatchId} 不存在或已不可用。`);
       })
       .finally(() => {
         if (directRequest.current === requestId) onInitialBatchConsumed?.();
       });
-  }, [initialBatchId, onInitialBatchConsumed]);
+  }, [initialBatchId, onInitialBatchConsumed, showNotice]);
   useEffect(() => {
+    if (selected) return;
     const timer = window.setInterval(load, 10000);
     const onFocus = () => load();
     const onVisibility = () => { if (document.visibilityState === "visible") load(); };
     window.addEventListener("focus", onFocus);
     document.addEventListener("visibilitychange", onVisibility);
     return () => { window.clearInterval(timer); window.removeEventListener("focus", onFocus); document.removeEventListener("visibilitychange", onVisibility); };
-  }, [load]);
+  }, [load, selected]);
 
   if (selected) return <BatchDetail batch={selected} onBack={() => setSelected(null)} />;
   return <div className="page-content page-enter">

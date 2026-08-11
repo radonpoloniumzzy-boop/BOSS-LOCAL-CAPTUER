@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import secrets
 import threading
 import uuid
 from dataclasses import dataclass
@@ -216,6 +217,55 @@ class WebRuntime:
             except Exception:
                 self.close()
                 raise
+
+    def authenticate_plugin_token(self, supplied: str) -> None:
+        with self._state_lock:
+            if self.config_service is None:
+                raise RuntimeError("database_not_ready")
+            config = self.config_service.load()
+            if not supplied or not secrets.compare_digest(str(supplied), config.local_api_token):
+                raise PermissionError("unauthorized")
+
+    def pair_plugin(self, pairing_code: str) -> tuple[str, str]:
+        with self._state_lock:
+            if self.config_service is None:
+                raise RuntimeError("database_not_ready")
+            saved_token = ""
+
+            def remember(verified_at: str) -> None:
+                nonlocal saved_token
+                def update_config(config):
+                    config.web_plugin_last_verified_at = verified_at
+
+                config, _ = self.config_service.update(update_config)
+                saved_token = config.local_api_token
+
+            verified_at = self.pairing.consume(pairing_code, remember)
+            return saved_token, verified_at
+
+    def verify_plugin_connection(self, supplied: str) -> str:
+        with self._state_lock:
+            self.authenticate_plugin_token(supplied)
+
+            def remember(verified_at: str) -> None:
+                def update_config(config):
+                    config.web_plugin_last_verified_at = verified_at
+
+                self.config_service.update(update_config)
+
+            return self.pairing.mark_verified(remember)
+
+    def revoke_plugin_connection(self) -> None:
+        with self._state_lock:
+            if self.config_service is None:
+                raise RuntimeError("database_not_ready")
+
+            def rotate(config):
+                config.local_api_token = secrets.token_urlsafe(24)
+                config.web_plugin_last_verified_at = ""
+
+            self.config_service.update(rotate)
+            self.pairing.revoke()
 
     def close(self) -> None:
         with self._state_lock:

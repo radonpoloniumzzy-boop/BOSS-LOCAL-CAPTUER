@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import secrets
+import threading
 from dataclasses import fields
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 from core.models import AIProviderConfig, AppConfig, AutomationFlowConfig
 from core.utils import deep_merge, ensure_directory, get_app_root, json_dumps
@@ -92,6 +93,10 @@ REVIEW_CSV_COLUMNS_V2 = [
     "candidate_key",
 ]
 
+T = TypeVar("T")
+_CONFIG_LOCKS_GUARD = threading.Lock()
+_CONFIG_LOCKS: dict[str, threading.RLock] = {}
+
 
 class DataDirectoryAccessError(RuntimeError):
     def __init__(self, path: Path, cause: OSError) -> None:
@@ -113,6 +118,9 @@ class ConfigService:
         self.logs_dir = self._ensure_managed_directory(self.app_root / "logs")
         self.dist_dir = self._ensure_managed_directory(self.app_root / "dist")
         self.config_path = self.data_dir / "config.json"
+        lock_key = str(self.config_path.resolve()).lower()
+        with _CONFIG_LOCKS_GUARD:
+            self._config_lock = _CONFIG_LOCKS.setdefault(lock_key, threading.RLock())
         self.database_path = self.data_dir / "boss_local_tool.db"
         self.default_export_dir = self._ensure_managed_directory(self.data_dir / "exports")
         self.default_user_data_dir = self._ensure_managed_directory(
@@ -137,6 +145,10 @@ class ConfigService:
         return config
 
     def load(self) -> AppConfig:
+        with self._config_lock:
+            return self._load_locked()
+
+    def _load_locked(self) -> AppConfig:
         defaults = self.default_config()
         if not self.config_path.exists():
             self.save(defaults)
@@ -167,9 +179,20 @@ class ConfigService:
             return defaults
 
     def save(self, config: AppConfig) -> None:
+        with self._config_lock:
+            self._save_locked(config)
+
+    def _save_locked(self, config: AppConfig) -> None:
         self.ensure_runtime_paths(config)
         self._write_managed_text(self.config_path, json_dumps(config.to_dict()))
         self._log("info", "Saved config to %s", self.config_path)
+
+    def update(self, mutator: Callable[[AppConfig], T]) -> tuple[AppConfig, T]:
+        with self._config_lock:
+            config = self._load_locked()
+            result = mutator(config)
+            self._save_locked(config)
+            return config, result
 
     def export_example(self, target_path: Path) -> None:
         self._write_managed_text(target_path, json_dumps(self.default_config().to_dict()))
@@ -231,9 +254,15 @@ class ConfigService:
             raise DataDirectoryAccessError(path, exc) from exc
 
     def _write_managed_text(self, path: Path, content: str) -> None:
+        temporary = path.with_suffix(f"{path.suffix}.tmp")
         try:
-            path.write_text(content, encoding="utf-8")
+            temporary.write_text(content, encoding="utf-8")
+            temporary.replace(path)
         except OSError as exc:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
             raise DataDirectoryAccessError(path, exc) from exc
 
     def _log(self, level: str, message: str, *args) -> None:
