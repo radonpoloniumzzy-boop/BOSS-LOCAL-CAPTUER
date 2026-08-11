@@ -44,7 +44,7 @@
       Number.isFinite(result.failed_candidates) ? `失败数: ${result.failed_candidates || 0}` : "",
       !belongsToCurrentConnection && record ? "该批次属于旧连接，当前模式不会误投到新人才库。" : "",
       legacyBlocked ? "存在属于旧连接的待发送批次，请切回原连接完成迁移。" : "",
-      needsConnectionModeConfirmation(settings) ? "当前连接缺少显式模式信息，请重新配对以确认连接模式。" : "",
+      needsConnectionModeConfirmation(settings) ? "请重新配对以确认连接模式。" : "",
     ].filter(Boolean);
 
     return {

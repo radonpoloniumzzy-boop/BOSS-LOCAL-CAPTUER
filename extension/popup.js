@@ -5,6 +5,7 @@ const DEFAULTS = {
   apiBase: "http://127.0.0.1:17863",
   apiToken: "",
   connectionMode: "",
+  connectionModeConfirmed: true,
   scrollMode: "hold_end",
   scrollStep: 900,
   scrollWaitMs: 30,
@@ -74,6 +75,7 @@ let batchStatusTimer = null;
 let activeJobProfileId = null;
 let activeRecruitmentTaskId = null;
 let activeConnectionMode = "";
+let activeConnectionModeConfirmed = true;
 let lastCompletedBatchId = null;
 let lastCompletedBatchConnection = null;
 let lastCompletedWebBatch = null;
@@ -94,6 +96,12 @@ document.getElementById("requestAndDownload").addEventListener("click", () => ru
 document.getElementById("startBatchRequest").addEventListener("click", () => startBatch("request_resume"));
 document.getElementById("startBatchDownload").addEventListener("click", () => startBatch("download_only"));
 document.getElementById("stopBatch").addEventListener("click", () => stopBatch());
+fields.apiBase.addEventListener("input", () => {
+  void switchToDesktopCompatibilityMode();
+});
+fields.apiToken.addEventListener("input", () => {
+  void switchToDesktopCompatibilityMode();
+});
 
 window.addEventListener("beforeunload", () => {
   if (batchStatusTimer) {
@@ -105,12 +113,61 @@ if (!globalThis.__bossLocalPopupTestMode) {
   void init();
 }
 
+async function migrateStoredConnectionMode(stored) {
+  const explicitMode = BossLocalWebIntake.normalizeConnectionMode(stored.connectionMode);
+  const hasStoredConfirmation = typeof stored.connectionModeConfirmed === "boolean";
+  if (explicitMode) {
+    const migrated = {
+      ...stored,
+      connectionMode: explicitMode,
+      connectionModeConfirmed: hasStoredConfirmation ? stored.connectionModeConfirmed : true,
+    };
+    if (!hasStoredConfirmation) {
+      await chrome.storage.local.set({ connectionModeConfirmed: true });
+    }
+    return migrated;
+  }
+
+  const normalizedApiBase = normalizeLocalApiBase(stored.apiBase || DEFAULTS.apiBase);
+  const port = BossLocalWebIntake.getApiPort(normalizedApiBase);
+  const connectionMode = port === BossLocalWebIntake.WEB_INTAKE_PORT ? "web" : "desktop";
+  const connectionModeConfirmed = [BossLocalWebIntake.WEB_INTAKE_PORT, BossLocalWebIntake.DESKTOP_COMPAT_PORT].includes(port);
+  await chrome.storage.local.set({
+    apiBase: normalizedApiBase,
+    connectionMode,
+    connectionModeConfirmed,
+  });
+  return {
+    ...stored,
+    apiBase: normalizedApiBase,
+    connectionMode,
+    connectionModeConfirmed,
+  };
+}
+
+async function switchToDesktopCompatibilityMode() {
+  if (activeConnectionMode === "desktop" && activeConnectionModeConfirmed) {
+    return;
+  }
+  activeConnectionMode = "desktop";
+  activeConnectionModeConfirmed = true;
+  lastCompletedWebBatch = null;
+  await chrome.storage.local.set({
+    connectionMode: "desktop",
+    connectionModeConfirmed: true,
+  });
+  syncConnectionControls();
+  syncModeHints();
+  updateBatchDownloadButton();
+}
+
 async function init() {
-  const stored = await chrome.storage.local.get({
+  let stored = await chrome.storage.local.get({
     ...DEFAULTS,
     scrollWaitDefaultVersion: null,
     scrollModeDefaultVersion: null,
   });
+  stored = await migrateStoredConnectionMode(stored);
   if (stored.scrollWaitDefaultVersion === null && Number(stored.scrollWaitMs) === OLD_DEFAULT_SCROLL_WAIT_MS) {
     stored.scrollWaitMs = DEFAULTS.scrollWaitMs;
     await chrome.storage.local.set({
@@ -138,10 +195,12 @@ async function init() {
       }
     }
   }
-  syncConnectionControls();
   activeJobProfileId = stored.jobProfileId === null ? null : Number(stored.jobProfileId);
   activeRecruitmentTaskId = stored.recruitmentTaskId === null ? null : Number(stored.recruitmentTaskId);
   activeConnectionMode = BossLocalWebIntake.normalizeConnectionMode(stored.connectionMode);
+  activeConnectionModeConfirmed = stored.connectionModeConfirmed !== false;
+  syncConnectionControls();
+  syncModeHints();
   lastCompletedBatchId = stored.lastCompletedBatchId === null ? null : Number(stored.lastCompletedBatchId);
   lastCompletedBatchConnection = stored.lastCompletedBatchConnection || null;
   if (!BossLocalBatchExport.batchBelongsToConnection(lastCompletedBatchConnection, collectSettings())) {
@@ -245,6 +304,7 @@ async function applyPairingCodeAndTest() {
         apiBase: pairingApiBase,
         apiToken: String(payload.api_token || ""),
         connectionMode: BossLocalWebIntake.normalizeConnectionMode(pairing.connectionMode) || "web",
+        connectionModeConfirmed: true,
       };
     } else {
       verifiedSettings = {
@@ -252,12 +312,14 @@ async function applyPairingCodeAndTest() {
         apiBase: normalizeLocalApiBase(pairing.apiBase),
         apiToken: pairing.apiToken,
         connectionMode: BossLocalWebIntake.normalizeConnectionMode(pairing.connectionMode) || "desktop",
+        connectionModeConfirmed: true,
       };
     }
     await testLocalApiConnection(verifiedSettings);
     fields.apiBase.value = verifiedSettings.apiBase;
     fields.apiToken.value = verifiedSettings.apiToken;
     activeConnectionMode = BossLocalWebIntake.normalizeConnectionMode(verifiedSettings.connectionMode);
+    activeConnectionModeConfirmed = verifiedSettings.connectionModeConfirmed !== false;
     if (!BossLocalBatchExport.batchBelongsToConnection(lastCompletedBatchConnection, verifiedSettings)) {
       lastCompletedBatchId = null;
       lastCompletedBatchConnection = null;
@@ -266,6 +328,7 @@ async function applyPairingCodeAndTest() {
       apiBase: fields.apiBase.value,
       apiToken: fields.apiToken.value,
       connectionMode: activeConnectionMode,
+      connectionModeConfirmed: activeConnectionModeConfirmed,
       lastCompletedBatchId,
       lastCompletedBatchConnection,
     });
@@ -422,7 +485,7 @@ async function openWebWorkbench() {
   const settings = collectSettings();
   const url = `${BossLocalWebIntake.deriveWebApiBase(settings)}/`;
   if (!isWebWorkbenchMode(settings)) {
-    setStatus("褰撳墠鏄棫妗岄潰鍏煎妯″紡銆傚皢鎵撳紑榛樿缃戦〉宸ヤ綔鍙?17864 鍏ュ彛锛涘鏋滀綘鐨勭綉椤靛伐浣滃彴浣跨敤鑷畾涔夌鍙ｏ紝璇蜂娇鐢ㄧ綉椤佃繛鎺ョ爜閲嶆柊閰嶅銆?");
+    setStatus("当前是旧桌面兼容模式。将打开默认网页工作台 17864 入口；如果网页工作台使用自定义端口，请使用网页连接码重新配对。");
   }
   try {
     const response = await fetch(`${url}api/health`);
@@ -1010,6 +1073,7 @@ function collectSettings() {
     apiBase,
     apiToken: fields.apiToken.value.trim(),
     connectionMode: activeConnectionMode,
+    connectionModeConfirmed: activeConnectionModeConfirmed,
     scrollMode: fields.scrollMode.value,
     scrollStep: Number(fields.scrollStep.value || DEFAULTS.scrollStep),
     scrollWaitMs: Math.max(Number(fields.scrollWaitMs.value || DEFAULTS.scrollWaitMs), 0),

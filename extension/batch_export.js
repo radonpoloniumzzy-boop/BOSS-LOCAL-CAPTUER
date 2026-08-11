@@ -1,11 +1,7 @@
 (function initBatchExport(global) {
-  function normalizeConnectionMode(value, apiBase) {
+  function normalizeConnectionMode(value) {
     const mode = String(value || "").trim().toLowerCase();
-    if (mode === "web" || mode === "desktop") {
-      return mode;
-    }
-    const normalizedApiBase = normalizeApiBase(apiBase);
-    return normalizedApiBase.endsWith(":17864") ? "web" : "desktop";
+    return mode === "web" || mode === "desktop" ? mode : "";
   }
 
   function normalizeApiBase(value) {
@@ -28,13 +24,15 @@
     if (!batchConnection || !currentConnection) {
       return false;
     }
+    const batchMode = normalizeConnectionMode(batchConnection.connectionMode);
+    const currentMode = normalizeConnectionMode(currentConnection.connectionMode);
+    if (!batchMode || !currentMode) {
+      return false;
+    }
     return (
-      normalizeConnectionMode(batchConnection.connectionMode, batchConnection.apiBase)
-        === normalizeConnectionMode(currentConnection.connectionMode, currentConnection.apiBase)
-      && (
-      normalizeApiBase(batchConnection.apiBase) === normalizeApiBase(currentConnection.apiBase)
+      batchMode === currentMode
+      && normalizeApiBase(batchConnection.apiBase) === normalizeApiBase(currentConnection.apiBase)
       && String(batchConnection.apiToken || "") === String(currentConnection.apiToken || "")
-      )
     );
   }
 

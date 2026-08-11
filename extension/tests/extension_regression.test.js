@@ -235,8 +235,8 @@ function createPopupTestContext(options = {}) {
         source_candidate_id: "boss-1",
         platform_uid: "boss:1",
         detail_url: "https://www.zhipin.com/candidate/1",
-        raw_card_text: "候选人 A",
-        name: "候选人 A",
+        raw_card_text: "鍊欓€変汉 A",
+        name: "鍊欓€変汉 A",
       },
     ],
     meta: { platform: "boss", rounds_completed: 2 },
@@ -283,7 +283,7 @@ function createPopupTestContext(options = {}) {
   elements.chatAutomationEnabled.type = "checkbox";
   elements.apiBase.value = String(options.initialApiBase || options.apiBase || "http://127.0.0.1:17863");
   elements.apiToken.value = String(options.initialApiToken || options.apiToken || "token");
-  elements.jobTitle.value = String(options.jobTitle || store.jobTitle || "Boss 推荐牛人");
+  elements.jobTitle.value = String(options.jobTitle || store.jobTitle || "Boss 鎺ㄨ崘鐗涗汉");
   elements.scrollMode.value = "hold_end";
   elements.scrollStep.value = "900";
   elements.scrollWaitMs.value = "30";
@@ -294,7 +294,7 @@ function createPopupTestContext(options = {}) {
   elements.pollIntervalMs.value = "2000";
   elements.batchActionDelaySeconds.value = "5";
   elements.maxBatchSessions.value = "50";
-  elements.webIntakeStatus.textContent = "网页入库：等待发送。";
+  elements.webIntakeStatus.textContent = "网页入库：等待发送";
 
   const chrome = {
     storage: {
@@ -405,9 +405,13 @@ function createPopupTestContext(options = {}) {
         if (!previous || !next) {
           return false;
         }
+        const previousMode = String(previous.connectionMode || "").trim().toLowerCase();
+        const nextMode = String(next.connectionMode || "").trim().toLowerCase();
+        if (!previousMode || !nextMode) {
+          return false;
+        }
         return (
-          String(previous.connectionMode || (String(previous.apiBase || "").includes(":17864") ? "web" : "desktop"))
-            === String(next.connectionMode || (String(next.apiBase || "").includes(":17864") ? "web" : "desktop"))
+          previousMode === nextMode
           && (
           String(previous.apiBase || "").replace(/\/+$/, "") === String(next.apiBase || "").replace(/\/+$/, "")
           && String(previous.apiToken || "") === String(next.apiToken || "")
@@ -594,7 +598,7 @@ async function testHtmlPreviewPageIsNotDownloadedAsPdf() {
 
   assert.strictEqual(result.ok, false);
   assert.strictEqual(chrome.__downloadCalls.length, 0);
-  assert(String(result.error || "").includes("不是 PDF"));
+  assert(String(result.error || "").includes("不是 PDF 文件"));
   const status = await api.getBatchStatus();
   assert(status.runtimeLogs.some((line) => line.includes("url is not pdf after probe")));
 }
@@ -867,7 +871,7 @@ function loadRemoteControlForBehaviorTest() {
           return [
             {
               result: {
-                cards: [{ platform_uid: "boss-1", raw_card_text: "候选人 A" }],
+                cards: [{ platform_uid: "boss-1", raw_card_text: "鍊欓€変汉 A" }],
                 meta: { platform: "boss", rounds_completed: 2 },
                 frameUrl: "https://www.zhipin.com/web/geek/recommend",
               },
@@ -892,7 +896,7 @@ function loadRemoteControlForBehaviorTest() {
               task_id: 12,
               platform: "boss",
               source_url: "https://www.zhipin.com/web/geek/recommend",
-              job_title: "招聘顾问",
+              job_title: "鎷涜仒椤鹃棶",
             },
           };
         },
@@ -1083,8 +1087,12 @@ async function testPopupPairsAndUsesConfiguredWebPortEndToEnd() {
     runtimeHandler: createPopupWebRuntimeHandler(),
     fetchImpl: popup.context.fetch,
   });
+  reopened.context.BossLocalWebIntake.inferStoredConnectionMode = () => {
+    throw new Error("runtime mode inference should not be called after migration");
+  };
   await reopened.api.init();
   assert.strictEqual(reopened.store.connectionMode, "web");
+  assert.strictEqual(reopened.store.connectionModeConfirmed, true);
   assert.strictEqual(reopened.elements.apiBase.value, "http://127.0.0.1:19064");
   await reopened.api.runCollection(false);
   assert(reopened.fetchCalls.some((call) => call.url === "http://127.0.0.1:19064/api/intake/candidates"));
@@ -1182,6 +1190,65 @@ async function testPopupDesktopCustomPortRemainsDesktopMode() {
     popup.api.isWebWorkbenchMode({ apiBase: "http://127.0.0.1:19001", apiToken: "desktop-custom-token", connectionMode: "desktop" }),
     false,
   );
+}
+
+async function testPopupManualDesktopAdvancedSettingsOverrideWebMode() {
+  const popup = createPopupTestContext({
+    store: {
+      apiBase: "http://127.0.0.1:19064",
+      apiToken: "web-token",
+      connectionMode: "web",
+      connectionModeConfirmed: true,
+      jobTitle: "Manual Desktop Override",
+    },
+    fetchImpl: async (url) => {
+      const textUrl = String(url);
+      if (textUrl.endsWith("/api/connection/check")) {
+        return { ok: true, status: 200, async json() { return { ok: true }; } };
+      }
+      if (textUrl.endsWith("/api/extension/config")) {
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return {
+              ok: true,
+              result: {
+                job_profile_id: 22,
+                recruitment_task_id: 41,
+                job_title: "Desktop Override",
+              },
+            };
+          },
+        };
+      }
+      if (textUrl.endsWith("/api/import/cards")) {
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return { ok: true, result: { batch_id: 905, parsed_cards: 1, total_batch_items: 1 } };
+          },
+        };
+      }
+      throw new Error(`Unexpected fetch: ${textUrl}`);
+    },
+  });
+  await popup.api.init();
+  popup.elements.apiBase.value = "http://127.0.0.1:19001";
+  popup.elements.apiBase.listeners.input();
+  popup.elements.apiToken.value = "desktop-token";
+  popup.elements.apiToken.listeners.input();
+
+  assert.strictEqual(popup.store.connectionMode, "desktop");
+  assert.strictEqual(popup.store.connectionModeConfirmed, true);
+  assert.strictEqual(popup.elements.applyPairingCode.textContent, "连接并记住");
+
+  await popup.api.applyPairingCodeAndTest();
+  await popup.api.runCollection(false);
+  assert(popup.fetchCalls.some((call) => call.url === "http://127.0.0.1:19001/api/connection/check"));
+  assert(popup.fetchCalls.some((call) => call.url === "http://127.0.0.1:19001/api/import/cards"));
+  assert(!popup.fetchCalls.some((call) => call.url.endsWith("/api/intake/candidates")));
 }
 
 async function testPopupWebModeCollectCurrentPostsDirectlyToWebIntake() {
@@ -1875,17 +1942,71 @@ async function testLegacyStorageConnectionModeMigrationRules() {
     runtimeHandler: createPopupWebRuntimeHandler(),
   });
   const identity = popup.context.BossLocalWebIntakeIdentity;
-  assert.strictEqual(identity.resolveConnectionMode({ apiBase: "http://127.0.0.1:17863" }), "desktop");
-  assert.strictEqual(identity.resolveConnectionMode({ apiBase: "http://127.0.0.1:17864" }), "web");
-  assert.strictEqual(identity.resolveConnectionMode({ apiBase: "http://127.0.0.1:19001" }), "desktop");
-  assert.strictEqual(identity.needsConnectionModeConfirmation({ apiBase: "http://127.0.0.1:19001" }), true);
-  assert.strictEqual(identity.needsConnectionModeConfirmation({ apiBase: "http://127.0.0.1:17863" }), false);
-  assert.strictEqual(identity.needsConnectionModeConfirmation({ apiBase: "http://127.0.0.1:17864" }), false);
+  assert.strictEqual(identity.resolveConnectionMode({ apiBase: "http://127.0.0.1:17863" }), "");
+  assert.strictEqual(identity.resolveConnectionMode({ apiBase: "http://127.0.0.1:17864" }), "");
+  assert.strictEqual(identity.resolveConnectionMode({ apiBase: "http://127.0.0.1:19001" }), "");
+  assert.strictEqual(identity.needsConnectionModeConfirmation({ connectionModeConfirmed: false }), true);
+  assert.strictEqual(identity.needsConnectionModeConfirmation({ connectionModeConfirmed: true }), false);
 
-  await popup.api.refreshWebIntakeStatus({ apiBase: "http://127.0.0.1:19001", apiToken: "legacy-custom-token", jobTitle: "Legacy Custom" });
-  assert(popup.elements.webIntakeStatus.textContent.includes("请重新配对以确认连接模式"));
+  await popup.api.init();
+
+  assert.strictEqual(popup.store.connectionMode, "desktop");
+  assert.strictEqual(popup.store.connectionModeConfirmed, false);
+  assert.strictEqual(popup.elements.apiBase.value, "http://127.0.0.1:19001");
+  assert(popup.elements.webIntakeStatus.textContent.includes("请重新配对以确认连接模式。"));
 }
 
+async function testLegacyStorageDefaultPortsMigrateOnce() {
+  const webPopup = createPopupTestContext({
+    store: { apiBase: "http://127.0.0.1:17864", apiToken: "legacy-web-token" },
+    runtimeHandler: createPopupWebRuntimeHandler(),
+  });
+  await webPopup.api.init();
+  assert.strictEqual(webPopup.store.connectionMode, "web");
+  assert.strictEqual(webPopup.store.connectionModeConfirmed, true);
+
+  webPopup.context.BossLocalWebIntake.inferStoredConnectionMode = () => {
+    throw new Error("legacy port inference should not run after migration");
+  };
+  await webPopup.api.refreshWebIntakeStatus(webPopup.api.collectSettings());
+
+  const desktopPopup = createPopupTestContext({
+    store: { apiBase: "http://127.0.0.1:17863", apiToken: "legacy-desktop-token" },
+    runtimeHandler: createPopupWebRuntimeHandler(),
+  });
+  await desktopPopup.api.init();
+  assert.strictEqual(desktopPopup.store.connectionMode, "desktop");
+  assert.strictEqual(desktopPopup.store.connectionModeConfirmed, true);
+}
+
+async function testDesktopModeOpenWorkbenchShowsReadableChinesePrompt() {
+  const popup = createPopupTestContext({
+    apiBase: "http://127.0.0.1:19001",
+    apiToken: "desktop-token",
+    connectionMode: "desktop",
+    fetchImpl: async (url) => {
+      if (url === "http://127.0.0.1:17864/api/health") {
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return { service: "boss-local-web", status: "ok" };
+          },
+        };
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    },
+  });
+
+  await popup.api.openWebWorkbench();
+
+  assert(
+    popup.elements.status.textContent.includes(
+      "当前是旧桌面兼容模式。将打开默认网页工作台 17864 入口；如果网页工作台使用自定义端口，请使用网页连接码重新配对。",
+    ),
+  );
+  assert.strictEqual(popup.tabCreates[0]?.url, "http://127.0.0.1:17864/");
+}
 async function testConnectionModeKeepsWebAndDesktopStateIsolated() {
   const popup = createPopupTestContext({
     apiBase: "http://127.0.0.1:17864",
@@ -2147,6 +2268,7 @@ async function testPopupReopenRestoresWebBatchMarkdownExport() {
   const connection = await popup.context.BossLocalWebIntake.connectionIdentity({
     apiBase: store.apiBase,
     apiToken: store.apiToken,
+    connectionMode: "web",
   });
   const batchKey = "reopen-web-batch-160";
   store[`${popup.context.BossLocalWebIntake.COMPLETED_PREFIX}${batchKey}`] = {
@@ -2709,6 +2831,7 @@ async function testLegacyWarningRemainsVisibleAlongsideCurrentCompleted() {
   const settings = {
     apiBase: sharedStore.apiBase,
     apiToken: sharedStore.apiToken,
+    connectionMode: "web",
     jobTitle: "Legacy Popup",
   };
   const stableHash = popup.context.BossLocalWebIntake.stableHash;
@@ -2817,6 +2940,7 @@ async function testLegacyWarningRemainsVisibleAlongsideCurrentWaitingRetry() {
   const settings = {
     apiBase: sharedStore.apiBase,
     apiToken: sharedStore.apiToken,
+    connectionMode: "web",
     jobTitle: "Legacy Popup Retry",
   };
   const stableHash = popup.context.BossLocalWebIntake.stableHash;
@@ -2957,6 +3081,7 @@ async function testLegacyWarningDisappearsAfterSwitchingBackAndMigrating() {
   const originalSettings = {
     apiBase: sharedStore.apiBase,
     apiToken: sharedStore.apiToken,
+    connectionMode: "web",
     jobTitle: "Legacy Popup Switch",
   };
   await popup.api.refreshWebIntakeStatus(originalSettings);
@@ -3026,6 +3151,8 @@ async function main() {
   await testServiceWorkerRestoresPendingBatchViaAlarm();
   testWebIntakeIdentityUsesFullFieldsInsteadOfShortHash();
   await testLegacyStorageConnectionModeMigrationRules();
+  await testLegacyStorageDefaultPortsMigrateOnce();
+  await testDesktopModeOpenWorkbenchShowsReadableChinesePrompt();
   await testConnectionModeKeepsWebAndDesktopStateIsolated();
   testCollectorDoesNotPromoteGenericDataIdToPlatformUid();
   await testWebIntakeStatusMatrixFollowsServerStatus();

@@ -50,12 +50,11 @@
   }
 
   function resolveConnectionMode(settings) {
-    return normalizeConnectionMode(settings?.connectionMode) || inferStoredConnectionMode(settings?.apiBase || "");
+    return normalizeConnectionMode(settings?.connectionMode);
   }
 
   function needsConnectionModeConfirmation(settings) {
-    return !normalizeConnectionMode(settings?.connectionMode)
-      && ![WEB_INTAKE_PORT, DESKTOP_COMPAT_PORT].includes(getApiPort(settings?.apiBase || ""));
+    return settings?.connectionModeConfirmed === false;
   }
 
   function isWebWorkbenchMode(settings) {
@@ -64,7 +63,7 @@
 
   function deriveWebApiBase(settingsOrApiBase) {
     if (settingsOrApiBase && typeof settingsOrApiBase === "object") {
-      if (resolveConnectionMode(settingsOrApiBase) === "web") {
+      if (normalizeConnectionMode(settingsOrApiBase.connectionMode) === "web") {
         return normalizeApiBase(settingsOrApiBase.apiBase || DEFAULT_WEB_API_BASE);
       }
       return DEFAULT_WEB_API_BASE;
