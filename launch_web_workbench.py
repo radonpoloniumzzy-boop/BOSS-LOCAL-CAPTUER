@@ -267,6 +267,8 @@ class LaunchWindow:
         self.message.set(str(failure))
         self.hint.set("你可以先看恢复说明，再点击“重新检查”。")
         self.append_detail(f"启动失败：{failure}")
+        if failure.diagnostic:
+            self.logger.write(f"诊断：{failure.diagnostic}")
         self.retry_button.configure(state="normal")
         self.help_button.configure(state="normal")
         self.close_button.configure(state="normal", text="关闭")

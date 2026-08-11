@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import re
+import socket
 import subprocess
 import tempfile
 import threading
@@ -30,7 +32,9 @@ from web.backend.workbench_launcher import (
     STEP_READ_CONFIG,
     StartupCancellationGate,
     WorkbenchLauncher,
+    _build_background_process_kwargs,
     _frontend_assets_ready,
+    _port_in_use,
     _request_json,
     create_default_launcher,
 )
@@ -466,6 +470,15 @@ class WorkbenchLauncherBehaviorTest(unittest.TestCase):
             "capabilities": WEB_CAPABILITIES,
         }
 
+    @staticmethod
+    def reserve_port() -> int:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        probe.bind(("127.0.0.1", 0))
+        try:
+            return int(probe.getsockname()[1])
+        finally:
+            probe.close()
+
     def build_fake_launch_window(self, launcher_factory):
         root = self.FakeRoot()
         patches = [
@@ -648,6 +661,105 @@ class WorkbenchLauncherBehaviorTest(unittest.TestCase):
             launcher = create_default_launcher(root, lambda _message: None, bootstrap_store=store)
             self.assertEqual(launcher.port, 19064)
             self.assertEqual(launcher.url, "http://127.0.0.1:19064/")
+
+    def test_pythonw_background_process_contract_uses_safe_streams(self) -> None:
+        pythonw = Path(r"C:\Python311\pythonw.exe")
+        kwargs = _build_background_process_kwargs(pythonw)
+        self.assertEqual(kwargs["creationflags"], getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        self.assertIs(kwargs["stdin"], subprocess.DEVNULL)
+        self.assertIs(kwargs["stdout"], subprocess.DEVNULL)
+        self.assertIs(kwargs["stderr"], subprocess.DEVNULL)
+
+    def test_real_pythonw_process_contract_can_serve_health_without_early_exit(self) -> None:
+        pythonw = Path(__file__).resolve().parents[1] / ".venv" / "Scripts" / "pythonw.exe"
+        if not pythonw.is_file():
+            self.skipTest("pythonw.exe unavailable")
+
+        with tempfile.TemporaryDirectory() as temp:
+            temp_root = Path(temp)
+            port = self.reserve_port()
+            server_script = temp_root / "probe_server.py"
+            server_script.write_text(
+                """
+import json
+import sys
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+PORT = int(sys.argv[1])
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/api/health":
+            payload = {
+                "status": "ok",
+                "service": "recruiting-talent-workbench",
+                "capabilities": ["phase2c_pairing", "batch_markdown_export"],
+            }
+        elif self.path == "/api/app/status":
+            payload = {"status": "ready", "database_ready": True}
+        else:
+            self.send_response(404)
+            self.end_headers()
+            return
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        return
+
+ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
+                """.strip(),
+                encoding="utf-8",
+            )
+
+            opened: list[str] = []
+
+            def process_start():
+                return subprocess.Popen(
+                    [str(pythonw), str(server_script), str(port)],
+                    cwd=temp_root,
+                    **_build_background_process_kwargs(pythonw),
+                )
+
+            launcher = WorkbenchLauncher(
+                service_probe=_request_json,
+                status_probe=_request_json,
+                port_in_use=_port_in_use,
+                process_start=process_start,
+                browser_open=lambda url: opened.append(url) or True,
+                wait=time.sleep,
+                frontend_ready=lambda: True,
+                attempts=30,
+                port=port,
+            )
+
+            try:
+                self.assertEqual(launcher.launch(), "started")
+                self.assertEqual(opened, [f"http://127.0.0.1:{port}/"])
+                self.assertEqual(
+                    _request_json(f"http://127.0.0.1:{port}/api/health"),
+                    self.current_health(),
+                )
+                self.assertEqual(
+                    _request_json(f"http://127.0.0.1:{port}/api/app/status"),
+                    {"status": "ready", "database_ready": True},
+                )
+                process = launcher._started_process
+                self.assertIsNotNone(process)
+                self.assertIsNone(process.poll())
+            finally:
+                process = launcher._started_process
+                if process is not None:
+                    launcher._stop_process(process)
+                    launcher._started_process = None
+                deadline = time.time() + 3
+                while time.time() < deadline and _port_in_use(port):
+                    time.sleep(0.05)
+                self.assertFalse(_port_in_use(port))
 
     def test_default_launcher_reports_invalid_bootstrap_without_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

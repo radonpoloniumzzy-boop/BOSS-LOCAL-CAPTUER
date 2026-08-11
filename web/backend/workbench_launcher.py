@@ -76,9 +76,17 @@ RECOVERY_GUIDES = {
 
 
 class LaunchFailure(RuntimeError):
-    def __init__(self, code: str, *, port: int = 17864, step: str | None = None) -> None:
+    def __init__(
+        self,
+        code: str,
+        *,
+        port: int = 17864,
+        step: str | None = None,
+        diagnostic: str | None = None,
+    ) -> None:
         self.code = code
         self.step = step
+        self.diagnostic = diagnostic
         self.recovery = RECOVERY_GUIDES.get(code, RECOVERY_GUIDES["service_start_failed"])
         template = RECOVERY_MESSAGES.get(code, RECOVERY_MESSAGES["service_start_failed"])
         super().__init__(template.format(port=port))
@@ -151,6 +159,27 @@ def _port_in_use(port: int) -> bool:
         return probe.connect_ex(("127.0.0.1", port)) == 0
     finally:
         probe.close()
+
+
+def _write_launcher_diagnostic(line: str) -> None:
+    try:
+        path = BootstrapStore().path.parent / "logs" / "web-launcher.log"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(line.strip() + "\n")
+    except OSError:
+        return
+
+
+def _build_background_process_kwargs(python_executable: Path) -> dict[str, object]:
+    if python_executable.name.lower() == "pythonw.exe":
+        return {
+            "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+        }
+    return {}
 
 
 class WorkbenchLauncher:
@@ -242,6 +271,25 @@ class WorkbenchLauncher:
             detail = str(LaunchFailure("service_start_failed", port=self.port, step=STEP_CONFIRM_DATABASE))
             self._emit(STEP_CONFIRM_DATABASE, "failed", detail)
 
+    def _service_exit_failure(self, process: object, *, confirm_started: bool) -> LaunchFailure:
+        exit_code = getattr(process, "returncode", None)
+        if exit_code is None:
+            try:
+                exit_code = getattr(process, "poll", lambda: None)()
+            except (OSError, subprocess.SubprocessError):
+                exit_code = None
+        stage = "health" if not confirm_started else "database_confirm"
+        diagnostic = (
+            f"子进程在 {stage} 阶段前退出；exit_code={exit_code if exit_code is not None else 'unknown'}"
+        )
+        _write_launcher_diagnostic(diagnostic)
+        return LaunchFailure(
+            "service_start_failed",
+            port=self.port,
+            step=STEP_CONNECT_DATABASE if not confirm_started else STEP_CONFIRM_DATABASE,
+            diagnostic=diagnostic,
+        )
+
     @staticmethod
     def _database_result(status: dict[str, object] | None) -> tuple[str, str | None]:
         if status is None:
@@ -314,7 +362,7 @@ class WorkbenchLauncher:
             if getattr(process, "poll", lambda: None)() is not None:
                 self._reap_exited_process(process)
                 self._started_process = None
-                raise LaunchFailure("service_start_failed", port=self.port, step=STEP_CONNECT_DATABASE)
+                raise self._service_exit_failure(process, confirm_started=confirm_started)
             service_kind = self._service_kind(self.service_probe(f"{self.url}api/health"))
             if service_kind == "stale":
                 self._stop_process(process)
@@ -404,11 +452,10 @@ def create_default_launcher(
     progress(progress_event(STEP_CHECK_RUNTIME, "completed", "运行环境检查完成"))
 
     def start_process():
-        creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         return subprocess.Popen(
             [str(pythonw), str(project_root / "web_app.py")],
             cwd=project_root,
-            creationflags=creation_flags,
+            **_build_background_process_kwargs(pythonw),
         )
 
     cancel_if_requested(STEP_CHECK_RUNTIME)
