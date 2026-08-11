@@ -16,13 +16,22 @@ from core.bootstrap import BootstrapConfigurationError, BootstrapStore
 
 
 REQUIRED_CAPABILITIES = frozenset({"phase2c_pairing", "batch_markdown_export"})
-STEP_READ_CONFIG = "正在读取本机配置"
-STEP_CHECK_RUNTIME = "正在检查运行环境"
-STEP_CHECK_FRONTEND = "正在检查网页资源"
-STEP_CHECK_PORT = "正在检查端口和已有服务"
-STEP_CONNECT_DATABASE = "正在连接人才库"
-STEP_CONFIRM_DATABASE = "正在确认数据库状态"
-STEP_OPEN_BROWSER = "正在打开浏览器"
+STEP_READ_CONFIG = "read_config"
+STEP_CHECK_RUNTIME = "check_runtime"
+STEP_CHECK_FRONTEND = "check_frontend"
+STEP_CHECK_PORT = "check_port"
+STEP_CONNECT_DATABASE = "connect_database"
+STEP_CONFIRM_DATABASE = "confirm_database"
+STEP_OPEN_BROWSER = "open_browser"
+STEP_LABELS = {
+    STEP_READ_CONFIG: "正在读取本机配置",
+    STEP_CHECK_RUNTIME: "正在检查运行环境",
+    STEP_CHECK_FRONTEND: "正在检查网页资源",
+    STEP_CHECK_PORT: "正在检查端口和已有服务",
+    STEP_CONNECT_DATABASE: "正在连接人才库",
+    STEP_CONFIRM_DATABASE: "正在确认数据库状态",
+    STEP_OPEN_BROWSER: "正在打开浏览器",
+}
 
 
 class _FrontendAssetParser(HTMLParser):
@@ -40,7 +49,7 @@ class _FrontendAssetParser(HTMLParser):
 
 RECOVERY_MESSAGES = {
     "port_in_use": "本地端口 {port} 已被其他程序占用。请关闭占用程序后重新启动网页工作台。",
-    "stale_service": "旧版网页工作台仍在运行。请关闭旧实例后重新启动。",
+    "stale_service": "检测到旧版网页工作台仍在运行，请关闭旧实例后重新启动。",
     "frontend_missing": "网页工作台前端资源不完整，请重新安装完整版本后再启动。",
     "bootstrap_invalid": "网页工作台启动配置损坏或无法读取，请检查 bootstrap.json 后重新启动。",
     "configured_database_missing": "已配置的人才库文件不存在。请检查 D 盘、移动盘或数据库文件位置，恢复后重新启动。",
@@ -66,11 +75,26 @@ RECOVERY_GUIDES = {
 
 
 class LaunchFailure(RuntimeError):
-    def __init__(self, code: str, *, port: int = 17864) -> None:
+    def __init__(self, code: str, *, port: int = 17864, step: str | None = None) -> None:
         self.code = code
+        self.step = step
         self.recovery = RECOVERY_GUIDES.get(code, RECOVERY_GUIDES["service_start_failed"])
         template = RECOVERY_MESSAGES.get(code, RECOVERY_MESSAGES["service_start_failed"])
         super().__init__(template.format(port=port))
+
+
+class LaunchCancelled(RuntimeError):
+    def __init__(self, *, step: str | None = None) -> None:
+        self.step = step
+        super().__init__("启动已取消")
+
+
+def progress_event(step: str, state: str, detail: str | None = None) -> dict[str, str]:
+    return {
+        "step": step,
+        "state": state,
+        "detail": detail or STEP_LABELS[step],
+    }
 
 
 def _request_json(url: str) -> dict[str, object] | None:
@@ -106,10 +130,11 @@ class WorkbenchLauncher:
         process_start: Callable[[], object],
         browser_open: Callable[[str], object],
         wait: Callable[[float], None],
-        progress: Callable[[str], None] | None = None,
+        progress: Callable[[dict[str, str]], None] | None = None,
         attempts: int = 50,
         port: int = 17864,
         frontend_ready: Callable[[], bool] | None = None,
+        cancel_requested: Callable[[], bool] | None = None,
     ) -> None:
         self.service_probe = service_probe
         self.status_probe = status_probe
@@ -117,11 +142,16 @@ class WorkbenchLauncher:
         self.process_start = process_start
         self.browser_open = browser_open
         self.wait = wait
-        self.progress = progress or (lambda _message: None)
+        self.progress = progress or (lambda _event: None)
         self.attempts = attempts
         self.port = int(port)
         self.url = f"http://127.0.0.1:{self.port}/"
         self.frontend_ready = frontend_ready or (lambda: True)
+        self.cancel_requested = cancel_requested or (lambda: False)
+        self._started_process: object | None = None
+
+    def _emit(self, step: str, state: str, detail: str | None = None) -> None:
+        self.progress(progress_event(step, state, detail))
 
     @staticmethod
     def _service_kind(payload: dict[str, object] | None) -> str:
@@ -160,45 +190,74 @@ class WorkbenchLauncher:
         except (OSError, subprocess.SubprocessError):
             pass
 
+    def _cancel_if_requested(self, *, step: str) -> None:
+        if not self.cancel_requested():
+            return
+        if self._started_process is not None:
+            self._stop_process(self._started_process)
+            self._started_process = None
+        raise LaunchCancelled(step=step)
+
+    def _open_browser(self) -> None:
+        self._cancel_if_requested(step=STEP_OPEN_BROWSER)
+        self._emit(STEP_OPEN_BROWSER, "running")
+        opened = self.browser_open(self.url)
+        if opened is False:
+            raise LaunchFailure("service_start_failed", port=self.port, step=STEP_OPEN_BROWSER)
+        self._emit(STEP_OPEN_BROWSER, "completed", "浏览器已打开网页工作台")
+
     def launch(self) -> str:
-        self.progress(STEP_CHECK_PORT)
+        self._cancel_if_requested(step=STEP_CHECK_PORT)
+        self._emit(STEP_CHECK_PORT, "running")
         service_kind = self._service_kind(self.service_probe(f"{self.url}api/health"))
         if service_kind == "stale":
-            raise LaunchFailure("stale_service", port=self.port)
+            raise LaunchFailure("stale_service", port=self.port, step=STEP_CHECK_PORT)
         if service_kind == "current":
-            self.progress("网页工作台已经运行")
-            self.progress(STEP_CONFIRM_DATABASE)
+            self._emit(STEP_CHECK_PORT, "completed", "网页工作台已经运行")
+            self._emit(STEP_CONNECT_DATABASE, "completed", "已连接到正在运行的网页工作台")
+            self._cancel_if_requested(step=STEP_CONFIRM_DATABASE)
+            self._emit(STEP_CONFIRM_DATABASE, "running")
             status = self.status_probe(f"{self.url}api/app/status")
             if status is None:
-                raise LaunchFailure("service_start_failed", port=self.port)
+                raise LaunchFailure("service_start_failed", port=self.port, step=STEP_CONFIRM_DATABASE)
             fault = status.get("error") if isinstance(status, dict) else None
             code = str(fault.get("code") or "") if isinstance(fault, dict) else ""
             if code and code != "database_not_ready":
-                raise LaunchFailure(code, port=self.port)
-            self.progress(STEP_OPEN_BROWSER)
-            self.browser_open(self.url)
+                raise LaunchFailure(code, port=self.port, step=STEP_CONFIRM_DATABASE)
+            self._emit(STEP_CONFIRM_DATABASE, "completed", "人才库状态已确认")
+            self._open_browser()
             return "already_running"
 
-        self.progress(STEP_CHECK_FRONTEND)
+        self._cancel_if_requested(step=STEP_CHECK_FRONTEND)
+        self._emit(STEP_CHECK_FRONTEND, "running")
         if not self.frontend_ready():
-            raise LaunchFailure("frontend_missing", port=self.port)
+            raise LaunchFailure("frontend_missing", port=self.port, step=STEP_CHECK_FRONTEND)
+        self._emit(STEP_CHECK_FRONTEND, "completed", "网页资源检查通过")
         if self.port_in_use(self.port):
-            raise LaunchFailure("port_in_use", port=self.port)
+            raise LaunchFailure("port_in_use", port=self.port, step=STEP_CHECK_PORT)
+        self._emit(STEP_CHECK_PORT, "completed", "端口和已有服务检查完成")
 
-        self.progress(STEP_CONNECT_DATABASE)
-        self.progress(STEP_CONFIRM_DATABASE)
-        self.progress("正在启动本地服务")
+        self._cancel_if_requested(step=STEP_CONNECT_DATABASE)
         process = self.process_start()
-        self.progress("正在等待网页工作台响应")
+        self._started_process = process
+        self._emit(STEP_CONNECT_DATABASE, "running", "本地服务已启动，正在连接人才库")
+        confirm_started = False
         for _ in range(self.attempts):
+            self._cancel_if_requested(step=STEP_CONNECT_DATABASE if not confirm_started else STEP_CONFIRM_DATABASE)
             if getattr(process, "poll", lambda: None)() is not None:
                 self._reap_exited_process(process)
-                raise LaunchFailure("service_start_failed", port=self.port)
+                self._started_process = None
+                raise LaunchFailure("service_start_failed", port=self.port, step=STEP_CONNECT_DATABASE)
             service_kind = self._service_kind(self.service_probe(f"{self.url}api/health"))
             if service_kind == "stale":
                 self._stop_process(process)
-                raise LaunchFailure("stale_service", port=self.port)
+                self._started_process = None
+                raise LaunchFailure("stale_service", port=self.port, step=STEP_CHECK_PORT)
             if service_kind == "current":
+                if not confirm_started:
+                    self._emit(STEP_CONNECT_DATABASE, "completed", "本地服务已连接人才库")
+                    self._emit(STEP_CONFIRM_DATABASE, "running")
+                    confirm_started = True
                 status = self.status_probe(f"{self.url}api/app/status")
                 if status is None:
                     self.wait(0.2)
@@ -207,13 +266,19 @@ class WorkbenchLauncher:
                 code = str(fault.get("code") or "") if isinstance(fault, dict) else ""
                 if code and code != "database_not_ready":
                     self._stop_process(process)
-                    raise LaunchFailure(code, port=self.port)
-                self.progress(STEP_OPEN_BROWSER)
-                self.browser_open(self.url)
+                    self._started_process = None
+                    raise LaunchFailure(code, port=self.port, step=STEP_CONFIRM_DATABASE)
+                self._emit(STEP_CONFIRM_DATABASE, "completed", "人才库状态已确认")
+                self._open_browser()
                 return "started"
             self.wait(0.2)
         self._stop_process(process)
-        raise LaunchFailure("service_start_failed", port=self.port)
+        self._started_process = None
+        raise LaunchFailure(
+            "service_start_failed",
+            port=self.port,
+            step=STEP_CONFIRM_DATABASE if confirm_started else STEP_CONNECT_DATABASE,
+        )
 
 
 def _frontend_assets_ready(project_root: Path) -> bool:
@@ -235,21 +300,24 @@ def _frontend_assets_ready(project_root: Path) -> bool:
 
 def create_default_launcher(
     project_root: Path,
-    progress: Callable[[str], None],
+    progress: Callable[[dict[str, str]], None],
     *,
     bootstrap_store: BootstrapStore | None = None,
+    cancel_requested: Callable[[], bool] | None = None,
 ) -> WorkbenchLauncher:
-    progress(STEP_READ_CONFIG)
+    progress(progress_event(STEP_READ_CONFIG, "running"))
     try:
         configured = (bootstrap_store or BootstrapStore()).load()
     except BootstrapConfigurationError as exc:
-        raise LaunchFailure("bootstrap_invalid") from exc
+        raise LaunchFailure("bootstrap_invalid", step=STEP_READ_CONFIG) from exc
     port = configured.web_port if configured else 17864
+    progress(progress_event(STEP_READ_CONFIG, "completed", "本机配置读取完成"))
 
-    progress(STEP_CHECK_RUNTIME)
+    progress(progress_event(STEP_CHECK_RUNTIME, "running"))
     pythonw = project_root / ".venv" / "Scripts" / "pythonw.exe"
     if not pythonw.is_file():
-        raise LaunchFailure("service_start_failed")
+        raise LaunchFailure("service_start_failed", step=STEP_CHECK_RUNTIME)
+    progress(progress_event(STEP_CHECK_RUNTIME, "completed", "运行环境检查完成"))
 
     def start_process():
         creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -269,4 +337,5 @@ def create_default_launcher(
         progress=progress,
         port=port,
         frontend_ready=lambda: _frontend_assets_ready(project_root),
+        cancel_requested=cancel_requested,
     )

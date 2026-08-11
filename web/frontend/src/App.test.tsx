@@ -40,6 +40,14 @@ const pluginDisconnected = {
   data_dir: readyStatus.data_dir,
 };
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
 afterEach(() => vi.restoreAllMocks());
 
 describe("local workbench shell", () => {
@@ -218,5 +226,127 @@ describe("local workbench shell", () => {
 
     expect(await screen.findByRole("heading", { name: "本地服务暂时不可用" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "重新连接" })).toBeInTheDocument();
+  });
+
+  it("does not mark the service check complete before health returns", async () => {
+    const healthRequest = deferred<Response>();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL) => {
+        const url = String(input);
+        if (url === "/api/setup/status") return response({ ...setupRequired, setup_required: false });
+        if (url === "/api/health") return healthRequest.promise;
+        if (url === "/api/app/status") return response(readyStatus);
+        if (url === "/api/plugin-connection/status") return response(pluginDisconnected);
+        throw new Error(`unexpected request: ${url}`);
+      }),
+    );
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "准备进入招聘人才工作台" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "进入工作台" })).toBeDisabled();
+
+    healthRequest.resolve({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve(readyHealth),
+    } as Response);
+
+    expect(await screen.findByRole("button", { name: "进入工作台" })).toBeEnabled();
+  });
+
+  it("does not mark the database check complete before app status returns", async () => {
+    const statusRequest = deferred<Response>();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL) => {
+        const url = String(input);
+        if (url === "/api/setup/status") return response({ ...setupRequired, setup_required: false });
+        if (url === "/api/health") return response(readyHealth);
+        if (url === "/api/app/status") return statusRequest.promise;
+        if (url === "/api/plugin-connection/status") return response(pluginDisconnected);
+        throw new Error(`unexpected request: ${url}`);
+      }),
+    );
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "准备进入招聘人才工作台" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "进入工作台" })).toBeDisabled();
+
+    statusRequest.resolve({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve(readyStatus),
+    } as Response);
+
+    expect(await screen.findByRole("button", { name: "进入工作台" })).toBeEnabled();
+  });
+
+  it("keeps entry disabled when the service name is wrong", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL) => {
+        const url = String(input);
+        if (url === "/api/setup/status") return response({ ...setupRequired, setup_required: false });
+        if (url === "/api/health") return response({ ...readyHealth, service: "another-service" });
+        if (url === "/api/app/status") return response(readyStatus);
+        if (url === "/api/plugin-connection/status") return response(pluginDisconnected);
+        throw new Error(`unexpected request: ${url}`);
+      }),
+    );
+    render(<App />);
+
+    expect(await screen.findByRole("button", { name: "进入工作台" })).toBeDisabled();
+  });
+
+  it("keeps entry disabled when health status is not ok", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL) => {
+        const url = String(input);
+        if (url === "/api/setup/status") return response({ ...setupRequired, setup_required: false });
+        if (url === "/api/health") return response({ ...readyHealth, status: "degraded" });
+        if (url === "/api/app/status") return response(readyStatus);
+        if (url === "/api/plugin-connection/status") return response(pluginDisconnected);
+        throw new Error(`unexpected request: ${url}`);
+      }),
+    );
+    render(<App />);
+
+    expect(await screen.findByRole("button", { name: "进入工作台" })).toBeDisabled();
+  });
+
+  it("keeps entry disabled when required capabilities are missing", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL) => {
+        const url = String(input);
+        if (url === "/api/setup/status") return response({ ...setupRequired, setup_required: false });
+        if (url === "/api/health") return response({ ...readyHealth, capabilities: ["phase2c_pairing"] });
+        if (url === "/api/app/status") return response(readyStatus);
+        if (url === "/api/plugin-connection/status") return response(pluginDisconnected);
+        throw new Error(`unexpected request: ${url}`);
+      }),
+    );
+    render(<App />);
+
+    expect(await screen.findByRole("button", { name: "进入工作台" })).toBeDisabled();
+  });
+
+  it("keeps entry disabled when database_ready is false", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL) => {
+        const url = String(input);
+        if (url === "/api/setup/status") return response({ ...setupRequired, setup_required: false });
+        if (url === "/api/health") return response(readyHealth);
+        if (url === "/api/app/status") return response({ ...readyStatus, database_ready: false });
+        if (url === "/api/plugin-connection/status") return response(pluginDisconnected);
+        throw new Error(`unexpected request: ${url}`);
+      }),
+    );
+    render(<App />);
+
+    expect(await screen.findByRole("button", { name: "进入工作台" })).toBeDisabled();
   });
 });

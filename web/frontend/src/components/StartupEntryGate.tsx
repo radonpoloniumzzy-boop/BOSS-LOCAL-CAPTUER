@@ -148,28 +148,46 @@ export function StartupEntryGate({ onEnter }: StartupEntryGateProps) {
     return REQUIRED_CAPABILITIES.every((item) => health.capabilities.includes(item));
   }, [health]);
 
+  const serviceReady = Boolean(
+    health && health.status === "ok" && health.service === "recruiting-talent-workbench",
+  );
+  const databaseReady = Boolean(status && status.status === "ready" && status.database_ready === true);
+
   const checks = useMemo<CheckItem[]>(() => {
-    const serviceOk = Boolean(health && health.status === "ok" && health.service === "recruiting-talent-workbench");
     const dataDir = status?.data_dir || plugin?.data_dir || "等待检查结果";
 
     return [
       {
         id: "service",
         label: "本地服务是否为正确版本",
-        state: checking && !health ? "checking" : serviceOk ? "ready" : fault?.code === "service_unavailable" ? "failed" : "needs_action",
-        detail: serviceOk ? `已连接 ${health?.version}` : "需要连接到本地网页工作台服务。",
+        state:
+          checking && !health
+            ? "checking"
+            : serviceReady
+              ? "ready"
+              : fault?.code === "service_unavailable"
+                ? "failed"
+                : "needs_action",
+        detail: serviceReady ? `已连接 ${health?.version}` : "需要连接到本地网页工作台服务。",
       },
       {
         id: "capabilities",
         label: "Phase 2C 必要能力是否存在",
-        state: checking && !health ? "checking" : capabilitiesReady ? "ready" : serviceOk ? "needs_action" : "waiting",
+        state:
+          checking && !health
+            ? "checking"
+            : capabilitiesReady
+              ? "ready"
+              : serviceReady
+                ? "needs_action"
+                : "waiting",
         detail: capabilitiesReady ? REQUIRED_CAPABILITIES.join(" / ") : "当前服务缺少必要能力，请确认已启动正确版本。",
       },
       {
         id: "database",
         label: "人才库是否可访问",
-        state: checking && !status && !fault ? "checking" : status?.status === "ready" ? "ready" : fault ? "needs_action" : "waiting",
-        detail: status?.status === "ready" ? "人才库可访问，准备进入工作台。" : fault?.message || "等待检查结果。",
+        state: checking && !status && !fault ? "checking" : databaseReady ? "ready" : fault ? "needs_action" : "waiting",
+        detail: databaseReady ? "人才库可访问，准备进入工作台。" : fault?.message || "等待检查结果。",
       },
       {
         id: "data-dir",
@@ -184,16 +202,16 @@ export function StartupEntryGate({ onEnter }: StartupEntryGateProps) {
           checking && !status && !fault
             ? "checking"
             : fault?.code === "database_in_use"
-              ? "needs_action"
-              : status?.status === "ready"
-                ? "ready"
-                : fault
+            ? "needs_action"
+            : databaseReady
+              ? "ready"
+              : fault
                   ? "waiting"
                   : "waiting",
         detail:
           fault?.code === "database_in_use"
             ? "桌面端正在使用人才库，请先关闭桌面端后重新检查。"
-            : status?.status === "ready"
+            : databaseReady
               ? "当前未发现其他实例占用人才库。"
               : "等待检查结果。",
       },
@@ -206,9 +224,9 @@ export function StartupEntryGate({ onEnter }: StartupEntryGateProps) {
           : "工作台可使用，采集前请在设置中连接浏览器插件。",
       },
     ];
-  }, [checking, fault, health, plugin, status, capabilitiesReady]);
+  }, [checking, fault, health, plugin, status, capabilitiesReady, databaseReady, serviceReady]);
 
-  const canEnter = Boolean(health && status?.status === "ready" && capabilitiesReady);
+  const canEnter = serviceReady && capabilitiesReady && databaseReady;
 
   return (
     <main className="startup-gate-layout">
