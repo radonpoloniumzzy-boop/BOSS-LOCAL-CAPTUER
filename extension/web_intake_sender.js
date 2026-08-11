@@ -11,6 +11,7 @@
     getStatusRecordsForConnection,
     createScrubbedPendingTransition,
     WebIntakeStorageError,
+    ensureStoredConnectionMode,
   } = globalThis.BossLocalWebIntakeStorage;
   const { classifySuccessfulStatus, formatStatus } = globalThis.BossLocalWebIntakeUi;
 
@@ -185,8 +186,27 @@
     };
   }
 
+  async function resolveActiveSettings(settings, storageArea) {
+    const stored = await readCurrentSettings(storageArea);
+    return {
+      ...stored,
+      ...(settings || {}),
+      apiBase: settings?.apiBase || stored.apiBase,
+      apiToken: settings?.apiToken || stored.apiToken,
+      connectionMode: settings?.connectionMode || stored.connectionMode,
+      connectionModeConfirmed: settings?.connectionModeConfirmed ?? stored.connectionModeConfirmed,
+      jobTitle: settings?.jobTitle || stored.jobTitle,
+    };
+  }
+
   async function queueCapturedBatch({ settings, merged, sourceUrl, idempotencyKey, storageArea }) {
-    const record = await buildPendingRecord({ settings, merged, sourceUrl, idempotencyKey });
+    const resolvedSettings = await resolveActiveSettings(settings, storageArea);
+    const record = await buildPendingRecord({
+      settings: resolvedSettings,
+      merged,
+      sourceUrl,
+      idempotencyKey,
+    });
     if (!record) {
       return null;
     }
@@ -240,7 +260,7 @@
     if (failure.autoRetry && Number(failedRecord.attemptCount || 0) >= MAX_AUTO_ATTEMPTS) {
       failedRecord.status = "failed";
       failedRecord.statusLabel = "发送失败";
-      failedRecord.message = "自动重试次数已达上限，请手动重试。";
+      failedRecord.message = "自动重试次数已用尽，请手动重试。";
       failedRecord.errorCode = failure.code || "retry_limit_reached";
     }
     await upsertPendingRecord(failedRecord, storageArea);
@@ -298,7 +318,7 @@
         ...record,
         status: "failed",
         statusLabel: "发送失败",
-        message: "自动重试次数已达上限，请手动重试。",
+        message: "自动重试次数已用尽，请手动重试。",
       });
     }
 
@@ -373,7 +393,8 @@
   }
 
   async function retryPendingForCurrentConnection({ settings, storageArea, fetchImpl }) {
-    const current = await currentRecordForConnection(settings, storageArea);
+    const resolvedSettings = await resolveActiveSettings(settings, storageArea);
+    const current = await currentRecordForConnection(resolvedSettings, storageArea);
     if (!current) {
       return current;
     }
@@ -383,31 +404,36 @@
     if (String(current.status || "") === "sending" && isLeaseExpired(current)) {
       await recoverExpiredLease(current.batchKey, storageArea);
     }
-    const latest = await currentRecordForConnection(settings, storageArea);
+    const latest = await currentRecordForConnection(resolvedSettings, storageArea);
     if (!latest || !["waiting_retry", "failed", "sending"].includes(String(latest.status || ""))) {
       return latest;
     }
-    return sendQueuedBatch({ settings, batchKey: latest.batchKey, storageArea, fetchImpl, manualRetry: true });
+    return sendQueuedBatch({
+      settings: resolvedSettings,
+      batchKey: latest.batchKey,
+      storageArea,
+      fetchImpl,
+      manualRetry: true,
+    });
   }
 
   async function readCurrentSettings(storageArea) {
     const area = storageArea || chrome.storage.local;
-    const values = await area.get({
-      apiBase: "http://127.0.0.1:17863",
-      apiToken: "",
-      connectionMode: "",
-      jobTitle: "Boss 推荐牛人",
-    });
+    const values = await ensureStoredConnectionMode(area);
     return {
       apiBase: values.apiBase,
       apiToken: values.apiToken,
       connectionMode: values.connectionMode,
-      jobTitle: values.jobTitle,
+      connectionModeConfirmed: values.connectionModeConfirmed !== false,
+      jobTitle: values.jobTitle || "Boss 推荐牛人",
     };
   }
 
   async function processPendingBatches({ storageArea, fetchImpl }) {
     const settings = await readCurrentSettings(storageArea);
+    if (settings.connectionModeConfirmed === false) {
+      return [];
+    }
     const state = await loadState(storageArea);
     const processed = [];
     for (const batchKey of state.pendingOrder) {
@@ -426,7 +452,7 @@
           ...pending,
           status: "failed",
           statusLabel: "发送失败",
-          message: "自动重试次数已达上限，请手动重试。",
+          message: "自动重试次数已用尽，请手动重试。",
           errorCode: "retry_limit_reached",
           updatedAt: nowIso(),
         });
@@ -460,8 +486,9 @@
   }
 
   async function getStatusView({ settings, storageArea }) {
-    const { record, legacyBlocked } = await getStatusRecordsForConnection(settings, storageArea);
-    const view = await formatStatus(record, settings, legacyBlocked);
+    const resolvedSettings = await resolveActiveSettings(settings, storageArea);
+    const { record, legacyBlocked } = await getStatusRecordsForConnection(resolvedSettings, storageArea);
+    const view = await formatStatus(record, resolvedSettings, legacyBlocked);
     return { record, legacyBlocked, view };
   }
 

@@ -3,10 +3,14 @@
     sameConnectionIdentity,
     connectionIdentity,
     normalizeApiBase,
+    getApiPort,
+    normalizeConnectionMode,
     deriveWebApiBase,
     resolveConnectionMode,
     sha256Hex,
     createBatchKey,
+    WEB_INTAKE_PORT,
+    DESKTOP_COMPAT_PORT,
   } = globalThis.BossLocalWebIntakeIdentity;
 
   const LEGACY_STATE_KEY = "boss_web_intake_state_v2";
@@ -14,6 +18,7 @@
   const COMPLETED_PREFIX = "boss_web_intake_completed_v4:";
   const MAX_PENDING_BATCHES = 10;
   const MAX_COMPLETED_BATCHES = 20;
+  let connectionModeMigrationQueue = Promise.resolve();
   const LEGACY_PENDING_BLOCKED_MESSAGE = "请切回原连接完成旧批次迁移。";
 
   class WebIntakeStorageError extends Error {
@@ -68,6 +73,76 @@
       }
       throw error;
     }
+  }
+
+  function withConnectionModeMigration(operation) {
+    const next = connectionModeMigrationQueue.then(operation, operation);
+    connectionModeMigrationQueue = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return next;
+  }
+
+  async function ensureStoredConnectionMode(storageArea) {
+    const area = storageArea || chrome.storage.local;
+    return withConnectionModeMigration(async () => {
+      const stored = await area.get({
+        apiBase: "http://127.0.0.1:17863",
+        apiToken: "",
+        connectionMode: "",
+        connectionModeConfirmed: true,
+      });
+      const normalizedApiBase = normalizeApiBase(stored?.apiBase || "");
+      const explicitMode = normalizeConnectionMode(stored?.connectionMode);
+      const hasStoredConfirmation = typeof stored?.connectionModeConfirmed === "boolean";
+
+      if (explicitMode) {
+        const connectionModeConfirmed = hasStoredConfirmation ? stored.connectionModeConfirmed : true;
+        const writes = {};
+        if (normalizedApiBase !== String(stored?.apiBase || "")) {
+          writes.apiBase = normalizedApiBase;
+        }
+        if (!hasStoredConfirmation) {
+          writes.connectionModeConfirmed = true;
+        }
+        if (Object.keys(writes).length) {
+          await withStorageWrite(() => area.set(writes));
+        }
+        return {
+          ...stored,
+          apiBase: normalizedApiBase,
+          connectionMode: explicitMode,
+          connectionModeConfirmed,
+        };
+      }
+
+      const port = getApiPort(normalizedApiBase);
+      const connectionMode = port === WEB_INTAKE_PORT ? "web" : "desktop";
+      const connectionModeConfirmed = [WEB_INTAKE_PORT, DESKTOP_COMPAT_PORT].includes(port);
+      await withStorageWrite(() =>
+        area.set({
+          apiBase: normalizedApiBase,
+          connectionMode,
+          connectionModeConfirmed,
+        }));
+      return {
+        ...stored,
+        apiBase: normalizedApiBase,
+        connectionMode,
+        connectionModeConfirmed,
+      };
+    });
+  }
+
+  async function hasStoredPendingWork(storageArea) {
+    const area = storageArea || chrome.storage.local;
+    const entries = await area.get(null);
+    if (Object.keys(entries || {}).some((key) => key.startsWith(PENDING_PREFIX))) {
+      return true;
+    }
+    const legacy = entries[LEGACY_STATE_KEY];
+    return Boolean(legacy && Object.keys(legacy.pendingBatches || {}).length);
   }
 
   function parseStoredEntries(entries) {
@@ -155,11 +230,7 @@
   }
 
   async function resolveCurrentConnection(storageArea, settingsOverride = null) {
-    const stored = settingsOverride || await storageArea.get({
-      apiBase: "http://127.0.0.1:17863",
-      apiToken: "",
-      connectionMode: "",
-    });
+    const stored = settingsOverride || await ensureStoredConnectionMode(storageArea);
     const apiBase = normalizeApiBase(stored?.apiBase || "");
     const mode = resolveConnectionMode(stored || {});
     const webApiBase = deriveWebApiBase({ connectionMode: mode, apiBase });
@@ -442,6 +513,8 @@
     MAX_PENDING_BATCHES,
     MAX_COMPLETED_BATCHES,
     WebIntakeStorageError,
+    ensureStoredConnectionMode,
+    hasStoredPendingWork,
     pendingStorageKey,
     completedStorageKey,
     sanitizeCompletedRecord,

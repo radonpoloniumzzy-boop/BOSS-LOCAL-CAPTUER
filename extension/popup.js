@@ -97,10 +97,10 @@ document.getElementById("startBatchRequest").addEventListener("click", () => sta
 document.getElementById("startBatchDownload").addEventListener("click", () => startBatch("download_only"));
 document.getElementById("stopBatch").addEventListener("click", () => stopBatch());
 fields.apiBase.addEventListener("input", () => {
-  void switchToDesktopCompatibilityMode();
+  return switchToDesktopCompatibilityMode();
 });
 fields.apiToken.addEventListener("input", () => {
-  void switchToDesktopCompatibilityMode();
+  return switchToDesktopCompatibilityMode();
 });
 
 window.addEventListener("beforeunload", () => {
@@ -113,45 +113,20 @@ if (!globalThis.__bossLocalPopupTestMode) {
   void init();
 }
 
-async function migrateStoredConnectionMode(stored) {
-  const explicitMode = BossLocalWebIntake.normalizeConnectionMode(stored.connectionMode);
-  const hasStoredConfirmation = typeof stored.connectionModeConfirmed === "boolean";
-  if (explicitMode) {
-    const migrated = {
-      ...stored,
-      connectionMode: explicitMode,
-      connectionModeConfirmed: hasStoredConfirmation ? stored.connectionModeConfirmed : true,
-    };
-    if (!hasStoredConfirmation) {
-      await chrome.storage.local.set({ connectionModeConfirmed: true });
-    }
-    return migrated;
-  }
-
-  const normalizedApiBase = normalizeLocalApiBase(stored.apiBase || DEFAULTS.apiBase);
-  const port = BossLocalWebIntake.getApiPort(normalizedApiBase);
-  const connectionMode = port === BossLocalWebIntake.WEB_INTAKE_PORT ? "web" : "desktop";
-  const connectionModeConfirmed = [BossLocalWebIntake.WEB_INTAKE_PORT, BossLocalWebIntake.DESKTOP_COMPAT_PORT].includes(port);
+async function clearDesktopBatchDownloadState() {
+  lastCompletedBatchId = null;
+  lastCompletedBatchConnection = null;
   await chrome.storage.local.set({
-    apiBase: normalizedApiBase,
-    connectionMode,
-    connectionModeConfirmed,
+    lastCompletedBatchId: null,
+    lastCompletedBatchConnection: null,
   });
-  return {
-    ...stored,
-    apiBase: normalizedApiBase,
-    connectionMode,
-    connectionModeConfirmed,
-  };
 }
 
 async function switchToDesktopCompatibilityMode() {
-  if (activeConnectionMode === "desktop" && activeConnectionModeConfirmed) {
-    return;
-  }
   activeConnectionMode = "desktop";
   activeConnectionModeConfirmed = true;
   lastCompletedWebBatch = null;
+  await clearDesktopBatchDownloadState();
   await chrome.storage.local.set({
     connectionMode: "desktop",
     connectionModeConfirmed: true,
@@ -167,7 +142,13 @@ async function init() {
     scrollWaitDefaultVersion: null,
     scrollModeDefaultVersion: null,
   });
-  stored = await migrateStoredConnectionMode(stored);
+  const migratedConnection = await BossLocalWebIntake.ensureStoredConnectionMode(chrome.storage.local);
+  stored = {
+    ...stored,
+    apiBase: migratedConnection.apiBase,
+    connectionMode: migratedConnection.connectionMode,
+    connectionModeConfirmed: migratedConnection.connectionModeConfirmed,
+  };
   if (stored.scrollWaitDefaultVersion === null && Number(stored.scrollWaitMs) === OLD_DEFAULT_SCROLL_WAIT_MS) {
     stored.scrollWaitMs = DEFAULTS.scrollWaitMs;
     await chrome.storage.local.set({
@@ -204,9 +185,7 @@ async function init() {
   lastCompletedBatchId = stored.lastCompletedBatchId === null ? null : Number(stored.lastCompletedBatchId);
   lastCompletedBatchConnection = stored.lastCompletedBatchConnection || null;
   if (!BossLocalBatchExport.batchBelongsToConnection(lastCompletedBatchConnection, collectSettings())) {
-    lastCompletedBatchId = null;
-    lastCompletedBatchConnection = null;
-    await chrome.storage.local.set({ lastCompletedBatchId: null, lastCompletedBatchConnection: null });
+    await clearDesktopBatchDownloadState();
   }
   await refreshWebIntakeStatus(collectSettings(), { updateDownloadButton: false });
   updateBatchDownloadButton();
@@ -321,8 +300,7 @@ async function applyPairingCodeAndTest() {
     activeConnectionMode = BossLocalWebIntake.normalizeConnectionMode(verifiedSettings.connectionMode);
     activeConnectionModeConfirmed = verifiedSettings.connectionModeConfirmed !== false;
     if (!BossLocalBatchExport.batchBelongsToConnection(lastCompletedBatchConnection, verifiedSettings)) {
-      lastCompletedBatchId = null;
-      lastCompletedBatchConnection = null;
+      await clearDesktopBatchDownloadState();
     }
     await chrome.storage.local.set({
       apiBase: fields.apiBase.value,
@@ -556,9 +534,7 @@ async function runCollection(autoScroll, options = {}) {
   const runId = buildCollectionRunId();
   try {
     if (webMode) {
-      lastCompletedBatchId = null;
-      lastCompletedBatchConnection = null;
-      await chrome.storage.local.set({ lastCompletedBatchId: null, lastCompletedBatchConnection: null });
+      await clearDesktopBatchDownloadState();
       updateBatchDownloadButton();
       const webResult = await queueAndSendWebBatch(webSettings, tab.url, merged, runId);
       const resultStats = webResult?.webResult || {};

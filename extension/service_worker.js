@@ -1093,14 +1093,25 @@ async function restorePendingWebIntake() {
     }
     return processed;
   } catch (_error) {
+    if (await globalThis.BossLocalWebIntake?.hasStoredPendingWork?.(chrome.storage.local)) {
+      await scheduleWebIntakeRetryAlarm();
+    }
     return [];
   }
 }
 
 async function syncWebIntakeRetryAlarm() {
-  if (await globalThis.BossLocalWebIntake.hasAutoRetryablePending(chrome.storage.local)) {
-    await scheduleWebIntakeRetryAlarm();
-  } else {
+  try {
+    if (await globalThis.BossLocalWebIntake.hasAutoRetryablePending(chrome.storage.local)) {
+      await scheduleWebIntakeRetryAlarm();
+    } else {
+      await clearWebIntakeRetryAlarm();
+    }
+  } catch (_error) {
+    if (await globalThis.BossLocalWebIntake?.hasStoredPendingWork?.(chrome.storage.local)) {
+      await scheduleWebIntakeRetryAlarm();
+      return;
+    }
     await clearWebIntakeRetryAlarm();
   }
 }

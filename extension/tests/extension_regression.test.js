@@ -1087,9 +1087,6 @@ async function testPopupPairsAndUsesConfiguredWebPortEndToEnd() {
     runtimeHandler: createPopupWebRuntimeHandler(),
     fetchImpl: popup.context.fetch,
   });
-  reopened.context.BossLocalWebIntake.inferStoredConnectionMode = () => {
-    throw new Error("runtime mode inference should not be called after migration");
-  };
   await reopened.api.init();
   assert.strictEqual(reopened.store.connectionMode, "web");
   assert.strictEqual(reopened.store.connectionModeConfirmed, true);
@@ -1236,9 +1233,11 @@ async function testPopupManualDesktopAdvancedSettingsOverrideWebMode() {
   });
   await popup.api.init();
   popup.elements.apiBase.value = "http://127.0.0.1:19001";
-  popup.elements.apiBase.listeners.input();
+  await popup.elements.apiBase.listeners.input();
   popup.elements.apiToken.value = "desktop-token";
-  popup.elements.apiToken.listeners.input();
+  await popup.elements.apiToken.listeners.input();
+  popup.elements.pairingCode.value =
+    "boss-local://pair?apiBase=http%3A%2F%2F127.0.0.1%3A19001&apiToken=desktop-token";
 
   assert.strictEqual(popup.store.connectionMode, "desktop");
   assert.strictEqual(popup.store.connectionModeConfirmed, true);
@@ -1964,11 +1963,8 @@ async function testLegacyStorageDefaultPortsMigrateOnce() {
   await webPopup.api.init();
   assert.strictEqual(webPopup.store.connectionMode, "web");
   assert.strictEqual(webPopup.store.connectionModeConfirmed, true);
-
-  webPopup.context.BossLocalWebIntake.inferStoredConnectionMode = () => {
-    throw new Error("legacy port inference should not run after migration");
-  };
   await webPopup.api.refreshWebIntakeStatus(webPopup.api.collectSettings());
+  assert.notStrictEqual(webPopup.elements.apiBase.value, "http://127.0.0.1:17863");
 
   const desktopPopup = createPopupTestContext({
     store: { apiBase: "http://127.0.0.1:17863", apiToken: "legacy-desktop-token" },
@@ -1977,6 +1973,283 @@ async function testLegacyStorageDefaultPortsMigrateOnce() {
   await desktopPopup.api.init();
   assert.strictEqual(desktopPopup.store.connectionMode, "desktop");
   assert.strictEqual(desktopPopup.store.connectionModeConfirmed, true);
+}
+
+async function testWorkerMigratesLegacyWebConnectionBeforePopupAndRecoversPending() {
+  let fetchCalls = 0;
+  const worker = loadServiceWorker(async () => {
+    fetchCalls += 1;
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return {
+          batch_id: 2001,
+          status: "completed",
+          received_count: 1,
+          inserted_candidates: 1,
+          updated_candidates: 0,
+          skipped_candidates: 0,
+          failed_candidates: 0,
+        };
+      },
+    };
+  });
+  Object.assign(worker.chrome.__store, {
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "legacy-worker-token",
+    jobTitle: "Worker Legacy Web",
+  });
+  const record = await worker.context.BossLocalWebIntake.buildPendingRecord({
+    settings: {
+      apiBase: "http://127.0.0.1:17864",
+      apiToken: "legacy-worker-token",
+      connectionMode: "web",
+      jobTitle: "Worker Legacy Web",
+    },
+    merged: {
+      platform: "boss",
+      cards: [{ source_candidate_id: "legacy-worker-1", raw_card_text: "legacy-worker-card" }],
+    },
+    sourceUrl: "https://www.zhipin.com/web/geek/recommend",
+    idempotencyKey: "legacy-worker-1",
+  });
+  worker.chrome.__store[worker.context.BossLocalWebIntake.pendingStorageKey(record.batchKey)] = record;
+
+  await triggerRetryAlarm(worker);
+
+  const state = await worker.context.BossLocalWebIntake.loadState(worker.chrome.storage.local);
+  assert.strictEqual(worker.chrome.__store.connectionMode, "web");
+  assert.strictEqual(worker.chrome.__store.connectionModeConfirmed, true);
+  assert.strictEqual(fetchCalls, 1);
+  assert.strictEqual(state.pendingOrder.length, 0);
+  assert.strictEqual(state.completedOrder.length, 1);
+  const completed = state.completedBatches[state.completedOrder[0]];
+  assert.notStrictEqual(completed.statusLabel, "等待原连接");
+}
+
+async function testWorkerMigratesLegacyDesktopConnectionWithoutWebIntake() {
+  let fetchCalls = 0;
+  const worker = loadServiceWorker(async () => {
+    fetchCalls += 1;
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return {};
+      },
+    };
+  });
+  Object.assign(worker.chrome.__store, {
+    apiBase: "http://127.0.0.1:17863",
+    apiToken: "legacy-desktop-token",
+    jobTitle: "Worker Legacy Desktop",
+  });
+
+  await worker.api.restorePendingWebIntake();
+
+  assert.strictEqual(worker.chrome.__store.connectionMode, "desktop");
+  assert.strictEqual(worker.chrome.__store.connectionModeConfirmed, true);
+  assert.strictEqual(fetchCalls, 0);
+}
+
+async function testWorkerKeepsCustomPortPendingWhenMigrationNeedsRePair() {
+  let fetchCalls = 0;
+  const worker = loadServiceWorker(async () => {
+    fetchCalls += 1;
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return {};
+      },
+    };
+  });
+  Object.assign(worker.chrome.__store, {
+    apiBase: "http://127.0.0.1:19001",
+    apiToken: "custom-port-token",
+    jobTitle: "Worker Custom Port",
+  });
+  const record = await worker.context.BossLocalWebIntake.buildPendingRecord({
+    settings: {
+      apiBase: "http://127.0.0.1:19001",
+      apiToken: "custom-port-token",
+      connectionMode: "desktop",
+      jobTitle: "Worker Custom Port",
+    },
+    merged: {
+      platform: "boss",
+      cards: [{ source_candidate_id: "custom-port-1", raw_card_text: "custom-port-card" }],
+    },
+    sourceUrl: "https://www.zhipin.com/web/geek/recommend",
+    idempotencyKey: "custom-port-1",
+  });
+  const pendingKey = worker.context.BossLocalWebIntake.pendingStorageKey(record.batchKey);
+  worker.chrome.__store[pendingKey] = record;
+  const beforePayload = JSON.stringify(record.payload);
+
+  await triggerRetryAlarm(worker);
+
+  assert.strictEqual(worker.chrome.__store.connectionMode, "desktop");
+  assert.strictEqual(worker.chrome.__store.connectionModeConfirmed, false);
+  assert.strictEqual(fetchCalls, 0);
+  assert.strictEqual(JSON.stringify(worker.chrome.__store[pendingKey].payload), beforePayload);
+  assert(worker.chrome.__alarms.some((alarm) => alarm.name === worker.context.BossLocalWebIntake.RETRY_ALARM_NAME));
+}
+
+async function testPopupAndWorkerConcurrentMigrationIsIdempotent() {
+  let fetchCalls = 0;
+  const worker = loadServiceWorker(async () => {
+    fetchCalls += 1;
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return {
+          batch_id: 2002,
+          status: "completed",
+          received_count: 1,
+          inserted_candidates: 1,
+          updated_candidates: 0,
+          skipped_candidates: 0,
+          failed_candidates: 0,
+        };
+      },
+    };
+  });
+  Object.assign(worker.chrome.__store, {
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "shared-web-token",
+    jobTitle: "Concurrent Migration",
+  });
+  const record = await worker.context.BossLocalWebIntake.buildPendingRecord({
+    settings: {
+      apiBase: "http://127.0.0.1:17864",
+      apiToken: "shared-web-token",
+      connectionMode: "web",
+      jobTitle: "Concurrent Migration",
+    },
+    merged: {
+      platform: "boss",
+      cards: [{ source_candidate_id: "concurrent-migration-1", raw_card_text: "concurrent-migration-card" }],
+    },
+    sourceUrl: "https://www.zhipin.com/web/geek/recommend",
+    idempotencyKey: "concurrent-migration-1",
+  });
+  worker.chrome.__store[worker.context.BossLocalWebIntake.pendingStorageKey(record.batchKey)] = record;
+
+  const popup = createPopupTestContext({
+    store: worker.chrome.__store,
+    runtimeHandler: createPopupWebRuntimeHandler(),
+    fetchImpl: worker.context.fetch,
+  });
+
+  await Promise.all([
+    popup.api.init(),
+    triggerRetryAlarm(worker),
+  ]);
+
+  const state = await worker.context.BossLocalWebIntake.loadState(worker.chrome.storage.local);
+  assert.strictEqual(worker.chrome.__store.connectionMode, "web");
+  assert.strictEqual(worker.chrome.__store.connectionModeConfirmed, true);
+  assert.strictEqual(fetchCalls, 1);
+  assert.strictEqual(state.pendingOrder.length, 0);
+  assert.strictEqual(state.completedOrder.length, 1);
+}
+
+async function testMigrationWriteFailureKeepsPendingAndAlarm() {
+  let fetchCalls = 0;
+  const worker = loadServiceWorker(async () => {
+    fetchCalls += 1;
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return {
+          batch_id: 2003,
+          status: "completed",
+          received_count: 1,
+          inserted_candidates: 1,
+          updated_candidates: 0,
+          skipped_candidates: 0,
+          failed_candidates: 0,
+        };
+      },
+    };
+  });
+  Object.assign(worker.chrome.__store, {
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "migration-failure-token",
+    jobTitle: "Migration Failure",
+  });
+  const record = await worker.context.BossLocalWebIntake.buildPendingRecord({
+    settings: {
+      apiBase: "http://127.0.0.1:17864",
+      apiToken: "migration-failure-token",
+      connectionMode: "web",
+      jobTitle: "Migration Failure",
+    },
+    merged: {
+      platform: "boss",
+      cards: [{ source_candidate_id: "migration-failure-1", raw_card_text: "migration-failure-card" }],
+    },
+    sourceUrl: "https://www.zhipin.com/web/geek/recommend",
+    idempotencyKey: "migration-failure-1",
+  });
+  const pendingKey = worker.context.BossLocalWebIntake.pendingStorageKey(record.batchKey);
+  worker.chrome.__store[pendingKey] = record;
+  const pendingBefore = JSON.stringify(record.payload);
+
+  const originalSet = worker.chrome.storage.local.set;
+  worker.chrome.storage.local.set = async (value) => {
+    if (Object.prototype.hasOwnProperty.call(value, "connectionMode")) {
+      throw new Error("storage write blocked once");
+    }
+    return originalSet.call(worker.chrome.storage.local, value);
+  };
+
+  await triggerRetryAlarm(worker);
+
+  assert.strictEqual(fetchCalls, 0);
+  assert.strictEqual(worker.chrome.__store.connectionMode, undefined);
+  assert.strictEqual(JSON.stringify(worker.chrome.__store[pendingKey].payload), pendingBefore);
+  assert(worker.chrome.__alarms.some((alarm) => alarm.name === worker.context.BossLocalWebIntake.RETRY_ALARM_NAME));
+
+  worker.chrome.storage.local.set = originalSet;
+  await triggerRetryAlarm(worker);
+
+  const state = await worker.context.BossLocalWebIntake.loadState(worker.chrome.storage.local);
+  assert.strictEqual(fetchCalls, 1);
+  assert.strictEqual(state.pendingOrder.length, 0);
+  assert.strictEqual(state.completedOrder.length, 1);
+}
+
+async function testDesktopSettingsEditClearsCsvButtonEvenWhenAlreadyDesktop() {
+  const popup = createPopupTestContext({
+    store: {
+      apiBase: "http://127.0.0.1:17863",
+      apiToken: "desktop-token",
+      connectionMode: "desktop",
+      connectionModeConfirmed: true,
+      lastCompletedBatchId: 88,
+      lastCompletedBatchConnection: {
+        connectionMode: "desktop",
+        apiBase: "http://127.0.0.1:17863",
+        apiToken: "desktop-token",
+      },
+    },
+    runtimeHandler: createPopupWebRuntimeHandler(),
+  });
+
+  await popup.api.init();
+  assert(popup.elements.downloadCurrentBatch.textContent.includes("#88"));
+
+  popup.elements.apiBase.value = "http://127.0.0.1:19001";
+  await popup.elements.apiBase.listeners.input();
+
+  assert.strictEqual(popup.store.lastCompletedBatchId, null);
+  assert.strictEqual(popup.store.lastCompletedBatchConnection, null);
+  assert(!popup.elements.downloadCurrentBatch.textContent.includes("#88"));
 }
 
 async function testDesktopModeOpenWorkbenchShowsReadableChinesePrompt() {
@@ -3123,6 +3396,7 @@ async function main() {
   await testPopupPairsWithSingleWebCodeAndRemembersConnection();
   await testPopupPairsAndUsesConfiguredWebPortEndToEnd();
   testCollectionCarriesCanonicalJobProfileId();
+  await testPopupManualDesktopAdvancedSettingsOverrideWebMode();
   await testPopupPairingSuccessDoesNotReferenceCollectionVariables();
   await testPopupDesktopCustomPortRemainsDesktopMode();
   await testPopupWebModeCollectCurrentPostsDirectlyToWebIntake();
@@ -3152,6 +3426,12 @@ async function main() {
   testWebIntakeIdentityUsesFullFieldsInsteadOfShortHash();
   await testLegacyStorageConnectionModeMigrationRules();
   await testLegacyStorageDefaultPortsMigrateOnce();
+  await testWorkerMigratesLegacyWebConnectionBeforePopupAndRecoversPending();
+  await testWorkerMigratesLegacyDesktopConnectionWithoutWebIntake();
+  await testWorkerKeepsCustomPortPendingWhenMigrationNeedsRePair();
+  await testPopupAndWorkerConcurrentMigrationIsIdempotent();
+  await testMigrationWriteFailureKeepsPendingAndAlarm();
+  await testDesktopSettingsEditClearsCsvButtonEvenWhenAlreadyDesktop();
   await testDesktopModeOpenWorkbenchShowsReadableChinesePrompt();
   await testConnectionModeKeepsWebAndDesktopStateIsolated();
   testCollectorDoesNotPromoteGenericDataIdToPlatformUid();
