@@ -87,20 +87,25 @@
   async function ensureStoredConnectionMode(storageArea) {
     const area = storageArea || chrome.storage.local;
     return withConnectionModeMigration(async () => {
-      const stored = await area.get({
-        apiBase: "http://127.0.0.1:17863",
-        apiToken: "",
-        connectionMode: "",
-        connectionModeConfirmed: true,
-      });
-      const normalizedApiBase = normalizeApiBase(stored?.apiBase || "");
+      const stored = await area.get([
+        "apiBase",
+        "apiToken",
+        "jobTitle",
+        "connectionMode",
+        "connectionModeConfirmed",
+      ]);
+      const apiBase = stored?.apiBase || "http://127.0.0.1:17863";
+      const apiToken = stored?.apiToken || "";
+      const jobTitle = stored?.jobTitle || "Boss 推荐牛人";
+      const normalizedApiBase = normalizeApiBase(apiBase);
       const explicitMode = normalizeConnectionMode(stored?.connectionMode);
-      const hasStoredConfirmation = typeof stored?.connectionModeConfirmed === "boolean";
+      const hasStoredConfirmation = Object.prototype.hasOwnProperty.call(stored || {}, "connectionModeConfirmed");
+      const storedConfirmation = hasStoredConfirmation ? stored.connectionModeConfirmed : undefined;
 
       if (explicitMode) {
-        const connectionModeConfirmed = hasStoredConfirmation ? stored.connectionModeConfirmed : true;
+        const connectionModeConfirmed = hasStoredConfirmation ? storedConfirmation : true;
         const writes = {};
-        if (normalizedApiBase !== String(stored?.apiBase || "")) {
+        if (normalizedApiBase !== String(apiBase || "")) {
           writes.apiBase = normalizedApiBase;
         }
         if (!hasStoredConfirmation) {
@@ -112,6 +117,8 @@
         return {
           ...stored,
           apiBase: normalizedApiBase,
+          apiToken,
+          jobTitle,
           connectionMode: explicitMode,
           connectionModeConfirmed,
         };
@@ -129,6 +136,8 @@
       return {
         ...stored,
         apiBase: normalizedApiBase,
+        apiToken,
+        jobTitle,
         connectionMode,
         connectionModeConfirmed,
       };

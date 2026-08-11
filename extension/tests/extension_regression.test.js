@@ -7,6 +7,29 @@ const vm = require("vm");
 
 const EXTENSION_DIR = path.resolve(__dirname, "..");
 
+function chromeStorageGetSemantics(store, key) {
+  if (typeof key === "string") {
+    return Object.prototype.hasOwnProperty.call(store, key) ? { [key]: store[key] } : {};
+  }
+  if (key === null || key === undefined) {
+    return { ...store };
+  }
+  if (Array.isArray(key)) {
+    const result = {};
+    for (const item of key) {
+      if (Object.prototype.hasOwnProperty.call(store, item)) {
+        result[item] = store[item];
+      }
+    }
+    return result;
+  }
+  const result = {};
+  for (const [item, fallback] of Object.entries(key)) {
+    result[item] = Object.prototype.hasOwnProperty.call(store, item) ? store[item] : fallback;
+  }
+  return result;
+}
+
 function createChromeMock() {
   const store = {};
   const downloadCalls = [];
@@ -75,16 +98,7 @@ function createChromeMock() {
     storage: {
       local: {
         async get(key) {
-          if (typeof key === "string") {
-            return { [key]: store[key] };
-          }
-          if (key === null || key === undefined) {
-            return { ...store };
-          }
-          if (Array.isArray(key)) {
-            return Object.fromEntries(key.map((item) => [item, store[item]]));
-          }
-          return { ...store };
+          return chromeStorageGetSemantics(store, key);
         },
         async set(value) {
           Object.assign(store, value);
@@ -300,13 +314,7 @@ function createPopupTestContext(options = {}) {
     storage: {
       local: {
         async get(key) {
-          if (typeof key === "string") {
-            return { [key]: store[key] };
-          }
-          if (Array.isArray(key)) {
-            return Object.fromEntries(key.map((item) => [item, store[item]]));
-          }
-          return { ...key, ...store };
+          return chromeStorageGetSemantics(store, key);
         },
         async set(value) {
           Object.assign(store, value);
@@ -854,8 +862,7 @@ function loadRemoteControlForBehaviorTest() {
     storage: {
       local: {
         async get(key) {
-          if (typeof key === "string") return { [key]: store[key] };
-          return { ...key, ...store };
+          return chromeStorageGetSemantics(store, key);
         },
         async set(value) {
           Object.assign(store, value);
@@ -1653,7 +1660,13 @@ async function testAutomaticRetryStopsAtMaxAndManualRetryStillWorks() {
     fetchCalls += 1;
     throw new Error("network down");
   });
-  const settings = { apiBase: "http://127.0.0.1:17864", apiToken: "retry-token", jobTitle: "Retry Test" };
+  const settings = {
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "retry-token",
+    connectionMode: "web",
+    connectionModeConfirmed: true,
+    jobTitle: "Retry Test",
+  };
   Object.assign(failingWorker.chrome.__store, settings);
   await failingWorker.api.enqueueAndSendWebIntake({
     settings,
@@ -1975,6 +1988,24 @@ async function testLegacyStorageDefaultPortsMigrateOnce() {
   assert.strictEqual(desktopPopup.store.connectionModeConfirmed, true);
 }
 
+async function testExplicitModeBackfillsConfirmedAndPreservesJobTitle() {
+  const worker = loadServiceWorker();
+  Object.assign(worker.chrome.__store, {
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "preserve-job-token",
+    jobTitle: "Preserved Job Title",
+    connectionMode: "web",
+  });
+
+  const migrated = await worker.context.BossLocalWebIntake.ensureStoredConnectionMode(worker.chrome.storage.local);
+  const settings = await worker.context.BossLocalWebIntake.readCurrentSettings(worker.chrome.storage.local);
+
+  assert.strictEqual(migrated.connectionMode, "web");
+  assert.strictEqual(migrated.connectionModeConfirmed, true);
+  assert.strictEqual(worker.chrome.__store.connectionModeConfirmed, true);
+  assert.strictEqual(settings.jobTitle, "Preserved Job Title");
+}
+
 async function testWorkerMigratesLegacyWebConnectionBeforePopupAndRecoversPending() {
   let fetchCalls = 0;
   const worker = loadServiceWorker(async () => {
@@ -2051,6 +2082,58 @@ async function testWorkerMigratesLegacyDesktopConnectionWithoutWebIntake() {
   assert.strictEqual(worker.chrome.__store.connectionMode, "desktop");
   assert.strictEqual(worker.chrome.__store.connectionModeConfirmed, true);
   assert.strictEqual(fetchCalls, 0);
+}
+
+async function testSendQueuedBatchUsesMigratedSettingsWhenMessageModeMissing() {
+  let fetchCalls = 0;
+  const worker = loadServiceWorker(async () => {
+    fetchCalls += 1;
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return {
+          batch_id: 2004,
+          status: "completed",
+          received_count: 1,
+          inserted_candidates: 1,
+          updated_candidates: 0,
+          skipped_candidates: 0,
+          failed_candidates: 0,
+        };
+      },
+    };
+  });
+  Object.assign(worker.chrome.__store, {
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "missing-mode-token",
+    jobTitle: "Migrated Sender Job",
+  });
+
+  const result = await worker.api.enqueueAndSendWebIntake({
+    settings: {
+      apiBase: "http://127.0.0.1:17864",
+      apiToken: "missing-mode-token",
+      jobTitle: "Migrated Sender Job",
+    },
+    sourceUrl: "https://www.zhipin.com/web/geek/recommend",
+    merged: {
+      platform: "boss",
+      cards: [{ source_candidate_id: "sender-migrate-1", raw_card_text: "sender-migrate-card" }],
+    },
+    idempotencyKey: "sender-migrate-1",
+  });
+
+  const state = await worker.context.BossLocalWebIntake.loadState(worker.chrome.storage.local);
+  assert.strictEqual(worker.chrome.__store.connectionMode, "web");
+  assert.strictEqual(worker.chrome.__store.connectionModeConfirmed, true);
+  assert.strictEqual(fetchCalls, 1);
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(state.pendingOrder.length, 0);
+  assert.strictEqual(state.completedOrder.length, 1);
+  const completed = state.completedBatches[state.completedOrder[0]];
+  assert.strictEqual(completed.idempotencyKey, "sender-migrate-1");
+  assert.notStrictEqual(String(completed.statusLabel || ""), "等待原连接");
 }
 
 async function testWorkerKeepsCustomPortPendingWhenMigrationNeedsRePair() {
@@ -2155,6 +2238,108 @@ async function testPopupAndWorkerConcurrentMigrationIsIdempotent() {
   assert.strictEqual(fetchCalls, 1);
   assert.strictEqual(state.pendingOrder.length, 0);
   assert.strictEqual(state.completedOrder.length, 1);
+}
+
+async function testPopupAndWorkerConcurrentSendSameBatchOnlyFetchesOnce() {
+  let fetchCalls = 0;
+  const fetchStarted = createDeferred();
+  const releaseFetch = createDeferred();
+  const sharedFetch = async () => {
+    fetchCalls += 1;
+    fetchStarted.resolve();
+    await releaseFetch.promise;
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return {
+          batch_id: 2005,
+          status: "completed",
+          received_count: 1,
+          inserted_candidates: 1,
+          updated_candidates: 0,
+          skipped_candidates: 0,
+          failed_candidates: 0,
+        };
+      },
+    };
+  };
+
+  const worker = loadServiceWorker(sharedFetch);
+  Object.assign(worker.chrome.__store, {
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "shared-batch-token",
+    jobTitle: "Shared Batch Job",
+  });
+  const pendingRecord = await worker.context.BossLocalWebIntake.buildPendingRecord({
+    settings: {
+      apiBase: "http://127.0.0.1:17864",
+      apiToken: "shared-batch-token",
+      connectionMode: "web",
+      jobTitle: "Shared Batch Job",
+    },
+    merged: {
+      platform: "boss",
+      cards: [{
+        source_candidate_id: "shared-batch-1",
+        name: "Shared Candidate",
+        raw_card_text: "Shared Candidate Raw",
+        detail_url: "https://www.zhipin.com/candidate/shared-batch-1",
+      }],
+    },
+    sourceUrl: "https://www.zhipin.com/web/geek/recommend",
+    idempotencyKey: "shared-batch-1",
+  });
+  const pendingKey = worker.context.BossLocalWebIntake.pendingStorageKey(pendingRecord.batchKey);
+  worker.chrome.__store[pendingKey] = pendingRecord;
+
+  const popup = createPopupTestContext({
+    store: worker.chrome.__store,
+    runtimeHandler: createPopupWebRuntimeHandler(),
+    fetchImpl: sharedFetch,
+  });
+
+  const popupPromise = popup.api.queueAndSendWebBatch(
+    {
+      apiBase: "http://127.0.0.1:17864",
+      apiToken: "shared-batch-token",
+      jobTitle: "Shared Batch Job",
+    },
+    "https://www.zhipin.com/web/geek/recommend",
+    {
+      platform: "boss",
+      cards: [{
+        source_candidate_id: "shared-batch-1",
+        name: "Shared Candidate",
+        raw_card_text: "Shared Candidate Raw",
+        detail_url: "https://www.zhipin.com/candidate/shared-batch-1",
+      }],
+    },
+    "shared-batch-1",
+  );
+
+  await fetchStarted.promise;
+  await triggerRetryAlarm(worker);
+  releaseFetch.resolve();
+  await popupPromise;
+
+  const state = await worker.context.BossLocalWebIntake.loadState(worker.chrome.storage.local);
+  assert.strictEqual(worker.chrome.__store.connectionMode, "web");
+  assert.strictEqual(worker.chrome.__store.connectionModeConfirmed, true);
+  assert.strictEqual(fetchCalls, 1);
+  assert.strictEqual(state.pendingOrder.length, 0);
+  assert.strictEqual(state.completedOrder.length, 1);
+  const completed = state.completedBatches[state.completedOrder[0]];
+  assert.strictEqual(completed.idempotencyKey, "shared-batch-1");
+  assert.notStrictEqual(String(completed.statusLabel || ""), "等待原连接");
+  const serialized = JSON.stringify(worker.chrome.__store);
+  assert(!serialized.includes("Shared Candidate"));
+  assert(!serialized.includes("Shared Candidate Raw"));
+  assert(!serialized.includes("candidate/shared-batch-1"));
+  assert(!serialized.includes("\"payload\""));
+  assert(!worker.chrome.__store[pendingKey]);
+  await worker.api.restorePendingWebIntake();
+  assert(!worker.chrome.__alarms.some((alarm) => alarm.name === worker.context.BossLocalWebIntake.RETRY_ALARM_NAME));
 }
 
 async function testMigrationWriteFailureKeepsPendingAndAlarm() {
@@ -3426,10 +3611,13 @@ async function main() {
   testWebIntakeIdentityUsesFullFieldsInsteadOfShortHash();
   await testLegacyStorageConnectionModeMigrationRules();
   await testLegacyStorageDefaultPortsMigrateOnce();
+  await testExplicitModeBackfillsConfirmedAndPreservesJobTitle();
   await testWorkerMigratesLegacyWebConnectionBeforePopupAndRecoversPending();
   await testWorkerMigratesLegacyDesktopConnectionWithoutWebIntake();
+  await testSendQueuedBatchUsesMigratedSettingsWhenMessageModeMissing();
   await testWorkerKeepsCustomPortPendingWhenMigrationNeedsRePair();
   await testPopupAndWorkerConcurrentMigrationIsIdempotent();
+  await testPopupAndWorkerConcurrentSendSameBatchOnlyFetchesOnce();
   await testMigrationWriteFailureKeepsPendingAndAlarm();
   await testDesktopSettingsEditClearsCsvButtonEvenWhenAlreadyDesktop();
   await testDesktopModeOpenWorkbenchShowsReadableChinesePrompt();

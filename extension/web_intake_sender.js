@@ -378,12 +378,20 @@
   }
 
   async function sendQueuedBatch({ settings, batchKey, storageArea, fetchImpl, manualRetry = false }) {
+    const resolvedSettings = await resolveActiveSettings(settings, storageArea);
     const existingPromise = sendLocks.get(batchKey);
     if (existingPromise) {
       return existingPromise;
     }
     const leaseOwner = createLeaseOwner();
-    const promise = performSend({ settings, batchKey, storageArea, fetchImpl, manualRetry, leaseOwner }).finally(() => {
+    const promise = performSend({
+      settings: resolvedSettings,
+      batchKey,
+      storageArea,
+      fetchImpl,
+      manualRetry,
+      leaseOwner,
+    }).finally(() => {
       if (sendLocks.get(batchKey) === promise) {
         sendLocks.delete(batchKey);
       }
