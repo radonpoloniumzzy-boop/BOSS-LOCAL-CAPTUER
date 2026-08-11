@@ -62,6 +62,14 @@ export type PagedResponse<T> = {
   page_size: number;
 };
 
+export type PluginConnectionStatus = {
+  service_ok: boolean;
+  api_base: string;
+  connected: boolean;
+  last_verified_at: string;
+  data_dir: string;
+};
+
 type ApiError = { error?: { code?: string; message?: string } };
 
 export class ApiRequestError extends Error {

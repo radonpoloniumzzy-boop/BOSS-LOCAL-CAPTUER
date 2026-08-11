@@ -24,6 +24,75 @@ const response = (body: unknown) =>
 afterEach(() => vi.restoreAllMocks());
 
 describe("workbench candidate intake views", () => {
+  it("generates and copies a one-time plugin pairing code without exposing a token", async () => {
+    const fetchMock = vi.fn((input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/plugin-connection/status")) {
+        return response({
+          api_base: "http://127.0.0.1:17864",
+          service_ready: true,
+          connected: false,
+          last_verified_at: null,
+        });
+      }
+      if (url.endsWith("/api/plugin-connection/pairing-code") && init?.method === "POST") {
+        return response({ pairing_code: "ABC123-DEF456", expires_at: "2026-08-11T12:05:00" });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    const writeText = vi.spyOn(navigator.clipboard, "writeText");
+    render(<Workbench status={status} />);
+
+    await user.click(screen.getByRole("button", { name: "设置" }));
+    await screen.findByText("等待插件配对");
+    await user.click(screen.getByRole("button", { name: "生成插件连接码" }));
+    expect(await screen.findByText("ABC123-DEF456")).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("api_token");
+    await user.click(screen.getByRole("button", { name: "复制连接码" }));
+    expect(writeText).toHaveBeenCalledWith("ABC123-DEF456");
+  });
+
+  it("refreshes newest batches on focus, announces the new batch, and exposes snapshot export", async () => {
+    let batchRequest = 0;
+    const fetchMock = vi.fn((input: string | URL) => {
+      const url = String(input);
+      if (!url.includes("/api/capture-batches?")) throw new Error(`unexpected request: ${url}`);
+      batchRequest += 1;
+      const id = batchRequest === 1 ? 159 : 161;
+      return response({
+        rows: [{
+          id,
+          start_time: "2026-08-11T11:35:20",
+          source_platform: "boss",
+          total_collected: 450,
+          total_new: id === 161 ? 0 : 12,
+          total_updated: id === 161 ? 450 : 3,
+          total_skipped: 0,
+          total_failed: 0,
+          status: "completed",
+          role_id: null,
+        }],
+        total: id,
+        page: 1,
+        page_size: 20,
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    render(<Workbench status={status} />);
+
+    await user.click(screen.getByRole("button", { name: "最近批次" }));
+    expect(await screen.findByText("#159")).toBeInTheDocument();
+    window.dispatchEvent(new Event("focus"));
+    expect(await screen.findByText("#161")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("已接收新批次 #161");
+    const exportLink = screen.getByRole("link", { name: "导出 Markdown" });
+    expect(exportLink).toHaveAttribute("href", "/api/capture-batches/161/export.md");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("renders job-optional candidates and batches", async () => {
     vi.stubGlobal(
       "fetch",
@@ -164,7 +233,11 @@ describe("workbench candidate intake views", () => {
 
     expect(await screen.findByRole("heading", { name: "批次 #9" })).toBeInTheDocument();
     expect(screen.getByText("Snapshot Alice")).toBeInTheDocument();
+    expect(screen.queryByText("old snapshot text")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "查看原始快照" }));
+    expect(screen.getByRole("complementary", { name: "原始快照" })).toBeInTheDocument();
     expect(screen.getByText("old snapshot text")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "关闭原始快照" }));
 
     await user.click(screen.getByRole("button", { name: "返回批次列表" }));
     await waitFor(() => {
@@ -244,7 +317,9 @@ describe("workbench candidate intake views", () => {
     await user.click(screen.getByRole("button", { name: "最近批次" }));
     const buttons = await screen.findAllByRole("button", { name: "查看候选人" });
     await user.click(buttons[0]);
-    await user.click(buttons[1]);
+    await user.click(screen.getByRole("button", { name: "返回批次列表" }));
+    const refreshedButtons = await screen.findAllByRole("button", { name: "查看候选人" });
+    await user.click(refreshedButtons[1]);
 
     pending[9].resolve({
       ok: true,

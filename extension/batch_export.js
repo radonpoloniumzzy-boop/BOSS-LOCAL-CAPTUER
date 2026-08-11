@@ -70,5 +70,63 @@
     }
   }
 
-  global.BossLocalBatchExport = { batchBelongsToConnection, downloadBatchCsv };
+  async function downloadBatchMarkdown({
+    apiBase,
+    apiToken,
+    batchId,
+    fetchImpl = global.fetch,
+    downloadsApi = global.chrome?.downloads,
+    urlApi = global.URL,
+  }) {
+    const resolvedBatchId = Number(batchId);
+    if (!Number.isInteger(resolvedBatchId) || resolvedBatchId <= 0) {
+      const error = new Error("当前没有可导出的 Web 批次。");
+      error.code = "batch_not_available";
+      throw error;
+    }
+    let response;
+    try {
+      response = await fetchImpl(
+        `${normalizeApiBase(apiBase)}/api/capture-batches/${resolvedBatchId}/export.md`,
+        { headers: { "X-Boss-Local-Token": String(apiToken || "") } },
+      );
+    } catch (_error) {
+      const error = new Error("网页工作台尚未启动，请先运行‘启动网页工作台’。");
+      error.code = "workbench_not_running";
+      throw error;
+    }
+    if (!response.ok) {
+      let payload = {};
+      try { payload = await response.json(); } catch (_error) {}
+      const serverCode = String(payload?.error?.code || "");
+      const code = response.status === 401
+        ? "auth_failed"
+        : response.status === 404
+          ? "batch_not_found"
+          : "export_failed";
+      const messages = {
+        auth_failed: "网页工作台连接已失效，请重新配对。",
+        batch_not_found: "该采集批次不存在，可能属于其他人才库。",
+        export_failed: "Markdown 文件生成失败，请稍后重试。",
+      };
+      const error = new Error(messages[code]);
+      error.code = serverCode || code;
+      throw error;
+    }
+    if (!downloadsApi?.download) {
+      throw new Error("Chrome 下载功能不可用，请重新加载扩展。");
+    }
+    const blob = await response.blob();
+    const objectUrl = urlApi.createObjectURL(blob);
+    try {
+      const filename = filenameFromDisposition(response.headers?.get?.("Content-Disposition"), resolvedBatchId)
+        .replace(/\.csv$/i, ".md");
+      const downloadId = await downloadsApi.download({ url: objectUrl, filename, saveAs: false });
+      return { downloadId, filename, batchId: resolvedBatchId };
+    } finally {
+      urlApi.revokeObjectURL(objectUrl);
+    }
+  }
+
+  global.BossLocalBatchExport = { batchBelongsToConnection, downloadBatchCsv, downloadBatchMarkdown };
 })(globalThis);

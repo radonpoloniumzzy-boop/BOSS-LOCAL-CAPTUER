@@ -410,9 +410,16 @@ function createPopupTestContext(options = {}) {
       async downloadBatchCsv() {
         return { batchId: 1, filename: "batch.csv" };
       },
+      async downloadBatchMarkdown(options) {
+        store.lastMarkdownExport = { apiBase: options.apiBase, batchId: options.batchId };
+        return { batchId: options.batchId, filename: `boss-batch-${options.batchId}.md` };
+      },
     },
     BossLocalPairing: {
       parsePairingCode(value) {
+        if (/^[A-F0-9]{6}-[A-F0-9]{6}$/i.test(String(value || "").trim())) {
+          return { pairingCode: String(value).trim().toUpperCase() };
+        }
         if (String(value || "").includes("pair-token")) {
           return { apiBase: "http://127.0.0.1:17863", apiToken: "pair-token_123" };
         }
@@ -932,6 +939,10 @@ function testPairingCodeParsesAndRejectsInvalidInput() {
     ) },
     { apiBase: "http://127.0.0.1:19001", apiToken: "pair-token_123" },
   );
+  assert.deepStrictEqual(
+    { ...context.BossLocalPairing.parsePairingCode("A1B2C3-D4E5F6") },
+    { pairingCode: "A1B2C3-D4E5F6" },
+  );
   assert.throws(
     () => context.BossLocalPairing.parsePairingCode("http://127.0.0.1:17863"),
     /连接码格式无效/,
@@ -952,7 +963,35 @@ function testPopupSupportsPairingAndAuthenticatedConnectionCheck() {
   assert(html.includes('id="openWebWorkbench"'));
   assert(popup.includes("applyPairingCodeAndTest"));
   assert(popup.includes("/api/connection/check"));
-  assert(popup.includes("Token 不正确"));
+  assert(popup.includes("连接凭证已失效"));
+}
+
+async function testPopupPairsWithSingleWebCodeAndRemembersConnection() {
+  const popup = createPopupTestContext({
+    fetchImpl: async (url, options) => {
+      if (String(url).endsWith("/api/plugin/pair")) {
+        assert.strictEqual(JSON.parse(options.body).pairing_code, "A1B2C3-D4E5F6");
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return { api_base: "http://127.0.0.1:17864", api_token: "remembered-web-token" };
+          },
+        };
+      }
+      if (String(url).endsWith("/api/plugin/connection/check")) {
+        assert.strictEqual(options.headers["X-Boss-Local-Token"], "remembered-web-token");
+        return { ok: true, status: 200, async json() { return { ok: true }; } };
+      }
+      throw new Error(`Unexpected fetch: ${String(url)}`);
+    },
+  });
+  popup.elements.pairingCode.value = "A1B2C3-D4E5F6";
+  await popup.api.applyPairingCodeAndTest();
+  assert.strictEqual(popup.store.apiBase, "http://127.0.0.1:17864");
+  assert.strictEqual(popup.store.apiToken, "remembered-web-token");
+  assert(popup.elements.status.textContent.includes("已连接网页工作台"));
+  assert(!popup.elements.status.textContent.includes("remembered-web-token"));
 }
 
 function testCollectionCarriesCanonicalJobProfileId() {
@@ -993,7 +1032,7 @@ async function testPopupPairingSuccessDoesNotReferenceCollectionVariables() {
 
   assert.strictEqual(popup.fetchCalls.length, 1);
   assert.strictEqual(popup.fetchCalls[0].url, "http://127.0.0.1:17863/api/connection/check");
-  assert(popup.elements.status.textContent.includes("桌面端已连接"));
+  assert(popup.elements.status.textContent.includes("已连接桌面兼容模式"));
 }
 
 async function testPopupWebModeCollectCurrentPostsDirectlyToWebIntake() {
@@ -1791,6 +1830,31 @@ async function testCompletedCollectionCanDownloadItsExactBatch() {
   assert.deepStrictEqual(calls[2], ["download", "blob:batch-csv", "job_batch_41.csv", false]);
   assert.deepStrictEqual(calls[3], ["revoke", "blob:batch-csv"]);
 
+  const markdown = await context.BossLocalBatchExport.downloadBatchMarkdown({
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "web-token",
+    batchId: 160,
+    fetchImpl: async (url, options) => {
+      calls.push(["markdown-fetch", url, options.headers["X-Boss-Local-Token"]]);
+      return {
+        ok: true,
+        headers: { get: () => "attachment; filename*=UTF-8''boss-%E6%89%B9%E6%AC%A1-160.md" },
+        async blob() { return new Blob(["# batch"], { type: "text/markdown" }); },
+      };
+    },
+    downloadsApi: {
+      async download(options) {
+        calls.push(["markdown-download", options.filename]);
+        return 99;
+      },
+    },
+    urlApi: context.URL,
+  });
+  assert.strictEqual(markdown.batchId, 160);
+  assert(calls.some((entry) => entry[0] === "markdown-fetch"
+    && entry[1] === "http://127.0.0.1:17864/api/capture-batches/160/export.md"));
+  assert(calls.some((entry) => entry[0] === "markdown-download" && entry[1] === "boss-批次-160.md"));
+
   const popup = fs.readFileSync(path.join(EXTENSION_DIR, "popup.js"), "utf8");
   const html = fs.readFileSync(path.join(EXTENSION_DIR, "popup.html"), "utf8");
   assert(html.includes('id="downloadCurrentBatch"'));
@@ -1800,6 +1864,7 @@ async function testCompletedCollectionCanDownloadItsExactBatch() {
   assert(popup.includes("batchBelongsToConnection"));
   assert(popup.includes("imported.batch_id"));
   assert(popup.includes("BossLocalBatchExport.downloadBatchCsv"));
+  assert(popup.includes("BossLocalBatchExport.downloadBatchMarkdown"));
 }
 
 function testFilenameTemplatesMatchDesktopFixtures() {
@@ -2617,6 +2682,7 @@ async function main() {
   testRuntimeFingerprintAndVersionAwareRunnerInjection();
   testPairingCodeParsesAndRejectsInvalidInput();
   testPopupSupportsPairingAndAuthenticatedConnectionCheck();
+  await testPopupPairsWithSingleWebCodeAndRemembersConnection();
   testCollectionCarriesCanonicalJobProfileId();
   await testPopupPairingSuccessDoesNotReferenceCollectionVariables();
   await testPopupWebModeCollectCurrentPostsDirectlyToWebIntake();

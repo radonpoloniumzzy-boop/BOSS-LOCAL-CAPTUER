@@ -74,6 +74,7 @@ let activeJobProfileId = null;
 let activeRecruitmentTaskId = null;
 let lastCompletedBatchId = null;
 let lastCompletedBatchConnection = null;
+let lastCompletedWebBatch = null;
 
 automationAutoButton.addEventListener("click", () => runAutomation());
 applyPairingCodeButton.addEventListener("click", () => applyPairingCodeAndTest());
@@ -215,14 +216,37 @@ async function startDesktopAutomation(settings, sourceUrl) {
 
 async function applyPairingCodeAndTest() {
   applyPairingCodeButton.disabled = true;
-  setStatus("正在验证桌面端连接...");
+  setStatus("正在验证本机工作台连接...");
   try {
     const pairing = BossLocalPairing.parsePairingCode(pairingCodeInput.value);
-    const verifiedSettings = {
-      ...collectSettings(),
-      apiBase: normalizeLocalApiBase(pairing.apiBase),
-      apiToken: pairing.apiToken,
-    };
+    let verifiedSettings;
+    if (pairing.pairingCode) {
+      let response;
+      try {
+        response = await fetch("http://127.0.0.1:17864/api/plugin/pair", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pairing_code: pairing.pairingCode }),
+        });
+      } catch (_error) {
+        throw new Error("网页工作台尚未启动，请先运行‘启动网页工作台’。");
+      }
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload?.error?.message || "连接码验证失败，请重新生成。");
+      }
+      verifiedSettings = {
+        ...collectSettings(),
+        apiBase: normalizeLocalApiBase(payload.api_base),
+        apiToken: String(payload.api_token || ""),
+      };
+    } else {
+      verifiedSettings = {
+        ...collectSettings(),
+        apiBase: normalizeLocalApiBase(pairing.apiBase),
+        apiToken: pairing.apiToken,
+      };
+    }
     await testLocalApiConnection(verifiedSettings);
     fields.apiBase.value = verifiedSettings.apiBase;
     fields.apiToken.value = verifiedSettings.apiToken;
@@ -238,7 +262,8 @@ async function applyPairingCodeAndTest() {
     });
     updateBatchDownloadButton();
     pairingCodeInput.value = "";
-    setStatus(`桌面端已连接。\n接口地址：${fields.apiBase.value}\nToken 验证：通过`);
+    const target = isWebWorkbenchMode(verifiedSettings) ? "网页工作台" : "桌面兼容模式";
+    setStatus(`已连接${target}。\n服务地址：${fields.apiBase.value}\n连接已记住`);
   } catch (error) {
     setStatus(`连接失败。\n${error.message || String(error)}`);
   } finally {
@@ -248,9 +273,10 @@ async function applyPairingCodeAndTest() {
 
 async function testLocalApiConnection(settings) {
   const apiBase = normalizeLocalApiBase(settings.apiBase);
+  const endpoint = isWebWorkbenchMode(settings) ? "/api/plugin/connection/check" : "/api/connection/check";
   let response;
   try {
-    response = await fetch(`${apiBase}/api/connection/check`, {
+    response = await fetch(`${apiBase}${endpoint}`, {
       method: "GET",
       headers: localApiHeaders(settings),
     });
@@ -264,7 +290,7 @@ async function testLocalApiConnection(settings) {
     result = {};
   }
   if (response.status === 401) {
-    throw new Error("Token 不正确，请从桌面端设置页重新复制连接码。");
+    throw new Error("连接凭证已失效，请重新配对。");
   }
   if (!response.ok || !result.ok) {
     throw new Error(result.error || `桌面端返回状态码 ${response.status}`);
@@ -330,6 +356,11 @@ async function refreshWebIntakeStatus(settingsOverride = null) {
   const view = response.view;
   webIntakeStatusEl.textContent = `${view.title}\n${view.message}`;
   retryWebIntakeButton.disabled = !view.canRetry;
+  const record = response.record || null;
+  if (["completed", "partial", "reused"].includes(String(record?.status || "")) && Number(record?.webResult?.batch_id) > 0) {
+    lastCompletedWebBatch = record;
+  }
+  updateBatchDownloadButton();
 }
 
 async function queueAndSendWebBatch(settings, sourceUrl, merged, runId) {
@@ -370,6 +401,13 @@ async function retryWebIntake() {
 
 async function openWebWorkbench() {
   const url = `${BossLocalWebIntake.deriveWebApiBase(collectSettings().apiBase)}/`;
+  try {
+    const response = await fetch(`${url}api/health`);
+    if (!response.ok) throw new Error("health failed");
+  } catch (_error) {
+    setStatus("网页工作台尚未启动，请先运行‘启动网页工作台’。");
+    return;
+  }
   await chrome.tabs.create({ url });
 }
 
@@ -484,6 +522,15 @@ async function runCollection(autoScroll, options = {}) {
 }
 
 function updateBatchDownloadButton() {
+  const settings = collectSettings();
+  if (isWebWorkbenchMode(settings)) {
+    const webBatchId = Number(lastCompletedWebBatch?.webResult?.batch_id || 0);
+    downloadCurrentBatchButton.disabled = !webBatchId;
+    downloadCurrentBatchButton.textContent = webBatchId
+      ? `导出本批次 #${webBatchId} Markdown`
+      : "导出本批次 Markdown";
+    return;
+  }
   downloadCurrentBatchButton.disabled = !Number.isInteger(lastCompletedBatchId) || lastCompletedBatchId <= 0;
   downloadCurrentBatchButton.textContent = lastCompletedBatchId
     ? `下载当前批次 #${lastCompletedBatchId} CSV 到 Downloads`
@@ -491,11 +538,34 @@ function updateBatchDownloadButton() {
 }
 
 async function downloadCurrentBatch() {
+  const settings = collectSettings();
+  if (isWebWorkbenchMode(settings)) {
+    const batchId = Number(lastCompletedWebBatch?.webResult?.batch_id || 0);
+    if (!batchId || !(await BossLocalWebIntake.sameConnection(lastCompletedWebBatch?.connection, settings))) {
+      lastCompletedWebBatch = null;
+      updateBatchDownloadButton();
+      setStatus("当前连接没有可导出的 Web 批次，请先完成一次采集。");
+      return;
+    }
+    downloadCurrentBatchButton.disabled = true;
+    try {
+      const result = await BossLocalBatchExport.downloadBatchMarkdown({
+        apiBase: settings.apiBase,
+        apiToken: settings.apiToken,
+        batchId,
+      });
+      setStatus(`批次 #${result.batchId} Markdown 已保存到 Downloads。\n文件：${result.filename}`);
+    } catch (error) {
+      setStatus(`导出 Markdown 失败。\n${error.message || String(error)}`);
+    } finally {
+      updateBatchDownloadButton();
+    }
+    return;
+  }
   if (!lastCompletedBatchId) {
     setStatus("当前没有可下载的采集批次，请先完成一次采集。");
     return;
   }
-  const settings = collectSettings();
   if (!BossLocalBatchExport.batchBelongsToConnection(lastCompletedBatchConnection, settings)) {
     lastCompletedBatchId = null;
     lastCompletedBatchConnection = null;

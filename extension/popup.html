@@ -123,10 +123,10 @@
     <label for="jobTitle">岗位名称</label>
     <input id="jobTitle" type="text" placeholder="Boss 推荐牛人 / 猎聘推荐人才">
 
-    <label for="pairingCode">桌面端连接码</label>
-    <input id="pairingCode" type="password" placeholder="粘贴桌面端复制的连接码">
-    <button id="applyPairingCode" type="button">应用连接码并测试</button>
-    <div class="hint">在桌面端“设置”点击“复制扩展连接码”，粘贴到这里即可自动配置。</div>
+    <label for="pairingCode">工作台连接码</label>
+    <input id="pairingCode" type="password" placeholder="粘贴网页工作台设置页生成的连接码">
+    <button id="applyPairingCode" type="button">连接并记住</button>
+    <div class="hint">Web 模式只需粘贴一次连接码；桌面端旧连接码仍可继续使用。</div>
 
     <label for="apiBase">本地接口地址</label>
     <input id="apiBase" type="text" value="http://127.0.0.1:17863">
@@ -177,8 +177,8 @@
       <button id="pauseScroll">暂停滚动</button>
     </div>
 
-    <button id="downloadCurrentBatch" type="button" disabled>下载当前批次 CSV 到 Downloads</button>
-    <div class="hint">采集成功后启用，只下载刚完成的批次，不会误取其他任务的新批次。</div>
+    <button id="downloadCurrentBatch" type="button" disabled>导出本批次 Markdown</button>
+    <div class="hint">Web 模式导出 Markdown；桌面兼容模式继续使用原 CSV 导出链路。</div>
 
     <div class="hint">推荐采集支持 Boss 推荐页和猎聘推荐页。自动滚动中点击“暂停滚动”，会停止继续滚动并导入已采集卡片。</div>
 

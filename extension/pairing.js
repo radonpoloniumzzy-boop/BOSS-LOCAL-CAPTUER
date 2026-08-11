@@ -1,10 +1,14 @@
 (function initializeBossLocalPairing(global) {
   function parsePairingCode(value) {
+    const raw = String(value || "").trim();
+    if (/^[A-F0-9]{6}-[A-F0-9]{6}$/i.test(raw)) {
+      return { pairingCode: raw.toUpperCase() };
+    }
     let pairingUrl;
     try {
-      pairingUrl = new URL(String(value || "").trim());
+      pairingUrl = new URL(raw);
     } catch (_error) {
-      throw new Error("连接码格式无效，请从桌面端设置页重新复制。");
+      throw new Error("连接码格式无效，请从网页工作台设置页重新生成。");
     }
     if (pairingUrl.protocol !== "boss-local:" || pairingUrl.hostname !== "pair") {
       throw new Error("连接码格式无效，请从桌面端设置页重新复制。");

@@ -20,6 +20,7 @@ from storage.db import (
     UnsupportedSchemaError,
 )
 from storage.repository import CandidateRepository
+from web.backend.pairing import PluginPairingService
 
 
 @dataclass(frozen=True)
@@ -79,6 +80,7 @@ class WebRuntime:
         self.repository: CandidateRepository | None = None
         self.lock: DatabaseApplicationLock | None = None
         self.database_fault: DatabaseFault | None = None
+        self.pairing = PluginPairingService()
         self._state_lock = threading.RLock()
         configured = bootstrap.store.load()
         if configured is not None:
