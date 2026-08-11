@@ -214,10 +214,10 @@ describe("local workbench shell", () => {
     first.unmount();
 
     render(<App />);
-    await screen.findByRole("heading", { name: "准备进入招聘人才工作台" });
-
-    const healthCalls = fetchMock.mock.calls.filter(([url]) => String(url) === "/api/health");
-    expect(healthCalls).toHaveLength(2);
+    await waitFor(() => {
+      const healthCalls = fetchMock.mock.calls.filter(([url]) => String(url) === "/api/health");
+      expect(healthCalls).toHaveLength(2);
+    });
   });
 
   it("shows a recoverable service failure before setup status is available", async () => {

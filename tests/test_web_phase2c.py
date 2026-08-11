@@ -1032,6 +1032,43 @@ class WorkbenchLauncherBehaviorTest(unittest.TestCase):
         self.assertEqual(opened, [])
         self.assertEqual(reaped, ["terminate", "wait:3"])
 
+    def test_service_health_never_becomes_current_marks_only_connect_step_failed(self) -> None:
+        events: list[dict[str, str]] = []
+        opened: list[str] = []
+        reaped: list[str] = []
+
+        class Process:
+            def poll(self):
+                return None
+
+            def terminate(self):
+                reaped.append("terminate")
+
+            def wait(self, timeout=None):
+                reaped.append(f"wait:{timeout}")
+
+        launcher = WorkbenchLauncher(
+            service_probe=lambda _url: None,
+            status_probe=lambda _url: None,
+            port_in_use=lambda _port: False,
+            process_start=Process,
+            browser_open=opened.append,
+            wait=lambda _seconds: None,
+            attempts=3,
+            progress=events.append,
+        )
+
+        with self.assertRaises(LaunchFailure) as caught:
+            launcher.launch()
+        self.assertEqual(caught.exception.code, "service_start_failed")
+        self.assertEqual(caught.exception.step, STEP_CONNECT_DATABASE)
+        final_states = {event["step"]: event["state"] for event in events}
+        self.assertEqual(final_states[STEP_CONNECT_DATABASE], "failed")
+        self.assertNotIn(STEP_CONFIRM_DATABASE, final_states)
+        self.assertNotIn("running", final_states.values())
+        self.assertEqual(opened, [])
+        self.assertEqual(reaped, ["terminate", "wait:3"])
+
     def test_launcher_cancel_stops_only_started_process_and_skips_browser_open(self) -> None:
         events: list[str] = []
         wait_calls = 0

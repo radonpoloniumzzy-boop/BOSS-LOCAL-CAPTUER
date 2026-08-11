@@ -236,6 +236,12 @@ class WorkbenchLauncher:
         self._emit(STEP_CONNECT_DATABASE, "failed", "人才库连接未完成")
         self._emit(STEP_CONFIRM_DATABASE, "failed", detail)
 
+    def _emit_startup_failure(self, *, confirm_started: bool) -> None:
+        self._emit(STEP_CONNECT_DATABASE, "failed", "人才库连接未完成")
+        if confirm_started:
+            detail = str(LaunchFailure("service_start_failed", port=self.port, step=STEP_CONFIRM_DATABASE))
+            self._emit(STEP_CONFIRM_DATABASE, "failed", detail)
+
     @staticmethod
     def _database_result(status: dict[str, object] | None) -> tuple[str, str | None]:
         if status is None:
@@ -339,7 +345,7 @@ class WorkbenchLauncher:
             self.wait(0.2)
         self._stop_process(process)
         self._started_process = None
-        self._emit_database_failure("service_start_failed")
+        self._emit_startup_failure(confirm_started=confirm_started)
         raise LaunchFailure(
             "service_start_failed",
             port=self.port,
