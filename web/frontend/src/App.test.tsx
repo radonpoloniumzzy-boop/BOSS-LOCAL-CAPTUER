@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+﻿import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -15,13 +15,29 @@ const setupRequired = {
 };
 
 const readyStatus = {
-  version: "0.1.0-web-phase-1",
+  status: "ready" as const,
+  version: "0.2.0-phase2c",
   database_ready: true,
   data_dir: "D:\\HR-Workbench-Data",
   candidate_count: 1284,
   batch_count: 17,
   latest_batch_id: 17,
   latest_batch_status: "completed",
+};
+
+const readyHealth = {
+  status: "ok",
+  service: "recruiting-talent-workbench",
+  version: "0.2.0-phase2c",
+  capabilities: ["phase2c_pairing", "batch_markdown_export"],
+};
+
+const pluginDisconnected = {
+  service_ok: true,
+  api_base: "http://127.0.0.1:17864",
+  connected: false,
+  last_verified_at: "",
+  data_dir: readyStatus.data_dir,
 };
 
 afterEach(() => vi.restoreAllMocks());
@@ -33,6 +49,7 @@ describe("local workbench shell", () => {
 
     expect(await screen.findByRole("heading", { name: "选择数据目录" })).toBeInTheDocument();
     expect(screen.getByDisplayValue(setupRequired.suggested_data_dir)).toBeInTheDocument();
+    expect(screen.getByText("检测到现有数据库，将继续读取原有人才数据。")).toBeInTheDocument();
   });
 
   it("shows a backend path validation error", async () => {
@@ -57,124 +74,149 @@ describe("local workbench shell", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("不能把磁盘根目录作为数据目录");
   });
 
-  it("explains when the local service stops during setup", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi
-        .fn()
-        .mockImplementationOnce(() => response(setupRequired))
-        .mockImplementationOnce(() => Promise.reject(new TypeError("Failed to fetch"))),
-    );
-    const user = userEvent.setup();
-    render(<App />);
-
-    await user.click(await screen.findByRole("button", { name: "确认并开始使用" }));
-
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      "无法连接本地服务，请确认网页程序仍在运行。",
-    );
-    expect(screen.queryByText("Failed to fetch")).not.toBeInTheDocument();
-  });
-
-  it("enters the home page immediately after setup succeeds", async () => {
-    const fetchMock = vi
-      .fn()
-      .mockImplementationOnce(() => response(setupRequired))
-      .mockImplementationOnce(() => response({ setup_completed: true }))
-      .mockImplementationOnce(() => response(readyStatus));
+  it("shows the startup confirmation gate after setup succeeds", async () => {
+    const fetchMock = vi.fn((input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/setup/status") return response(setupRequired);
+      if (url === "/api/setup" && init?.method === "POST") return response({ setup_completed: true });
+      if (url === "/api/health") return response(readyHealth);
+      if (url === "/api/app/status") return response(readyStatus);
+      if (url === "/api/plugin-connection/status") return response(pluginDisconnected);
+      throw new Error(`unexpected request: ${url}`);
+    });
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
     render(<App />);
 
     await user.click(await screen.findByRole("button", { name: "确认并开始使用" }));
 
-    expect(await screen.findByRole("heading", { name: "招聘人才 Mapping 工作台" })).toBeInTheDocument();
-    expect(screen.getByText("1,284")).toBeInTheDocument();
-    expect(screen.getByText("17 个批次")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "准备进入招聘人才工作台" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "进入工作台" })).toBeEnabled();
+    expect(screen.getAllByText("工作台可使用，采集前请在设置中连接浏览器插件。").length).toBeGreaterThan(0);
   });
 
-  it("renders existing database statistics and keeps candidate and batch navigation available", async () => {
+  it("allows entering the workbench when the plugin is not connected", async () => {
     vi.stubGlobal(
       "fetch",
-      vi
-        .fn()
-        .mockImplementationOnce(() => response({ ...setupRequired, setup_required: false }))
-        .mockImplementationOnce(() => response(readyStatus)),
+      vi.fn((input: string | URL) => {
+        const url = String(input);
+        if (url === "/api/setup/status") return response({ ...setupRequired, setup_required: false });
+        if (url === "/api/health") return response(readyHealth);
+        if (url === "/api/app/status") return response(readyStatus);
+        if (url === "/api/plugin-connection/status") return response(pluginDisconnected);
+        throw new Error(`unexpected request: ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "准备进入招聘人才工作台" })).toBeInTheDocument();
+    expect(screen.getAllByText("工作台可使用，采集前请在设置中连接浏览器插件。").length).toBeGreaterThan(0);
+    await user.click(screen.getByRole("button", { name: "进入工作台" }));
+
+    expect(await screen.findByRole("heading", { name: "招聘人才 Mapping 工作台" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "准备进入招聘人才工作台" })).not.toBeInTheDocument();
+  });
+
+  it("blocks entry and shows recovery guidance for database faults", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL) => {
+        const url = String(input);
+        if (url === "/api/setup/status") return response({ ...setupRequired, setup_required: false });
+        if (url === "/api/health") return response(readyHealth);
+        if (url === "/api/app/status") {
+          return response(
+            { error: { code: "database_in_use", message: "desktop busy" } },
+            false,
+            503,
+          );
+        }
+        if (url === "/api/plugin-connection/status") return response(pluginDisconnected);
+        throw new Error(`unexpected request: ${url}`);
+      }),
     );
     render(<App />);
 
-    expect(await screen.findByText("数据库已就绪")).toBeInTheDocument();
-    expect(screen.getByRole("navigation", { name: "主导航" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "概览" })).toHaveClass("active");
-    expect(screen.getByRole("button", { name: "候选人" })).toBeEnabled();
-    expect(screen.getByRole("button", { name: "最近批次" })).toBeEnabled();
-    expect(screen.getByRole("button", { name: "岗位，待开发" })).toBeDisabled();
+    expect((await screen.findAllByText("桌面端正在使用人才库。请先关闭桌面端，再点击重新检查。")).length).toBeGreaterThan(0);
+    expect(screen.getByRole("button", { name: "进入工作台" })).toBeDisabled();
   });
 
-  it("shows a recoverable service failure", async () => {
+  it("can recover from a failed startup check by rechecking", async () => {
+    let run = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL) => {
+        const url = String(input);
+        if (url === "/api/setup/status") return response({ ...setupRequired, setup_required: false });
+        if (url === "/api/health") {
+          run += 1;
+          return run === 1 ? Promise.reject(new TypeError("Failed to fetch token=secret")) : response(readyHealth);
+        }
+        if (url === "/api/app/status") return response(readyStatus);
+        if (url === "/api/plugin-connection/status") return response(pluginDisconnected);
+        throw new Error(`unexpected request: ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+    render(<App />);
+
+    expect((await screen.findAllByText("无法连接本地服务，请确认网页程序仍在运行。")).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/secret/)).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "重新检查" }));
+    expect(await screen.findByRole("button", { name: "进入工作台" })).toBeEnabled();
+  });
+
+  it("does not reopen the confirmation gate during the same page session", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL) => {
+        const url = String(input);
+        if (url === "/api/setup/status") return response({ ...setupRequired, setup_required: false });
+        if (url === "/api/health") return response(readyHealth);
+        if (url === "/api/app/status") return response(readyStatus);
+        if (url === "/api/plugin-connection/status") return response(pluginDisconnected);
+        if (url.includes("/api/candidates")) return response({ rows: [], total: 0, page: 1, page_size: 100 });
+        throw new Error(`unexpected request: ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "进入工作台" }));
+    await user.click(screen.getByRole("button", { name: "候选人" }));
+    await screen.findByText("当前筛选条件下还没有候选人。");
+    expect(screen.queryByRole("heading", { name: "准备进入招聘人才工作台" })).not.toBeInTheDocument();
+  });
+
+  it("rechecks startup state when a new tab mounts the app again", async () => {
+    const fetchMock = vi.fn((input: string | URL) => {
+      const url = String(input);
+      if (url === "/api/setup/status") return response({ ...setupRequired, setup_required: false });
+      if (url === "/api/health") return response(readyHealth);
+      if (url === "/api/app/status") return response(readyStatus);
+      if (url === "/api/plugin-connection/status") return response(pluginDisconnected);
+      throw new Error(`unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const first = render(<App />);
+    await screen.findByRole("heading", { name: "准备进入招聘人才工作台" });
+    first.unmount();
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "准备进入招聘人才工作台" });
+
+    const healthCalls = fetchMock.mock.calls.filter(([url]) => String(url) === "/api/health");
+    expect(healthCalls).toHaveLength(2);
+  });
+
+  it("shows a recoverable service failure before setup status is available", async () => {
     vi.stubGlobal("fetch", vi.fn(() => Promise.reject(new Error("offline"))));
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "本地服务暂时不可用" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "重新连接" })).toBeInTheDocument();
-  });
-
-  it("distinguishes a database-not-ready response from a service failure", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi
-        .fn()
-        .mockImplementationOnce(() => response({ ...setupRequired, setup_required: false }))
-        .mockImplementationOnce(() =>
-          response(
-            { error: { code: "database_not_ready", message: "数据库尚未就绪。" } },
-            false,
-            503,
-          ),
-        ),
-    );
-    render(<App />);
-
-    expect(await screen.findByRole("heading", { name: "数据库尚未就绪" })).toBeInTheDocument();
-  });
-
-  it("shows dedicated recovery guidance when a configured database is missing", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi
-        .fn()
-        .mockImplementationOnce(() => response({ ...setupRequired, setup_required: false }))
-        .mockImplementationOnce(() =>
-          response(
-            {
-              error: {
-                code: "configured_database_missing",
-                message: "已配置的人才库文件不存在，请检查磁盘、数据目录，或从备份恢复。",
-              },
-            },
-            false,
-            503,
-          ),
-        ),
-    );
-    render(<App />);
-
-    expect(await screen.findByRole("heading", { name: "找不到已配置的人才库" })).toBeInTheDocument();
-    expect(screen.getByText(/从备份恢复/)).toBeInTheDocument();
-  });
-
-  it("labels an initialized database with no batches as empty", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi
-        .fn()
-        .mockImplementationOnce(() => response({ ...setupRequired, setup_required: false }))
-        .mockImplementationOnce(() =>
-          response({ ...readyStatus, candidate_count: 0, batch_count: 0, latest_batch_id: 0, latest_batch_status: "idle" }),
-        ),
-    );
-    render(<App />);
-
-    expect(await screen.findByText("空数据库")).toBeInTheDocument();
   });
 });

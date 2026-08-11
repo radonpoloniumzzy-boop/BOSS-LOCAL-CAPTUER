@@ -1,4 +1,4 @@
-import { FormEvent, useState } from "react";
+﻿import { FormEvent, useState } from "react";
 import { CheckCircle2, FolderLock, Users } from "lucide-react";
 
 import { requestJson, SetupStatus } from "../api";
@@ -26,7 +26,7 @@ export function SetupWizard({
       });
       await onComplete();
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "设置失败，请检查数据目录。 ");
+      setError(caught instanceof Error ? caught.message : "设置失败，请检查数据目录。");
     } finally {
       setSaving(false);
     }
@@ -35,7 +35,9 @@ export function SetupWizard({
   return (
     <main className="setup-layout">
       <section className="setup-intro">
-        <div className="product-mark"><Users size={22} aria-hidden="true" /></div>
+        <div className="product-mark">
+          <Users size={22} aria-hidden="true" />
+        </div>
         <p className="eyebrow">招聘人才 Mapping 工作台</p>
         <h1>欢迎使用本地工作台</h1>
         <p>数据保留在这台电脑上。先确认唯一的数据目录，后续启动会继续使用同一份人才库。</p>
@@ -62,7 +64,11 @@ export function SetupWizard({
             spellCheck={false}
             autoComplete="off"
           />
-          {error && <div className="notice error-notice" role="alert">{error}</div>}
+          {error && (
+            <div className="notice error-notice" role="alert">
+              {error}
+            </div>
+          )}
           <button className="primary-button full-width" disabled={saving || !dataDir.trim()}>
             {saving ? "正在初始化..." : "确认并开始使用"}
           </button>

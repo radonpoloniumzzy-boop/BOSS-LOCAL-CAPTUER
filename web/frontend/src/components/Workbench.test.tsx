@@ -9,6 +9,7 @@ type Deferred = {
 };
 
 const status = {
+  status: "ready" as const,
   version: "0.2.0",
   database_ready: true,
   data_dir: "D:\\HR-Workbench-Data",

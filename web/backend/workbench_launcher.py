@@ -1,9 +1,8 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import socket
 import subprocess
-import sys
 import time
 import urllib.error
 import urllib.request
@@ -17,6 +16,13 @@ from core.bootstrap import BootstrapConfigurationError, BootstrapStore
 
 
 REQUIRED_CAPABILITIES = frozenset({"phase2c_pairing", "batch_markdown_export"})
+STEP_READ_CONFIG = "正在读取本机配置"
+STEP_CHECK_RUNTIME = "正在检查运行环境"
+STEP_CHECK_FRONTEND = "正在检查网页资源"
+STEP_CHECK_PORT = "正在检查端口和已有服务"
+STEP_CONNECT_DATABASE = "正在连接人才库"
+STEP_CONFIRM_DATABASE = "正在确认数据库状态"
+STEP_OPEN_BROWSER = "正在打开浏览器"
 
 
 class _FrontendAssetParser(HTMLParser):
@@ -34,21 +40,35 @@ class _FrontendAssetParser(HTMLParser):
 
 RECOVERY_MESSAGES = {
     "port_in_use": "本地端口 {port} 已被其他程序占用。请关闭占用程序后重新启动网页工作台。",
-    "stale_service": "检测到旧版网页工作台仍在运行，请关闭旧实例后重新启动。",
+    "stale_service": "旧版网页工作台仍在运行。请关闭旧实例后重新启动。",
     "frontend_missing": "网页工作台前端资源不完整，请重新安装完整版本后再启动。",
     "bootstrap_invalid": "网页工作台启动配置损坏或无法读取，请检查 bootstrap.json 后重新启动。",
     "configured_database_missing": "已配置的人才库文件不存在。请检查 D 盘、移动盘或数据库文件位置，恢复后重新启动。",
     "database_corrupt": "人才库文件损坏或无法读取。请停止操作并从可用备份恢复。",
-    "database_in_use": "人才库正在被其他实例使用。请关闭桌面端或另一个网页工作台后重试。",
+    "database_in_use": "桌面端正在使用人才库。请关闭桌面端或另一个网页工作台后重试。",
     "unsupported_schema": "人才库版本高于当前程序支持版本，请升级程序后再试。",
     "database_upgrade_failed": "人才库升级失败。原数据库未被切换，请查看本地日志并从备份恢复。",
     "service_start_failed": "本地服务未能启动。请确认项目运行环境完整后重试。",
+}
+
+RECOVERY_GUIDES = {
+    "port_in_use": "恢复说明：请确认 127.0.0.1 对应端口没有被其他程序占用，关闭占用程序后点击“重新检查”。",
+    "stale_service": "恢复说明：当前端口上仍有旧版网页工作台。请先关闭旧实例，再重新检查。",
+    "frontend_missing": "恢复说明：请确认 web/frontend/dist 下存在 index.html 和 assets 产物，再重新启动。",
+    "bootstrap_invalid": "恢复说明：请检查本机启动配置和数据目录是否仍然指向原人才库，修复后重新检查。",
+    "configured_database_missing": "恢复说明：请检查已配置数据目录中的人才库文件是否被移动、改名或丢失，恢复原文件后再启动。",
+    "database_corrupt": "恢复说明：请停止写入操作，并从可用备份恢复人才库后再重试。",
+    "database_in_use": "恢复说明：请先关闭桌面端，再点击“重新检查”。网页端和桌面端不能同时占用同一人才库。",
+    "unsupported_schema": "恢复说明：请升级到支持当前人才库版本的程序后再重新启动。",
+    "database_upgrade_failed": "恢复说明：请查看本机启动日志，确认升级失败原因后从备份恢复。",
+    "service_start_failed": "恢复说明：请检查 Python 环境、前端资源和本机日志，再点击“重新检查”。",
 }
 
 
 class LaunchFailure(RuntimeError):
     def __init__(self, code: str, *, port: int = 17864) -> None:
         self.code = code
+        self.recovery = RECOVERY_GUIDES.get(code, RECOVERY_GUIDES["service_start_failed"])
         template = RECOVERY_MESSAGES.get(code, RECOVERY_MESSAGES["service_start_failed"])
         super().__init__(template.format(port=port))
 
@@ -141,34 +161,39 @@ class WorkbenchLauncher:
             pass
 
     def launch(self) -> str:
-        self.progress("正在检查运行环境")
-        if not self.frontend_ready():
-            raise LaunchFailure("frontend_missing", port=self.port)
+        self.progress(STEP_CHECK_PORT)
         service_kind = self._service_kind(self.service_probe(f"{self.url}api/health"))
         if service_kind == "stale":
             raise LaunchFailure("stale_service", port=self.port)
         if service_kind == "current":
+            self.progress("网页工作台已经运行")
+            self.progress(STEP_CONFIRM_DATABASE)
             status = self.status_probe(f"{self.url}api/app/status")
             if status is None:
-                raise LaunchFailure("service_start_failed")
+                raise LaunchFailure("service_start_failed", port=self.port)
             fault = status.get("error") if isinstance(status, dict) else None
             code = str(fault.get("code") or "") if isinstance(fault, dict) else ""
             if code and code != "database_not_ready":
-                raise LaunchFailure(code)
-            self.progress("网页工作台已经运行，正在打开浏览器")
+                raise LaunchFailure(code, port=self.port)
+            self.progress(STEP_OPEN_BROWSER)
             self.browser_open(self.url)
             return "already_running"
+
+        self.progress(STEP_CHECK_FRONTEND)
+        if not self.frontend_ready():
+            raise LaunchFailure("frontend_missing", port=self.port)
         if self.port_in_use(self.port):
             raise LaunchFailure("port_in_use", port=self.port)
-        self.progress("正在读取人才库配置")
-        self.progress("正在检查数据库")
+
+        self.progress(STEP_CONNECT_DATABASE)
+        self.progress(STEP_CONFIRM_DATABASE)
         self.progress("正在启动本地服务")
         process = self.process_start()
-        self.progress("正在等待网页工作台")
+        self.progress("正在等待网页工作台响应")
         for _ in range(self.attempts):
             if getattr(process, "poll", lambda: None)() is not None:
                 self._reap_exited_process(process)
-                raise LaunchFailure("service_start_failed")
+                raise LaunchFailure("service_start_failed", port=self.port)
             service_kind = self._service_kind(self.service_probe(f"{self.url}api/health"))
             if service_kind == "stale":
                 self._stop_process(process)
@@ -182,13 +207,13 @@ class WorkbenchLauncher:
                 code = str(fault.get("code") or "") if isinstance(fault, dict) else ""
                 if code and code != "database_not_ready":
                     self._stop_process(process)
-                    raise LaunchFailure(code)
-                self.progress("启动成功，正在打开浏览器")
+                    raise LaunchFailure(code, port=self.port)
+                self.progress(STEP_OPEN_BROWSER)
                 self.browser_open(self.url)
                 return "started"
             self.wait(0.2)
         self._stop_process(process)
-        raise LaunchFailure("service_start_failed")
+        raise LaunchFailure("service_start_failed", port=self.port)
 
 
 def _frontend_assets_ready(project_root: Path) -> bool:
@@ -214,11 +239,14 @@ def create_default_launcher(
     *,
     bootstrap_store: BootstrapStore | None = None,
 ) -> WorkbenchLauncher:
+    progress(STEP_READ_CONFIG)
     try:
         configured = (bootstrap_store or BootstrapStore()).load()
     except BootstrapConfigurationError as exc:
         raise LaunchFailure("bootstrap_invalid") from exc
     port = configured.web_port if configured else 17864
+
+    progress(STEP_CHECK_RUNTIME)
     pythonw = project_root / ".venv" / "Scripts" / "pythonw.exe"
     if not pythonw.is_file():
         raise LaunchFailure("service_start_failed")

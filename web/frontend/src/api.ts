@@ -1,4 +1,4 @@
-export type SetupStatus = {
+﻿export type SetupStatus = {
   setup_required: boolean;
   suggested_data_dir: string;
   configured_data_dir: string | null;
@@ -6,6 +6,7 @@ export type SetupStatus = {
 };
 
 export type AppStatus = {
+  status: "ready";
   version: string;
   database_ready: boolean;
   data_dir: string;
@@ -13,6 +14,13 @@ export type AppStatus = {
   batch_count: number;
   latest_batch_id: number;
   latest_batch_status: string;
+};
+
+export type HealthStatus = {
+  status: string;
+  service: string;
+  version: string;
+  capabilities: string[];
 };
 
 export type CandidateRow = {
@@ -85,6 +93,7 @@ export async function requestJson<T>(path: string, init?: RequestInit): Promise<
   } catch {
     throw new ApiRequestError("network_error", "无法连接本地服务，请确认网页程序仍在运行。");
   }
+
   const payload = (await response.json()) as T & ApiError;
   if (!response.ok) {
     throw new ApiRequestError(

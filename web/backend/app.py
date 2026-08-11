@@ -178,6 +178,7 @@ def create_web_app(
         stats = runtime.repository.get_dashboard_stats()
         configured = bootstrap.store.load()
         return {
+            "status": "ready",
             "version": APP_VERSION,
             "database_ready": True,
             "data_dir": configured.data_dir if configured else "",
