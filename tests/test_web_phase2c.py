@@ -903,6 +903,28 @@ class WorkbenchLauncherBehaviorTest(unittest.TestCase):
         self.assertEqual(events[4], {"step": STEP_CONNECT_DATABASE, "state": "completed", "detail": "人才库已连接"})
         self.assertEqual(events[5], {"step": STEP_CONFIRM_DATABASE, "state": "completed", "detail": "人才库状态已确认"})
 
+    def test_running_service_with_unavailable_app_status_marks_both_database_steps_failed(self) -> None:
+        events: list[dict[str, str]] = []
+        opened: list[str] = []
+        launcher = WorkbenchLauncher(
+            service_probe=lambda _url: self.current_health(),
+            status_probe=lambda _url: None,
+            port_in_use=lambda _port: True,
+            process_start=lambda: None,
+            browser_open=opened.append,
+            wait=lambda _seconds: None,
+            progress=events.append,
+        )
+
+        with self.assertRaises(LaunchFailure) as caught:
+            launcher.launch()
+        self.assertEqual(caught.exception.code, "service_start_failed")
+        final_states = {event["step"]: event["state"] for event in events}
+        self.assertEqual(final_states[STEP_CONNECT_DATABASE], "failed")
+        self.assertEqual(final_states[STEP_CONFIRM_DATABASE], "failed")
+        self.assertNotIn("running", final_states.values())
+        self.assertEqual(opened, [])
+
     def test_first_setup_path_uses_not_ready_copy_without_claiming_database_connected(self) -> None:
         events: list[dict[str, str]] = []
         launcher = WorkbenchLauncher(
@@ -965,6 +987,50 @@ class WorkbenchLauncherBehaviorTest(unittest.TestCase):
                 self.assertEqual(final_states[STEP_CONNECT_DATABASE], "failed")
                 self.assertEqual(final_states[STEP_CONFIRM_DATABASE], "failed")
                 self.assertNotIn("running", final_states.values())
+
+    def test_started_service_with_unavailable_app_status_marks_both_database_steps_failed_and_reaps_process(self) -> None:
+        events: list[dict[str, str]] = []
+        opened: list[str] = []
+        reaped: list[str] = []
+        health_calls = {"count": 0}
+
+        class Process:
+            def poll(self):
+                return None
+
+            def terminate(self):
+                reaped.append("terminate")
+
+            def wait(self, timeout=None):
+                reaped.append(f"wait:{timeout}")
+
+        def health(_url):
+            health_calls["count"] += 1
+            return None if health_calls["count"] == 1 else self.current_health()
+
+        def status_probe(_url):
+            return None
+
+        launcher = WorkbenchLauncher(
+            service_probe=health,
+            status_probe=status_probe,
+            port_in_use=lambda _port: False,
+            process_start=Process,
+            browser_open=opened.append,
+            wait=lambda _seconds: None,
+            attempts=3,
+            progress=events.append,
+        )
+
+        with self.assertRaises(LaunchFailure) as caught:
+            launcher.launch()
+        self.assertEqual(caught.exception.code, "service_start_failed")
+        final_states = {event["step"]: event["state"] for event in events}
+        self.assertEqual(final_states[STEP_CONNECT_DATABASE], "failed")
+        self.assertEqual(final_states[STEP_CONFIRM_DATABASE], "failed")
+        self.assertNotIn("running", final_states.values())
+        self.assertEqual(opened, [])
+        self.assertEqual(reaped, ["terminate", "wait:3"])
 
     def test_launcher_cancel_stops_only_started_process_and_skips_browser_open(self) -> None:
         events: list[str] = []

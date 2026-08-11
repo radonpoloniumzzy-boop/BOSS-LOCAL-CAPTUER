@@ -275,6 +275,7 @@ class WorkbenchLauncher:
             status = self.status_probe(f"{self.url}api/app/status")
             result, code = self._database_result(status)
             if result == "unavailable":
+                self._emit_database_failure("service_start_failed")
                 raise LaunchFailure("service_start_failed", port=self.port, step=STEP_CONFIRM_DATABASE)
             if result == "error" and code is not None:
                 self._emit_database_failure(code)
@@ -338,6 +339,7 @@ class WorkbenchLauncher:
             self.wait(0.2)
         self._stop_process(process)
         self._started_process = None
+        self._emit_database_failure("service_start_failed")
         raise LaunchFailure(
             "service_start_failed",
             port=self.port,
