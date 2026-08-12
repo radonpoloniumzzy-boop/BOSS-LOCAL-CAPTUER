@@ -26,7 +26,8 @@ if (!globalThis.__bossLocalCaptureInjected) {
     tags: [".tags span", ".tag-list span", ".labels span", ".tag", "[class*='tag'] span"],
     summary: [".description", ".summary", ".card-desc", ".self-intro", "[class*='summary']", "[class*='desc']"],
     detailLink: ["a[href*='geek']", "a[href*='candidate']", "a[href*='zhipin.com']"],
-    platformUidAttrs: ["data-geek-id", "data-id", "data-candidate-id", "data-user-id"],
+    platformUidAttrs: ["data-geek-id", "data-candidate-id", "data-user-id"],
+    sourceCandidateIdAttrs: ["data-id", "data-geek-id", "data-candidate-id", "data-user-id"],
   };
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -79,6 +80,8 @@ if (!globalThis.__bossLocalCaptureInjected) {
     }
 
     const payload = {
+      job_profile_id: settings.jobProfileId,
+      recruitment_task_id: settings.recruitmentTaskId,
       job_title: settings.jobTitle,
       source_url: location.href,
       cards: Array.from(cardsByKey.values()),
@@ -154,6 +157,7 @@ if (!globalThis.__bossLocalCaptureInjected) {
     const rawText = normalizeCardText(card.innerText || card.textContent || "");
     const inferred = inferFieldsFromText(rawText, card);
     return {
+      source_candidate_id: firstAttr(card, SELECTORS.sourceCandidateIdAttrs) || "",
       raw_card_text: rawText,
       name: firstText(card, SELECTORS.name) || inferred.name,
       active_status: firstText(card, SELECTORS.activeStatus) || inferred.active_status,

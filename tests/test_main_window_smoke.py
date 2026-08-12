@@ -14,6 +14,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from core.config import ConfigService
+from core.models import CandidateRecord, JobProfile, RecruitmentTask
 from ui.main_window import MainWindow
 
 
@@ -36,6 +37,235 @@ class MainWindowSmokeTest(unittest.TestCase):
                 self.assertTrue(window.candidate_query_thread.isRunning())
                 window.close()
                 QTest.qWait(50)
+
+    def test_product_development_page_is_available_from_navigation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_service = ConfigService(Path(tmp_dir))
+            assets_dir = config_service.app_root / "assets"
+            assets_dir.mkdir(parents=True, exist_ok=True)
+            source_plan = Path(__file__).parents[1] / "assets" / "product_development_plan.json"
+            (assets_dir / "product_development_plan.json").write_text(
+                source_plan.read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            config = config_service.default_config()
+            config.local_api_port = 0
+            config_service.save(config)
+
+            with patch("ui.main_window.ConfigService", return_value=config_service):
+                window = MainWindow()
+                try:
+                    self.assertIn("产品建设", window._navigation_full_labels)
+                    product_index = window._navigation_full_labels.index("产品建设")
+                    window.navigation.setCurrentRow(product_index)
+                    QTest.qWait(20)
+                    self.assertIs(
+                        window._page_scroll_areas[product_index].widget(),
+                        window.product_development_page,
+                    )
+                    self.assertIn("0.5.0-dev", window.product_development_page.version_value.text())
+                    version_statuses = {
+                        window.product_development_page.version_table.item(row, 2).text()
+                        for row in range(window.product_development_page.version_table.rowCount())
+                    }
+                    self.assertIn("暂无稳定版", version_statuses)
+                    window.product_development_page.feedback_description_input.setPlainText(
+                        "测试环境反馈"
+                    )
+                    window.product_development_page.feedback_submit_button.click()
+                    self.assertTrue((config_service.data_dir / "product_feedback.json").exists())
+                    self.assertEqual(window.product_development_page.feedback_table.rowCount(), 1)
+                finally:
+                    window.close()
+                    QTest.qWait(50)
+
+    def test_ai_human_comparison_is_available_and_links_to_candidate_page(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_service = ConfigService(Path(tmp_dir))
+            config = config_service.default_config()
+            config.local_api_port = 0
+            config_service.save(config)
+
+            with patch("ui.main_window.ConfigService", return_value=config_service):
+                window = MainWindow()
+                try:
+                    batch = window.repository.create_batch("产品经理", "https://example.com")
+                    window.repository.upsert_batch_candidates(
+                        int(batch.id),
+                        [
+                            CandidateRecord(
+                                candidate_key="comparison:alpha",
+                                raw_text_hash="comparison-alpha",
+                                job_title="产品经理",
+                                source_url="https://example.com",
+                                capture_time="2026-08-06T10:00:00",
+                                raw_card_text="Alpha 候选人",
+                                name="Alpha 候选人",
+                            ),
+                            CandidateRecord(
+                                candidate_key="comparison:zulu",
+                                raw_text_hash="comparison-zulu",
+                                job_title="产品经理",
+                                source_url="https://example.com",
+                                capture_time="2026-08-06T10:00:01",
+                                raw_card_text="Zulu 目标候选人",
+                                name="Zulu 目标候选人",
+                            ),
+                        ],
+                    )
+                    target = next(
+                        row
+                        for row in window.repository.list_candidates()
+                        if row["name"] == "Zulu 目标候选人"
+                    )
+                    first_role = window.repository.save_job_profile(
+                        JobProfile(
+                            job_title="对照岗位一", jd_text="JD", prompt_text="Prompt", status="active"
+                        )
+                    )
+                    second_role = window.repository.save_job_profile(
+                        JobProfile(
+                            job_title="对照岗位二", jd_text="JD", prompt_text="Prompt", status="active"
+                        )
+                    )
+                    for role in [first_role, second_role]:
+                        window.repository.upsert_candidate_role_match(
+                            candidate_id=int(target["id"]),
+                            role_id=int(role.id),
+                            match_status="ai_screened",
+                            recruitment_status="screened",
+                        )
+                    self.assertIn("AI 对照", window._navigation_full_labels)
+                    comparison_index = window._navigation_full_labels.index("AI 对照")
+                    window.navigation.setCurrentRow(comparison_index)
+                    QTest.qWait(20)
+                    self.assertIs(
+                        window._page_scroll_areas[comparison_index].widget(),
+                        window.ai_human_comparison_page,
+                    )
+                    window.ai_human_comparison_page.set_page_result(
+                        [{"candidate_id": int(target["id"]), "name": "Zulu 目标候选人"}],
+                        total=1,
+                        page=1,
+                        page_size=100,
+                    )
+                    window.ai_human_comparison_page.open_candidate_button.click()
+                    self.assertEqual(
+                        window.navigation.currentRow(),
+                        window._navigation_full_labels.index("候选人"),
+                    )
+                    for _attempt in range(60):
+                        QTest.qWait(50)
+                        if window.candidates_page.selected_candidate_id() == int(target["id"]):
+                            break
+                    self.assertIn("Zulu 目标候选人", window.candidates_page.detail_text.toPlainText())
+                    self.assertEqual(window.candidates_page.selected_candidate_id(), int(target["id"]))
+                    window._open_comparison_candidate(int(target["id"]), int(second_role.id))
+                    for _attempt in range(60):
+                        QTest.qWait(50)
+                        role_data = window.candidates_page.status_role_combo.currentData()
+                        if isinstance(role_data, dict) and role_data.get("role_id") == second_role.id:
+                            break
+                    self.assertEqual(
+                        window.candidates_page.status_role_combo.currentData()["role_id"],
+                        second_role.id,
+                    )
+                finally:
+                    window.close()
+                    QTest.qWait(50)
+
+    def test_recruitment_task_can_create_next_action_from_workbench(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_service = ConfigService(Path(tmp_dir))
+            config = config_service.default_config()
+            config.local_api_port = 0
+            config_service.save(config)
+
+            with patch("ui.main_window.ConfigService", return_value=config_service):
+                window = MainWindow()
+                try:
+                    profile = window.repository.list_job_profiles(active_only=True)[0]
+                    task = window.repository.save_recruitment_task(
+                        RecruitmentTask(
+                            name="下一步动作测试任务",
+                            role_id=int(profile["id"]),
+                            source_url="https://example.com",
+                        )
+                    )
+
+                    window._prefill_task_next_action(int(task.id))
+                    window.next_actions_page.title_input.setText("检查招聘进展")
+                    window.next_actions_page.save_button.click()
+                    for _attempt in range(20):
+                        QTest.qWait(50)
+                        if window.next_actions_page.table.rowCount() == 1:
+                            break
+
+                    actions = window.repository.page_next_actions(
+                        view="all", page=1, page_size=20
+                    )
+                    self.assertEqual(
+                        window.navigation.currentRow(),
+                        window._navigation_full_labels.index("行动待办"),
+                    )
+                    self.assertEqual(actions["total"], 1)
+                    self.assertEqual(actions["rows"][0]["task_id"], task.id)
+                finally:
+                    window.close()
+                    QTest.qWait(50)
+
+    def test_job_center_is_the_single_editor_and_feeds_operational_pages(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_service = ConfigService(Path(tmp_dir))
+            assets_dir = config_service.app_root / "assets"
+            assets_dir.mkdir(parents=True, exist_ok=True)
+            source_plan = Path(__file__).parents[1] / "assets" / "product_development_plan.json"
+            (assets_dir / "product_development_plan.json").write_text(
+                source_plan.read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            config = config_service.default_config()
+            config.local_api_port = 0
+            config_service.save(config)
+
+            with patch("ui.main_window.ConfigService", return_value=config_service):
+                window = MainWindow()
+                try:
+                    QTest.qWait(500)
+                    self.assertIn("岗位中心", window._navigation_full_labels)
+                    self.assertGreaterEqual(window.job_profiles_page.profile_table.rowCount(), 1)
+                    self.assertTrue(window.ai_page.job_title_input.isReadOnly())
+                    self.assertTrue(window.ai_page.save_profile_button.isHidden())
+                    self.assertGreaterEqual(window.dashboard_page.job_profile_combo.count(), 1)
+
+                    window.job_profiles_page.new_button.click()
+                    window.job_profiles_page.job_title_input.setText("数据分析师")
+                    window.job_profiles_page.jd_input.setPlainText("负责招聘数据分析")
+                    active_index = window.job_profiles_page.status_combo.findData("active")
+                    window.job_profiles_page.status_combo.setCurrentIndex(active_index)
+                    window.job_profiles_page.save_button.click()
+
+                    titles = {
+                        row["job_title"] for row in window.repository.list_job_profiles()
+                    }
+                    self.assertIn("数据分析师", titles)
+                    dashboard_titles = {
+                        window.dashboard_page.job_profile_combo.itemText(index)
+                        for index in range(window.dashboard_page.job_profile_combo.count())
+                    }
+                    self.assertIn("数据分析师", dashboard_titles)
+                    self.assertIn("招聘任务", window._navigation_full_labels)
+                    window.refresh_recruitment_tasks()
+                    window.recruitment_tasks_page.name_input.setText("数据分析师首轮 Mapping")
+                    window.recruitment_tasks_page.target_candidates_input.setValue(30)
+                    window.recruitment_tasks_page.save_button.click()
+                    self.assertIn(
+                        "数据分析师首轮 Mapping",
+                        {row["name"] for row in window.repository.list_recruitment_tasks()},
+                    )
+                finally:
+                    window.close()
+                    QTest.qWait(50)
 
     def test_repeated_api_connection_tests_finish_without_thread_crash(self) -> None:
         class FakeProvider:

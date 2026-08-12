@@ -117,22 +117,40 @@
         width: auto;
         margin: 0;
       }
+
+      .advanced-settings {
+        margin-top: 10px;
+        padding: 8px 10px;
+        border: 1px solid #d9dee3;
+        border-radius: 4px;
+        background: #f8faf9;
+      }
+
+      .advanced-settings summary {
+        cursor: pointer;
+        color: #3d4b46;
+        font-size: 12px;
+        font-weight: 600;
+      }
     </style>
   </head>
   <body>
     <label for="jobTitle">岗位名称</label>
     <input id="jobTitle" type="text" placeholder="Boss 推荐牛人 / 猎聘推荐人才">
 
-    <label for="pairingCode">桌面端连接码</label>
-    <input id="pairingCode" type="password" placeholder="粘贴桌面端复制的连接码">
-    <button id="applyPairingCode" type="button">应用连接码并测试</button>
-    <div class="hint">在桌面端“设置”点击“复制扩展连接码”，粘贴到这里即可自动配置。</div>
+    <label for="pairingCode">工作台连接码</label>
+    <input id="pairingCode" type="password" placeholder="粘贴网页工作台设置页生成的连接码">
+    <button id="applyPairingCode" type="button">连接并记住</button>
+    <div class="hint">Web 模式只需粘贴一次连接码；桌面端旧连接码仍可继续使用。</div>
 
-    <label for="apiBase">本地接口地址</label>
-    <input id="apiBase" type="text" value="http://127.0.0.1:17863">
+    <details class="advanced-settings" id="desktopAdvanced">
+      <summary>桌面兼容模式 / 高级设置</summary>
+      <label for="apiBase">本地接口地址</label>
+      <input id="apiBase" type="text" value="http://127.0.0.1:17863">
 
-    <label for="apiToken">本地接口 Token</label>
-    <input id="apiToken" type="password" placeholder="从桌面端 Settings 复制">
+      <label for="apiToken">本地接口 Token</label>
+      <input id="apiToken" type="password" placeholder="桌面兼容模式手工设置">
+    </details>
 
     <div class="row">
       <div>
@@ -176,6 +194,9 @@
       <button id="collectAuto">自动滚动后采集</button>
       <button id="pauseScroll">暂停滚动</button>
     </div>
+
+    <button id="downloadCurrentBatch" type="button" disabled>导出本批次 Markdown</button>
+    <div class="hint">Web 模式导出 Markdown；桌面兼容模式继续使用原 CSV 导出链路。</div>
 
     <div class="hint">推荐采集支持 Boss 推荐页和猎聘推荐页。自动滚动中点击“暂停滚动”，会停止继续滚动并导入已采集卡片。</div>
 
@@ -231,9 +252,20 @@
       <div id="batchLog" class="status-box">No runtime log yet.</div>
     </div>
 
+    <div class="row" style="margin-top: 8px;">
+      <button id="retryWebIntake" type="button">重新发送到网页工作台</button>
+      <button id="openWebWorkbench" type="button">打开网页工作台</button>
+    </div>
+    <div id="webIntakeStatus" class="status-box">网页入库：等待发送。</div>
     <div id="status" class="status-box">就绪。</div>
 
     <script src="pairing.js"></script>
+    <script src="batch_export.js"></script>
+    <script src="web_intake_identity.js"></script>
+    <script src="web_intake_storage.js"></script>
+    <script src="web_intake_ui.js"></script>
+    <script src="web_intake_sender.js"></script>
+    <script src="web_intake.js"></script>
     <script src="popup.js"></script>
   </body>
 </html>

@@ -1,5 +1,22 @@
 from __future__ import annotations
 
+import json
+
+
+LATEST_SCHEMA_VERSION = 17
+
+
+def _json_or_default(value: object, default: object) -> object:
+    try:
+        decoded = json.loads(str(value or ""))
+    except (TypeError, json.JSONDecodeError):
+        return default
+    if isinstance(default, list) and not isinstance(decoded, list):
+        return default
+    if isinstance(default, dict) and not isinstance(decoded, dict):
+        return default
+    return decoded
+
 V1_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER NOT NULL PRIMARY KEY
@@ -10,6 +27,7 @@ CREATE TABLE IF NOT EXISTS candidates (
     candidate_key TEXT NOT NULL UNIQUE,
     raw_text_hash TEXT NOT NULL,
     platform_uid TEXT,
+    source_platform TEXT NOT NULL DEFAULT '',
     job_title TEXT NOT NULL,
     source_url TEXT NOT NULL,
     capture_time TEXT NOT NULL,
@@ -34,10 +52,16 @@ CREATE TABLE IF NOT EXISTS capture_batches (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     job_title TEXT NOT NULL,
     source_url TEXT NOT NULL,
+    source_platform TEXT NOT NULL DEFAULT '',
+    request_id TEXT NOT NULL DEFAULT '',
+    request_payload_hash TEXT NOT NULL DEFAULT '',
     start_time TEXT NOT NULL,
     end_time TEXT,
     total_collected INTEGER NOT NULL DEFAULT 0,
     total_new INTEGER NOT NULL DEFAULT 0,
+    total_updated INTEGER NOT NULL DEFAULT 0,
+    total_skipped INTEGER NOT NULL DEFAULT 0,
+    total_failed INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL,
     note TEXT,
     created_at TEXT NOT NULL,
@@ -56,6 +80,9 @@ CREATE TABLE IF NOT EXISTS capture_batch_items (
     capture_time TEXT NOT NULL,
     job_title TEXT NOT NULL,
     source_url TEXT NOT NULL,
+    source_platform TEXT NOT NULL DEFAULT '',
+    platform_uid TEXT NOT NULL DEFAULT '',
+    ingest_status TEXT NOT NULL DEFAULT 'new',
     name TEXT,
     active_status TEXT,
     expected_salary TEXT,
@@ -649,10 +676,162 @@ def apply_migrations(connection) -> None:
         "evidence_policy_json": "TEXT NOT NULL DEFAULT '{}'",
         "version": "INTEGER NOT NULL DEFAULT 1",
         "parent_profile_id": "INTEGER",
+        "department": "TEXT NOT NULL DEFAULT ''",
+        "hiring_manager": "TEXT NOT NULL DEFAULT ''",
+        "location": "TEXT NOT NULL DEFAULT ''",
+        "employment_type": "TEXT NOT NULL DEFAULT ''",
+        "experience_requirement": "TEXT NOT NULL DEFAULT ''",
+        "education_requirement": "TEXT NOT NULL DEFAULT ''",
+        "target_hires": "INTEGER NOT NULL DEFAULT 1",
+        "recruitment_deadline": "TEXT NOT NULL DEFAULT ''",
+        "priority": "TEXT NOT NULL DEFAULT 'normal'",
+        "status": "TEXT NOT NULL DEFAULT 'active'",
     }
     for column, declaration in structured_columns.items():
         if column not in profile_columns:
             connection.execute(f"ALTER TABLE screening_profiles ADD COLUMN {column} {declaration}")
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_screening_profiles_status_updated "
+        "ON screening_profiles(status, updated_at DESC)"
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS job_profile_versions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            profile_id INTEGER NOT NULL,
+            version INTEGER NOT NULL,
+            snapshot_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(profile_id) REFERENCES screening_profiles(id) ON DELETE CASCADE,
+            UNIQUE(profile_id, version)
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_job_profile_versions_profile_version "
+        "ON job_profile_versions(profile_id, version DESC)"
+    )
+    profile_cursor = connection.execute("SELECT * FROM screening_profiles")
+    profile_columns_in_order = [str(column[0]) for column in profile_cursor.description]
+    profile_rows = profile_cursor.fetchall()
+    for row in profile_rows:
+        values = dict(zip(profile_columns_in_order, row))
+        snapshot = {
+            "id": int(values["id"]),
+            "job_title": str(values.get("job_title") or ""),
+            "department": str(values.get("department") or ""),
+            "hiring_manager": str(values.get("hiring_manager") or ""),
+            "location": str(values.get("location") or ""),
+            "employment_type": str(values.get("employment_type") or ""),
+            "experience_requirement": str(values.get("experience_requirement") or ""),
+            "education_requirement": str(values.get("education_requirement") or ""),
+            "target_hires": int(values.get("target_hires") or 1),
+            "recruitment_deadline": str(values.get("recruitment_deadline") or ""),
+            "priority": str(values.get("priority") or "normal"),
+            "status": str(values.get("status") or "draft"),
+            "jd_text": str(values.get("jd_text") or ""),
+            "prompt_text": str(values.get("prompt_text") or ""),
+            "prompt_source": str(values.get("prompt_source") or "generated"),
+            "must_have": _json_or_default(values.get("must_have_json"), []),
+            "nice_to_have": _json_or_default(values.get("nice_to_have_json"), []),
+            "risk_flags": _json_or_default(values.get("risk_flags_json"), []),
+            "exclusions": _json_or_default(values.get("exclusions_json"), []),
+            "interview_checks": _json_or_default(values.get("interview_checks_json"), []),
+            "evidence_policy": _json_or_default(values.get("evidence_policy_json"), {}),
+            "version": int(values.get("version") or 1),
+            "parent_profile_id": values.get("parent_profile_id"),
+        }
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO job_profile_versions(
+                profile_id, version, snapshot_json, created_at
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (
+                int(values["id"]),
+                int(values.get("version") or 1),
+                json.dumps(snapshot, ensure_ascii=False, sort_keys=True),
+                str(values.get("updated_at") or values.get("created_at") or ""),
+            ),
+        )
+    batch_columns = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(capture_batches)").fetchall()
+    }
+    if "source_platform" not in batch_columns:
+        connection.execute(
+            "ALTER TABLE capture_batches ADD COLUMN source_platform TEXT NOT NULL DEFAULT ''"
+        )
+    if "request_id" not in batch_columns:
+        connection.execute(
+            "ALTER TABLE capture_batches ADD COLUMN request_id TEXT NOT NULL DEFAULT ''"
+        )
+    if "request_payload_hash" not in batch_columns:
+        connection.execute(
+            "ALTER TABLE capture_batches ADD COLUMN request_payload_hash TEXT NOT NULL DEFAULT ''"
+        )
+    if "total_updated" not in batch_columns:
+        connection.execute(
+            "ALTER TABLE capture_batches ADD COLUMN total_updated INTEGER NOT NULL DEFAULT 0"
+        )
+    if "total_skipped" not in batch_columns:
+        connection.execute(
+            "ALTER TABLE capture_batches ADD COLUMN total_skipped INTEGER NOT NULL DEFAULT 0"
+        )
+    if "total_failed" not in batch_columns:
+        connection.execute(
+            "ALTER TABLE capture_batches ADD COLUMN total_failed INTEGER NOT NULL DEFAULT 0"
+        )
+    if "role_id" not in batch_columns:
+        connection.execute("ALTER TABLE capture_batches ADD COLUMN role_id INTEGER")
+    connection.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_capture_batches_request_id "
+        "ON capture_batches(request_id) WHERE request_id <> ''"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_capture_batches_platform_start "
+        "ON capture_batches(source_platform, start_time DESC)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_capture_batches_role_start "
+        "ON capture_batches(role_id, start_time DESC)"
+    )
+    candidate_columns = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(candidates)").fetchall()
+    }
+    if "source_platform" not in candidate_columns:
+        connection.execute(
+            "ALTER TABLE candidates ADD COLUMN source_platform TEXT NOT NULL DEFAULT ''"
+        )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_candidates_source_platform_updated "
+        "ON candidates(source_platform, updated_at DESC)"
+    )
+    batch_item_columns = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(capture_batch_items)").fetchall()
+    }
+    if "source_platform" not in batch_item_columns:
+        connection.execute(
+            "ALTER TABLE capture_batch_items ADD COLUMN source_platform TEXT NOT NULL DEFAULT ''"
+        )
+    if "platform_uid" not in batch_item_columns:
+        connection.execute(
+            "ALTER TABLE capture_batch_items ADD COLUMN platform_uid TEXT NOT NULL DEFAULT ''"
+        )
+    if "ingest_status" not in batch_item_columns:
+        connection.execute(
+            "ALTER TABLE capture_batch_items ADD COLUMN ingest_status TEXT NOT NULL DEFAULT 'new'"
+        )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_capture_batch_items_platform_capture "
+        "ON capture_batch_items(source_platform, capture_time DESC)"
+    )
+    run_columns = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(screening_runs)").fetchall()
+    }
+    if "profile_version" not in run_columns:
+        connection.execute(
+            "ALTER TABLE screening_runs ADD COLUMN profile_version INTEGER NOT NULL DEFAULT 0"
+        )
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_candidates_job_updated ON candidates(job_title, updated_at DESC)"
     )
@@ -664,6 +843,108 @@ def apply_migrations(connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_role_matches_role_recruitment_rating_updated "
         "ON candidate_role_matches(role_id, recruitment_status, latest_rating, updated_at DESC)"
     )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS recruitment_tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            role_id INTEGER NOT NULL,
+            profile_version INTEGER NOT NULL,
+            platform TEXT NOT NULL DEFAULT 'boss',
+            source_url TEXT NOT NULL DEFAULT '',
+            target_candidates INTEGER NOT NULL DEFAULT 0,
+            target_ssr INTEGER NOT NULL DEFAULT 0,
+            minimum_rating TEXT NOT NULL DEFAULT 'SR',
+            view_quota INTEGER NOT NULL DEFAULT 0,
+            greeting_quota INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'ready',
+            current_step TEXT NOT NULL DEFAULT '待启动',
+            latest_message TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(role_id) REFERENCES screening_profiles(id) ON DELETE RESTRICT
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_recruitment_tasks_role_status_updated "
+        "ON recruitment_tasks(role_id, status, updated_at DESC)"
+    )
+    batch_columns = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(capture_batches)").fetchall()
+    }
+    if "task_id" not in batch_columns:
+        connection.execute("ALTER TABLE capture_batches ADD COLUMN task_id INTEGER")
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_capture_batches_task_start "
+        "ON capture_batches(task_id, start_time DESC)"
+    )
+    run_columns = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(screening_runs)").fetchall()
+    }
+    if "task_id" not in run_columns:
+        connection.execute("ALTER TABLE screening_runs ADD COLUMN task_id INTEGER")
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_screening_runs_task_started "
+        "ON screening_runs(task_id, started_at DESC)"
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS export_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id INTEGER,
+            role_id INTEGER,
+            batch_id INTEGER,
+            file_path TEXT NOT NULL,
+            export_format TEXT NOT NULL,
+            row_count INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(task_id) REFERENCES recruitment_tasks(id) ON DELETE SET NULL,
+            FOREIGN KEY(role_id) REFERENCES screening_profiles(id) ON DELETE SET NULL,
+            FOREIGN KEY(batch_id) REFERENCES capture_batches(id) ON DELETE SET NULL
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_export_records_task_created "
+        "ON export_records(task_id, created_at DESC)"
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS next_actions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            subject_type TEXT NOT NULL,
+            candidate_id INTEGER,
+            role_id INTEGER NOT NULL,
+            task_id INTEGER,
+            action_type TEXT NOT NULL,
+            title TEXT NOT NULL,
+            owner TEXT NOT NULL DEFAULT '',
+            due_at TEXT NOT NULL,
+            priority TEXT NOT NULL DEFAULT 'normal',
+            status TEXT NOT NULL DEFAULT 'pending',
+            note TEXT NOT NULL DEFAULT '',
+            completed_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(candidate_id) REFERENCES candidates(id) ON DELETE CASCADE,
+            FOREIGN KEY(role_id) REFERENCES screening_profiles(id) ON DELETE RESTRICT,
+            FOREIGN KEY(task_id) REFERENCES recruitment_tasks(id) ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_next_actions_status_due "
+        "ON next_actions(status, due_at, priority)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_next_actions_candidate_role "
+        "ON next_actions(candidate_id, role_id, status)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_next_actions_task_status "
+        "ON next_actions(task_id, status)"
+    )
     connection.execute("DELETE FROM schema_version")
-    connection.execute("INSERT INTO schema_version(version) VALUES (13)")
+    connection.execute("INSERT INTO schema_version(version) VALUES (?)", (LATEST_SCHEMA_VERSION,))
     connection.commit()

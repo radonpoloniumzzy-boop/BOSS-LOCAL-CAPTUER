@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
-from PySide6.QtCore import QObject, QSettings, Qt, QThread, QUrl, Signal
+from PySide6.QtCore import QObject, QSettings, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices
 from PySide6.QtWidgets import (
     QDockWidget,
@@ -25,22 +25,30 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from automation.capture_quality import CaptureQualityService
 from automation.importer import CardImportService
 from automation.parser import CandidateParser
 from ai.prompt_manager import PromptManager
 from ai.provider import AIProviderError, ProviderSettings, validate_provider_settings
 from core.config import ConfigService
 from core.credentials import CredentialStore
+from core.extension_commands import ExtensionCommandBroker
 from core.local_api import LocalApiServer
 from core.logger import LoggingService
-from core.models import AutomationFlowConfig, ScreeningProfile
+from core.models import AutomationFlowConfig, JobProfile, NextAction, RecruitmentTask, ScreeningProfile
+from core.product_development import ProductDevelopmentRepository
 from storage.db import DatabaseManager
 from storage.export_service import ExportService
 from storage.repository import CandidateRepository
 from ui.pages.ai_screen import AIScreenPage
+from ui.pages.ai_human_comparison import AIHumanComparisonPage
 from ui.pages.automation_flow import AutomationFlowPage
 from ui.pages.candidates import CandidatesPage
 from ui.pages.dashboard import DashboardPage
+from ui.pages.job_profiles import JobProfilesPage
+from ui.pages.next_actions import NextActionsPage
+from ui.pages.product_development import ProductDevelopmentPage
+from ui.pages.recruitment_tasks import RecruitmentTasksPage
 from ui.pages.review import ReviewPage
 from ui.pages.settings import SettingsPage
 from ui.workers import (
@@ -53,6 +61,15 @@ from ui.workers import (
 )
 
 
+def initialize_database_for_startup(
+    database: DatabaseManager, *, require_existing: bool
+) -> None:
+    if require_existing:
+        database.initialize_existing()
+    else:
+        database.initialize()
+
+
 def open_local_folder(path: Path) -> bool:
     return QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.resolve())))
 
@@ -63,7 +80,7 @@ class _LogBridge(QObject):
 
 class _ImportBridge(QObject):
     imported = Signal(object)
-    error = Signal(str)
+    error = Signal(object)
 
 
 class MainWindow(QMainWindow):
@@ -74,13 +91,18 @@ class MainWindow(QMainWindow):
     candidate_query_requested = Signal(object)
     ai_connection_test_requested = Signal(object)
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        data_dir: Path | None = None,
+        require_existing_database: bool = False,
+    ) -> None:
         super().__init__()
         self.setWindowTitle("招聘候选人采集与 AI 初筛工具")
         self.resize(920, 720)
         self.setMinimumSize(720, 560)
 
-        self.config_service = ConfigService()
+        self.config_service = ConfigService(data_dir=data_dir)
         self.logging_service = LoggingService(self.config_service.logs_dir, level="INFO")
         self.config_service.logger = self.logging_service.get_logger("core")
         self.config = self.config_service.load()
@@ -96,7 +118,14 @@ class MainWindow(QMainWindow):
             self.config_service.database_path,
             logger=self.logging_service.get_logger("storage.db"),
         )
-        self.database.initialize()
+        try:
+            initialize_database_for_startup(
+                self.database,
+                require_existing=require_existing_database,
+            )
+        except Exception:
+            self.logging_service.close()
+            raise
         self.repository = CandidateRepository(
             self.database,
             logger=self.logging_service.get_logger("storage.repository"),
@@ -113,14 +142,24 @@ class MainWindow(QMainWindow):
             logger=self.logging_service.get_logger("automation.importer"),
         )
         self.prompt_manager = PromptManager(self.config_service.app_root / "assets" / "prompts")
+        self.product_development_repository = ProductDevelopmentRepository(
+            self.config_service.app_root / "assets" / "product_development_plan.json",
+            self.config_service.data_dir / "product_feedback.json",
+        )
+        self.capture_quality_service = CaptureQualityService(self.repository)
         self._ensure_builtin_screening_profiles()
 
+        self.extension_command_broker = ExtensionCommandBroker()
+        self._last_extension_command_id: str | None = None
+        self._handled_extension_command_ids: set[str] = set()
         self.local_api_server: LocalApiServer | None = None
         self.import_bridge = _ImportBridge()
         self._export_threads: list[tuple[QThread, ExportWorker]] = []
         self._candidate_request_id = 0
         self._page_request_kind: dict[int, str] = {}
         self._latest_page_request: dict[str, int] = {}
+        self._pending_candidate_focus_id: int | None = None
+        self._pending_candidate_focus_role_id: int | None = None
         self._ai_screening_thread: tuple[QThread, AIScreeningWorker] | None = None
         self._ai_screening_origin = "manual"
         self._ai_test_running = False
@@ -129,6 +168,12 @@ class MainWindow(QMainWindow):
         self._queued_automation_batches: list[dict[str, object]] = []
         self._automation_config_lock = threading.RLock()
         self._capture_running = False
+        self._active_capture_profile_id: int | None = None
+        self._active_capture_task_id: int | None = None
+        self._active_screening_profile_id: int | None = None
+        self._active_recruitment_task_id: int | None = None
+        self._selected_recruitment_task_id: int | None = None
+        self._active_ai_recruitment_task_id: int | None = None
 
         self._build_ui()
         self._setup_logging_panel()
@@ -140,6 +185,10 @@ class MainWindow(QMainWindow):
         self._connect_signals()
         self._load_config_into_pages()
         self._start_local_api_server()
+        self._extension_command_timer = QTimer(self)
+        self._extension_command_timer.setInterval(750)
+        self._extension_command_timer.timeout.connect(self._refresh_extension_command_status)
+        self._extension_command_timer.start()
         self.refresh_candidates()
         self.refresh_dashboard_stats()
         self.refresh_automation_flow()
@@ -171,7 +220,19 @@ class MainWindow(QMainWindow):
         self.navigation = QListWidget()
         self.navigation.setFixedWidth(112)
         self.navigation.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        for label in ["仪表盘", "自动化流程", "候选人", "AI 初筛", "人工复核", "设置"]:
+        for label in [
+            "仪表盘",
+            "岗位中心",
+            "招聘任务",
+            "自动化流程",
+            "候选人",
+            "AI 初筛",
+            "人工复核",
+            "AI 对照",
+            "行动待办",
+            "产品建设",
+            "设置",
+        ]:
             QListWidgetItem(label, self.navigation)
         self.navigation.setCurrentRow(0)
 
@@ -179,19 +240,30 @@ class MainWindow(QMainWindow):
         self.stack.setMinimumSize(0, 0)
         self.stack.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
         self.dashboard_page = DashboardPage()
+        self.job_profiles_page = JobProfilesPage()
+        self.recruitment_tasks_page = RecruitmentTasksPage()
         self.automation_flow_page = AutomationFlowPage()
         self.candidates_page = CandidatesPage()
         self.ai_page = AIScreenPage(self.prompt_manager)
+        self.ai_page.set_profile_editing_enabled(False)
         self.review_page = ReviewPage()
+        self.ai_human_comparison_page = AIHumanComparisonPage()
+        self.next_actions_page = NextActionsPage()
+        self.product_development_page = ProductDevelopmentPage()
         self.settings_page = SettingsPage()
 
         self._page_scroll_areas: list[QScrollArea] = []
         for page in [
             self.dashboard_page,
+            self.job_profiles_page,
+            self.recruitment_tasks_page,
             self.automation_flow_page,
             self.candidates_page,
             self.ai_page,
             self.review_page,
+            self.ai_human_comparison_page,
+            self.next_actions_page,
+            self.product_development_page,
             self.settings_page,
         ]:
             scroll_area = QScrollArea()
@@ -213,7 +285,7 @@ class MainWindow(QMainWindow):
         self._navigation_full_labels = [
             self.navigation.item(index).text() for index in range(self.navigation.count())
         ]
-        self._navigation_compact_labels = ["概", "流", "人", "AI", "核", "设"]
+        self._navigation_compact_labels = ["概", "岗", "任", "流", "人", "AI", "核", "对", "办", "建", "设"]
         self.navigation_container = QWidget()
         navigation_layout = QVBoxLayout(self.navigation_container)
         navigation_layout.setContentsMargins(0, 0, 0, 0)
@@ -380,13 +452,53 @@ class MainWindow(QMainWindow):
         self.dashboard_page.open_export_folder_requested.connect(self.handle_open_export_folder)
         self.dashboard_page.funnel_refresh_requested.connect(self.refresh_dashboard_stats)
 
+        self.job_profiles_page.profile_selected.connect(self._load_job_profile)
+        self.job_profiles_page.save_requested.connect(self._save_job_profile)
+        self.job_profiles_page.clone_requested.connect(self._clone_job_profile)
+        self.job_profiles_page.status_change_requested.connect(self._change_job_profile_status)
+
+        self.recruitment_tasks_page.save_requested.connect(self._save_recruitment_task)
+        self.recruitment_tasks_page.task_selected.connect(self._load_recruitment_task)
+        self.recruitment_tasks_page.start_requested.connect(self._start_recruitment_task)
+        self.recruitment_tasks_page.status_requested.connect(self._change_recruitment_task_status)
+        self.recruitment_tasks_page.open_platform_requested.connect(self._open_recruitment_task_platform)
+        self.recruitment_tasks_page.export_task_requested.connect(self._export_recruitment_task_report)
+        self.recruitment_tasks_page.capture_quality_refresh_requested.connect(
+            self._refresh_capture_quality
+        )
+        self.recruitment_tasks_page.open_export_requested.connect(self._open_export_file)
+        self.recruitment_tasks_page.open_export_folder_requested.connect(self.handle_open_export_folder)
+        self.recruitment_tasks_page.extension_action_requested.connect(
+            self._queue_extension_action
+        )
+        self.recruitment_tasks_page.next_action_requested.connect(
+            self._prefill_task_next_action
+        )
+
         self.candidates_page.refresh_requested.connect(self.refresh_candidates)
         self.candidates_page.export_requested.connect(self._export_candidates_view)
         self.candidates_page.candidate_selected.connect(self._load_candidate_detail)
         self.candidates_page.status_change_requested.connect(self._record_recruitment_status_change)
+        self.candidates_page.next_action_requested.connect(
+            self._prefill_candidate_next_action
+        )
 
         self.review_page.refresh_requested.connect(self.refresh_review_queue)
         self.review_page.status_change_requested.connect(self._record_recruitment_status_change)
+        self.ai_human_comparison_page.refresh_requested.connect(
+            self.refresh_ai_human_comparison
+        )
+        self.ai_human_comparison_page.candidate_open_requested.connect(
+            self._open_comparison_candidate
+        )
+        self.next_actions_page.refresh_requested.connect(self.refresh_next_actions)
+        self.next_actions_page.save_requested.connect(self._save_next_action)
+        self.next_actions_page.status_requested.connect(self._set_next_action_status)
+        self.next_actions_page.subject_open_requested.connect(self._open_next_action_subject)
+
+        self.product_development_page.feedback_submit_requested.connect(
+            self._submit_product_feedback
+        )
 
         self.ai_page.profile_selected.connect(self._load_screening_profile)
         self.ai_page.save_profile_requested.connect(self._save_screening_profile)
@@ -419,6 +531,32 @@ class MainWindow(QMainWindow):
         self.settings_page.load_config(self.config)
         self.ai_page.load_config(self.config)
         self.automation_flow_page.load_config(self.config)
+        self.refresh_job_profiles()
+        self.refresh_recruitment_tasks()
+        self.refresh_product_development()
+
+    def refresh_product_development(self) -> None:
+        try:
+            snapshot = self.product_development_repository.load_snapshot()
+        except (OSError, ValueError) as exc:
+            message = f"产品方案读取失败：{exc}"
+            self.product_development_page.show_feedback_error(message)
+            self.logger.error(message)
+            return
+        self.product_development_page.set_snapshot(snapshot)
+
+    def _submit_product_feedback(self, payload: dict[str, object]) -> None:
+        try:
+            saved = self.product_development_repository.submit_feedback(payload)
+            snapshot = self.product_development_repository.load_snapshot()
+        except (OSError, ValueError) as exc:
+            message = f"反馈保存失败：{exc}"
+            self.product_development_page.show_feedback_error(message)
+            self.statusBar().showMessage(message)
+            self.logger.error(message)
+            return
+        self.product_development_page.feedback_saved(snapshot["feedback"])
+        self.statusBar().showMessage(f"反馈已保存：{saved['id']}")
 
     def _start_local_api_server(self) -> None:
         if self.local_api_server is not None:
@@ -434,6 +572,8 @@ class MainWindow(QMainWindow):
             get_automation_status=self._automation_status_payload,
             start_automation=self._start_automation_from_extension,
             get_extension_config=self._extension_config_payload,
+            extension_command_broker=self.extension_command_broker,
+            download_batch_csv=self._build_batch_csv_download,
             auth_token=self.config.local_api_token,
         )
         try:
@@ -445,12 +585,36 @@ class MainWindow(QMainWindow):
             self.logger.exception("Failed to start local API server: %s", exc)
             QMessageBox.critical(self, "本地接口异常", f"扩展接收接口启动失败。\n{exc}")
 
+    def _build_batch_csv_download(self, batch_id: int) -> tuple[str, bytes]:
+        try:
+            return self.export_service.build_batch_csv_download(
+                batch_id,
+                columns=list(self.config.csv_columns),
+                filename_template=self.config.export_filename_template,
+            )
+        finally:
+            self.database.close_thread_connection()
+
     def _extension_config_payload(self) -> dict[str, object]:
         with self._automation_config_lock:
             self.config = self.config_service.load()
+        profile_id = self.dashboard_page.job_profile_combo.currentData()
+        task_id = self._current_running_task_id()
+        task = None
+        if task_id is not None:
+            task = self.repository.get_recruitment_task(task_id)
+            if task is None or int(task["role_id"]) != int(profile_id or 0):
+                task_id = None
         return {
             "resume_filename_template": self.config.resume_filename_template,
-            "job_title": self.config.default_job_title,
+            "job_title": (
+                self.dashboard_page.job_profile_combo.currentText()
+                or self.config.default_job_title
+            ),
+            "job_profile_id": profile_id,
+            "recruitment_task_id": task_id,
+            "platform": str(task.get("platform") or "") if task is not None else "",
+            "source_url": str(task.get("source_url") or "") if task is not None else "",
         }
 
     def handle_open_browser(self) -> None:
@@ -462,6 +626,18 @@ class MainWindow(QMainWindow):
         self._start_capture_from_dashboard(self.dashboard_page.build_collect_options())
 
     def _start_capture_from_dashboard(self, collect_options) -> None:
+        if collect_options.role_id is None:
+            QMessageBox.warning(self, "请选择岗位", "请先在岗位中心建立并启用岗位档案。")
+            return
+        selected_profile = self.repository.get_job_profile(int(collect_options.role_id))
+        if selected_profile is None or selected_profile.get("status") != "active":
+            QMessageBox.warning(self, "岗位不可用", "所选岗位不是招聘中状态，请刷新后重新选择。")
+            return
+        task_id = self._current_running_task_id()
+        if task_id is not None:
+            task = self.repository.get_recruitment_task(task_id)
+            if task is not None and int(task["role_id"]) == int(collect_options.role_id):
+                collect_options.task_id = task_id
         if "zhipin.com" in (collect_options.source_url or "").lower():
             endpoint = f"http://127.0.0.1:{self.config.local_api_port}"
             message = (
@@ -482,6 +658,9 @@ class MainWindow(QMainWindow):
             return
 
         self._capture_running = True
+        self._active_capture_profile_id = int(collect_options.role_id)
+        self._active_capture_task_id = collect_options.task_id
+        self.automation_worker.capture_service.reset_stop()
         self.dashboard_page.set_running(True)
         self.dashboard_page.set_status("running")
         self.statusBar().showMessage("正在开始采集...")
@@ -633,6 +812,7 @@ class MainWindow(QMainWindow):
             return
         rows = list(result["rows"])
         if kind == "review":
+            self.review_page.set_workbench_summary(dict(result.get("summary") or {}))
             self.review_page.set_page_result(
                 rows,
                 total=int(result["total"]),
@@ -640,6 +820,30 @@ class MainWindow(QMainWindow):
                 page_size=int(result["page_size"]),
             )
             self.statusBar().showMessage(f"人工复核：当前 {len(rows)} 条，共 {result['total']} 条")
+            return
+        if kind == "ai_human_comparison":
+            self.ai_human_comparison_page.set_summary(dict(result.get("summary") or {}))
+            self.ai_human_comparison_page.set_page_result(
+                rows,
+                total=int(result["total"]),
+                page=int(result["page"]),
+                page_size=int(result["page_size"]),
+            )
+            self.statusBar().showMessage(
+                f"AI 对照：当前 {len(rows)} 条，共 {result['total']} 条"
+            )
+            return
+        if kind == "next_actions":
+            self.next_actions_page.set_summary(dict(result.get("summary") or {}))
+            self.next_actions_page.set_page_result(
+                rows,
+                total=int(result["total"]),
+                page=int(result["page"]),
+                page_size=int(result["page_size"]),
+            )
+            self.statusBar().showMessage(
+                f"行动待办：当前 {len(rows)} 条，共 {result['total']} 条"
+            )
             return
         if kind == "screening_results":
             self.ai_page.set_result_page(
@@ -658,6 +862,14 @@ class MainWindow(QMainWindow):
             page=int(result["page"]),
             page_size=int(result["page_size"]),
         )
+        if self._pending_candidate_focus_id is not None:
+            candidate_id = self._pending_candidate_focus_id
+            self.candidates_page.select_candidate(candidate_id)
+            self._load_candidate_detail(candidate_id)
+            if self._pending_candidate_focus_role_id is not None:
+                self.candidates_page.select_status_role(self._pending_candidate_focus_role_id)
+            self._pending_candidate_focus_id = None
+            self._pending_candidate_focus_role_id = None
         self.statusBar().showMessage(
             f"候选人已加载：当前 {len(rows)} 条，共 {result['total']} 条"
         )
@@ -681,6 +893,9 @@ class MainWindow(QMainWindow):
             DashboardPage.translate_status(str(stats["latest_batch_status"]))
         )
         self.dashboard_page.inserted_value.setText(str(stats["total_candidates"]))
+        self.dashboard_page.set_next_action_summary(
+            self.repository.get_next_action_summary()
+        )
         if self.local_api_server is not None:
             self.dashboard_page.set_local_api_status(self.local_api_server.endpoint)
         else:
@@ -784,6 +999,114 @@ class MainWindow(QMainWindow):
         )
         self.statusBar().showMessage("正在加载人工复核队列...")
 
+    def refresh_ai_human_comparison(self) -> None:
+        self.ai_human_comparison_page.set_profiles(
+            [dict(profile) for profile in self.repository.list_screening_profiles()]
+        )
+        self._candidate_request_id += 1
+        request_id = self._candidate_request_id
+        self._page_request_kind[request_id] = "ai_human_comparison"
+        self._latest_page_request["ai_human_comparison"] = request_id
+        self.candidate_query_requested.emit(
+            {
+                "request_id": request_id,
+                "kind": "ai_human_comparison",
+                "filters": self.ai_human_comparison_page.current_filters(),
+                "page": self.ai_human_comparison_page.current_page(),
+                "page_size": self.ai_human_comparison_page.page_size(),
+            }
+        )
+        self.statusBar().showMessage("正在加载 AI 与人工结果对照...")
+
+    def _open_comparison_candidate(self, candidate_id: int, role_id: int | None = None) -> None:
+        self._pending_candidate_focus_id = int(candidate_id)
+        self._pending_candidate_focus_role_id = int(role_id) if role_id is not None else None
+        candidate_index = self._navigation_full_labels.index("候选人")
+        self.navigation.setCurrentRow(candidate_index)
+        self._load_candidate_detail(int(candidate_id))
+        if role_id is not None:
+            self.candidates_page.select_status_role(int(role_id))
+
+    def refresh_next_actions(self) -> None:
+        self.next_actions_page.set_profiles(
+            [dict(profile) for profile in self.repository.list_screening_profiles()]
+        )
+        self._candidate_request_id += 1
+        request_id = self._candidate_request_id
+        self._page_request_kind[request_id] = "next_actions"
+        self._latest_page_request["next_actions"] = request_id
+        self.candidate_query_requested.emit(
+            {
+                "request_id": request_id,
+                "kind": "next_actions",
+                "filters": self.next_actions_page.current_filters(),
+                "page": self.next_actions_page.current_page(),
+                "page_size": self.next_actions_page.page_size(),
+            }
+        )
+        self.statusBar().showMessage("正在加载行动待办...")
+
+    def _save_next_action(self, payload: dict[str, object]) -> None:
+        try:
+            action = NextAction(
+                **{
+                    key: payload.get(key)
+                    for key in NextAction.__dataclass_fields__
+                    if key in payload
+                }
+            )
+            self.repository.save_next_action(action)
+        except (TypeError, ValueError) as exc:
+            self.next_actions_page.feedback_label.setText(str(exc))
+            return
+        self.statusBar().showMessage("下一步动作已保存")
+        self.refresh_next_actions()
+        self.refresh_dashboard_stats()
+
+    def _set_next_action_status(self, action_id: int, status: str) -> None:
+        try:
+            self.repository.set_next_action_status(action_id, status)
+        except ValueError as exc:
+            self.next_actions_page.feedback_label.setText(str(exc))
+            return
+        self.refresh_next_actions()
+        self.refresh_dashboard_stats()
+
+    def _prefill_candidate_next_action(self, payload: dict[str, object]) -> None:
+        action_index = self._navigation_full_labels.index("行动待办")
+        self.navigation.setCurrentRow(action_index)
+        self.next_actions_page.prefill_candidate(
+            candidate_id=int(payload["candidate_id"]),
+            role_id=int(payload["role_id"]),
+            candidate_name=str(payload.get("candidate_name") or ""),
+            role_title=str(payload.get("role_title") or ""),
+        )
+
+    def _prefill_task_next_action(self, task_id: int) -> None:
+        task = self.repository.get_recruitment_task(task_id)
+        if task is None:
+            return
+        action_index = self._navigation_full_labels.index("行动待办")
+        self.navigation.setCurrentRow(action_index)
+        self.next_actions_page.prefill_task(
+            task_id=task_id,
+            role_id=int(task["role_id"]),
+            task_name=str(task["name"]),
+            role_title=str(task["role_title"]),
+        )
+
+    def _open_next_action_subject(self, payload: dict[str, object]) -> None:
+        if payload.get("subject_type") == "candidate_role":
+            self._open_comparison_candidate(
+                int(payload["candidate_id"]), int(payload["role_id"])
+            )
+            return
+        task_id = payload.get("task_id")
+        if task_id is not None:
+            task_index = self._navigation_full_labels.index("招聘任务")
+            self.navigation.setCurrentRow(task_index)
+            self._load_recruitment_task(int(task_id))
+
     def _save_settings(self, config) -> None:
         config.automation_flow = self.config.automation_flow
         self.config_service.save(config)
@@ -796,7 +1119,7 @@ class MainWindow(QMainWindow):
         self.logger.info("Settings updated")
 
     def refresh_automation_flow(self, selected_run_id: int | None = None) -> None:
-        profiles = [dict(row) for row in self.repository.list_screening_profiles()]
+        profiles = [dict(row) for row in self.repository.list_job_profiles()]
         runs = [dict(row) for row in self.repository.list_screening_runs(origin="automation")]
         self.automation_flow_page.set_profiles(
             profiles,
@@ -818,20 +1141,32 @@ class MainWindow(QMainWindow):
                 if flow.profile_id is not None
                 else None
             )
-            ready = profile is not None and bool(flow.model and flow.provider)
+            task = (
+                self.repository.get_recruitment_task(int(flow.task_id))
+                if flow.task_id is not None
+                else None
+            )
+            ready = (
+                profile is not None
+                and profile.get("status") == "active"
+                and self._automation_task_is_ready(flow.task_id, flow.profile_id)
+                and bool(flow.model and flow.provider)
+            )
             return {
                 "ready": ready,
                 "enabled": bool(flow.enabled),
                 "profile_id": flow.profile_id,
+                "task_id": flow.task_id,
                 "profile_job_title": str(profile["job_title"]) if profile else "",
                 "job_title": flow.job_title or (str(profile["job_title"]) if profile else ""),
                 "source_url": flow.source_url,
+                "platform": str(task.get("platform") or "") if task is not None else "",
                 "provider": flow.provider,
                 "model": flow.model,
                 "max_candidates": flow.max_candidates,
             }
 
-    def _start_automation_from_extension(self, _payload: dict[str, object]) -> dict[str, object]:
+    def _start_automation_from_extension(self, payload: dict[str, object]) -> dict[str, object]:
         with self._automation_config_lock:
             config = self.config_service.load()
             flow = config.automation_flow
@@ -840,6 +1175,13 @@ class MainWindow(QMainWindow):
             profile = self.repository.get_screening_profile(int(flow.profile_id))
             if profile is None:
                 raise ValueError("自动化筛选方案不存在，请在桌面端重新选择并保存。")
+            if profile.get("status") != "active":
+                raise ValueError("所选岗位不是招聘中状态，请先在岗位中心启用。")
+            if not self._automation_task_is_ready(flow.task_id, flow.profile_id):
+                raise ValueError("招聘任务未启动或与岗位不一致，请先在“招聘任务”页面启动任务。")
+            requested_task_id = payload.get("recruitment_task_id")
+            if requested_task_id is not None and int(requested_task_id) != int(flow.task_id or 0):
+                raise ValueError("插件指令与桌面端当前招聘任务不一致。")
             if not flow.provider or not flow.model:
                 raise ValueError("自动化流程缺少 AI 服务商或模型配置。")
             flow.enabled = True
@@ -861,7 +1203,12 @@ class MainWindow(QMainWindow):
 
     def _save_automation_flow(self, payload: dict[str, object]) -> bool:
         profile_id = payload.get("profile_id")
-        if profile_id is None or self.repository.get_screening_profile(int(profile_id)) is None:
+        profile = (
+            self.repository.get_job_profile(int(profile_id))
+            if profile_id is not None
+            else None
+        )
+        if profile is None or profile.get("status") != "active":
             self.automation_flow_page.set_status("请先选择一个已保存的筛选方案。")
             return False
         provider = dict(payload.get("provider") or {})
@@ -876,6 +1223,7 @@ class MainWindow(QMainWindow):
 
         self.config.automation_flow = AutomationFlowConfig(
             enabled=bool(payload.get("enabled")),
+            task_id=None,
             profile_id=int(profile_id),
             job_title=str(payload.get("job_title") or "").strip(),
             source_url=source_url,
@@ -927,7 +1275,7 @@ class MainWindow(QMainWindow):
                 candidate_id=candidate_id,
                 role_id=int(payload["role_id"]),
                 to_status=str(payload["to_status"]),
-                operator="user",
+                operator=str(payload.get("operator") or "user"),
                 reason_code=str(payload.get("reason_code") or ""),
                 note=str(payload.get("note") or ""),
             )
@@ -941,9 +1289,18 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "记录失败", str(exc))
 
     def refresh_ai_screen(self, selected_run_id: int | None = None) -> None:
-        profiles = [dict(row) for row in self.repository.list_screening_profiles()]
+        profiles = [dict(row) for row in self.repository.list_job_profiles()]
         runs = [dict(row) for row in self.repository.list_screening_runs()]
+        active_ids = {int(profile["id"]) for profile in profiles}
+        selected_profile_id = self.ai_page.current_profile_id
+        if selected_profile_id not in active_ids:
+            selected_profile_id = int(profiles[0]["id"]) if profiles else None
         self.ai_page.set_profiles(profiles)
+        if selected_profile_id is not None:
+            self.ai_page.current_profile_id = selected_profile_id
+            self._load_screening_profile(selected_profile_id)
+        else:
+            self.ai_page.clear_profile()
         self.ai_page.set_source_options(
             self.repository.list_job_titles(),
             [dict(batch) for batch in self.repository.list_batches()],
@@ -960,11 +1317,376 @@ class MainWindow(QMainWindow):
         row = self.repository.get_screening_profile(profile_id)
         self.ai_page.show_profile(dict(row) if row else None)
 
+    def refresh_job_profiles(self, selected_profile_id: int | None = None) -> None:
+        profiles = [dict(row) for row in self.repository.list_job_profiles()]
+        active_profiles = [row for row in profiles if row.get("status") == "active"]
+        self.job_profiles_page.set_profiles(profiles)
+        self.dashboard_page.set_job_profiles(active_profiles, selected_profile_id)
+        current_id = selected_profile_id or self.job_profiles_page.current_profile_id
+        if current_id is not None:
+            self._load_job_profile(int(current_id))
+
+    def refresh_recruitment_tasks(self, selected_task_id: int | None = None) -> None:
+        profiles = [dict(row) for row in self.repository.list_job_profiles()]
+        tasks = self.repository.list_recruitment_tasks()
+        self.recruitment_tasks_page.set_job_profiles(profiles)
+        self.recruitment_tasks_page.set_tasks(tasks)
+        task_id = selected_task_id or self.recruitment_tasks_page.current_task_id
+        if task_id is not None and self.repository.get_recruitment_task(int(task_id)) is not None:
+            self._load_recruitment_task(int(task_id))
+
+    def _load_recruitment_task(self, task_id: int) -> None:
+        task = self.repository.get_recruitment_task(task_id)
+        if task is None:
+            return
+        self._selected_recruitment_task_id = task_id
+        self.recruitment_tasks_page.show_task(
+            task,
+            self.repository.get_recruitment_task_summary(task_id),
+            self.repository.list_export_records(task_id=task_id),
+        )
+        self._refresh_capture_quality(task_id)
+
+    def _refresh_capture_quality(self, task_id: int) -> None:
+        try:
+            report = self.capture_quality_service.check_task(task_id)
+            self.recruitment_tasks_page.show_capture_quality(report)
+            self.statusBar().showMessage(
+                f"采集质量检查：{report.get('decision_label') or '-'}"
+            )
+        except Exception as exc:
+            self.logger.exception("Failed to check capture quality for task %s: %s", task_id, exc)
+            self.recruitment_tasks_page.show_capture_quality(None)
+            QMessageBox.warning(self, "无法检查采集质量", str(exc))
+
+    def _save_recruitment_task(self, payload: dict[str, object]) -> None:
+        try:
+            existing = (
+                self.repository.get_recruitment_task(int(payload["id"]))
+                if payload.get("id") is not None
+                else None
+            )
+            task = RecruitmentTask(
+                id=int(payload["id"]) if payload.get("id") is not None else None,
+                name=str(payload.get("name") or "").strip(),
+                role_id=int(payload.get("role_id") or (existing or {}).get("role_id") or 0),
+                platform=str(payload.get("platform") or "boss"),
+                source_url=str(payload.get("source_url") or "").strip(),
+                target_candidates=int(payload.get("target_candidates") or 0),
+                target_ssr=int(payload.get("target_ssr") or 0),
+                minimum_rating=str(payload.get("minimum_rating") or "SR"),
+                view_quota=int(payload.get("view_quota") or 0),
+                greeting_quota=int(payload.get("greeting_quota") or 0),
+            )
+            saved = self.repository.save_recruitment_task(task)
+            self.refresh_recruitment_tasks(int(saved.id))
+            self.statusBar().showMessage(f"已保存招聘任务：{saved.name}")
+        except Exception as exc:
+            QMessageBox.warning(self, "无法保存招聘任务", str(exc))
+
+    def _start_recruitment_task(self, task_id: int) -> None:
+        try:
+            conflicting = [
+                row for row in self.repository.list_recruitment_tasks()
+                if int(row["id"]) != task_id and row.get("status") in {"running", "waiting_user"}
+            ]
+            if conflicting:
+                raise ValueError(
+                    f"任务“{conflicting[0]['name']}”仍在执行或等待人工，请先暂停、完成或取消它。"
+                )
+            existing = self.repository.get_recruitment_task(task_id)
+            if existing is None:
+                raise ValueError("招聘任务不存在")
+            profile = self.repository.get_job_profile(int(existing["role_id"]))
+            if profile is None or profile.get("status") != "active":
+                raise ValueError("关联岗位不是招聘中状态")
+            task = self.repository.set_recruitment_task_status(
+                task_id,
+                "running",
+                message="等待在招聘平台中启动插件 AUTO",
+            )
+            flow = self.config.automation_flow
+            self.config.automation_flow = AutomationFlowConfig(
+                enabled=True,
+                task_id=task_id,
+                profile_id=task.role_id,
+                job_title=str(profile["job_title"]),
+                source_url=task.source_url,
+                max_candidates=task.target_candidates,
+                provider=flow.provider,
+                model=flow.model,
+                api_base=flow.api_base,
+                api_key_env=flow.api_key_env,
+            )
+            self.config_service.save(self.config)
+            self._active_recruitment_task_id = task_id
+            self._automation_armed = True
+            self.dashboard_page.set_job_profiles([dict(profile)], task.role_id)
+            self.dashboard_page.source_url_input.setText(task.source_url)
+            self.refresh_automation_flow()
+            self.refresh_recruitment_tasks(task_id)
+            QDesktopServices.openUrl(QUrl(task.source_url))
+            self.statusBar().showMessage("任务已启动：只需在招聘平台中点击一次插件 AUTO")
+        except Exception as exc:
+            QMessageBox.warning(self, "无法启动招聘任务", str(exc))
+
+    def _change_recruitment_task_status(self, task_id: int, status: str) -> None:
+        try:
+            task = self.repository.set_recruitment_task_status(task_id, status)
+            if status in {"paused", "completed", "cancelled"}:
+                if self.config.automation_flow.task_id == task_id:
+                    self.config.automation_flow.enabled = False
+                    self.config_service.save(self.config)
+                    self._automation_armed = False
+                    self._queued_automation_batches.clear()
+                    if self._ai_screening_thread is not None:
+                        self._ai_screening_thread[1].request_stop()
+                    if self._capture_running:
+                        self.automation_worker.request_stop()
+                if self._active_recruitment_task_id == task_id:
+                    self._active_recruitment_task_id = None
+            self.refresh_recruitment_tasks(task_id)
+            self.statusBar().showMessage(f"招聘任务状态已更新：{task.name} → {status}")
+        except Exception as exc:
+            QMessageBox.warning(self, "无法更新招聘任务", str(exc))
+
+    def _open_recruitment_task_platform(self, task_id: int) -> None:
+        task = self.repository.get_recruitment_task(task_id)
+        if task is not None:
+            QDesktopServices.openUrl(QUrl(str(task.get("source_url") or self.config.target_url)))
+
+    def _export_recruitment_task_report(self, task_id: int) -> None:
+        configured_path = str(self.config.default_export_dir or "").strip()
+        export_dir = Path(configured_path) if configured_path else self.config_service.default_export_dir
+        try:
+            result = self.export_service.export_recruitment_task_report(task_id, export_dir)
+            self._open_export_file(result.file_path)
+            self.statusBar().showMessage(f"招聘任务报告已导出：{result.file_path}")
+        except Exception as exc:
+            self.logger.exception("Failed to export recruitment task report %s: %s", task_id, exc)
+            QMessageBox.warning(self, "无法导出任务报告", str(exc))
+
+    def _queue_extension_action(self, action: str, task_id: int) -> None:
+        task = self.repository.get_recruitment_task(int(task_id))
+        if task is None or task.get("status") not in {"running", "waiting_user"}:
+            self.recruitment_tasks_page.show_extension_command_status(
+                "请先启动招聘任务，再发送插件操作。"
+            )
+            return
+        try:
+            command = self.extension_command_broker.enqueue(
+                action,
+                int(task_id),
+                platform=str(task.get("platform") or ""),
+                source_url=str(task.get("source_url") or ""),
+            )
+        except ValueError as exc:
+            self.recruitment_tasks_page.show_extension_command_status(str(exc))
+            return
+        self._last_extension_command_id = str(command["id"])
+        self.recruitment_tasks_page.show_extension_command_status(
+            "指令已发送，等待 Chrome 插件领取……"
+        )
+        self.statusBar().showMessage(f"插件指令已排队：{action}")
+
+    def _refresh_extension_command_status(self) -> None:
+        if not self._last_extension_command_id:
+            return
+        command = self.extension_command_broker.status(self._last_extension_command_id)
+        if command is None:
+            return
+        status = str(command.get("status") or "queued")
+        message = str(command.get("message") or "等待插件响应")
+        labels = {
+            "queued": "等待插件领取",
+            "running": "插件正在执行",
+            "completed": "执行完成",
+            "failed": "执行失败",
+        }
+        self.recruitment_tasks_page.show_extension_command_status(
+            f"{labels.get(status, status)}：{message}"
+        )
+        command_id = str(command.get("id") or "")
+        if status == "failed" and command_id not in self._handled_extension_command_ids:
+            self._handled_extension_command_ids.add(command_id)
+            task_id = command.get("recruitment_task_id")
+            task = (
+                self.repository.get_recruitment_task(int(task_id))
+                if task_id is not None
+                else None
+            )
+            if task is not None and task.get("status") == "running":
+                self.repository.set_recruitment_task_status(
+                    int(task_id),
+                    "waiting_user",
+                    message=f"插件操作失败：{message}",
+                )
+                self.refresh_recruitment_tasks(int(task_id))
+                self.recruitment_tasks_page.show_extension_command_status(
+                    f"执行失败：{message}。处理浏览器页面后重新启动任务即可重试。"
+                )
+
+    def _open_export_file(self, file_path: str) -> None:
+        path = Path(file_path)
+        if not path.is_file() or not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.resolve()))):
+            QMessageBox.warning(self, "无法打开导出文件", f"文件不存在或系统无法打开：\n{path}")
+
+    def _current_running_task_id(self) -> int | None:
+        task_id = self._active_recruitment_task_id or self.config.automation_flow.task_id
+        if task_id is None:
+            return None
+        task = self.repository.get_recruitment_task(int(task_id))
+        return int(task_id) if task is not None and task.get("status") == "running" else None
+
+    def _automation_task_is_ready(self, task_id: int | None, profile_id: int | None) -> bool:
+        if task_id is None:
+            return True
+        task = self.repository.get_recruitment_task(int(task_id))
+        return bool(
+            task is not None
+            and task.get("status") == "running"
+            and int(task["role_id"]) == int(profile_id or 0)
+        )
+
+    def _load_job_profile(self, profile_id: int) -> None:
+        profile = self.repository.get_job_profile(profile_id)
+        self.job_profiles_page.show_profile(dict(profile) if profile else None)
+        self.job_profiles_page.set_versions(
+            self.repository.list_job_profile_versions(profile_id) if profile else []
+        )
+
+    def _save_job_profile(self, payload: dict[str, object]) -> JobProfile | None:
+        try:
+            requested_title = str(payload.get("job_title") or "").strip()
+            if payload.get("id") is None and requested_title:
+                duplicate = self.repository.find_job_profile_by_title(requested_title)
+                if duplicate is not None:
+                    raise ValueError("同名岗位档案已存在，请直接编辑现有岗位或使用复制功能")
+            existing = (
+                self.repository.get_job_profile(int(payload["id"]))
+                if payload.get("id") is not None
+                else {}
+            ) or {}
+
+            def value(key: str, default: object = "") -> object:
+                return payload[key] if key in payload else existing.get(key, default)
+
+            evidence_policy = dict(value("evidence_policy", {}) or {})
+            if "_invalid" in evidence_policy:
+                raise ValueError("证据策略必须是有效 JSON")
+            profile = JobProfile(
+                id=int(payload["id"]) if payload.get("id") is not None else None,
+                job_title=str(value("job_title") or "").strip(),
+                department=str(value("department") or "").strip(),
+                hiring_manager=str(value("hiring_manager") or "").strip(),
+                location=str(value("location") or "").strip(),
+                employment_type=str(value("employment_type") or "").strip(),
+                experience_requirement=str(value("experience_requirement") or "").strip(),
+                education_requirement=str(value("education_requirement") or "").strip(),
+                target_hires=max(1, int(value("target_hires", 1) or 1)),
+                recruitment_deadline=str(value("recruitment_deadline") or "").strip(),
+                priority=str(value("priority", "normal") or "normal"),
+                status=str(value("status", "draft") or "draft"),
+                jd_text=str(value("jd_text") or "").strip(),
+                prompt_text=str(value("prompt_text") or ""),
+                prompt_source=str(value("prompt_source", "generated") or "generated"),
+                must_have=list(value("must_have", []) or []),
+                nice_to_have=list(value("nice_to_have", []) or []),
+                risk_flags=list(value("risk_flags", []) or []),
+                exclusions=list(value("exclusions", []) or []),
+                interview_checks=list(value("interview_checks", []) or []),
+                evidence_policy=evidence_policy,
+                parent_profile_id=existing.get("parent_profile_id"),
+            )
+            if not profile.job_title or not profile.jd_text:
+                raise ValueError("岗位名称和岗位说明 JD 为必填项")
+            if profile.status not in {"draft", "active", "paused", "closed"}:
+                raise ValueError("岗位状态无效")
+            if not profile.prompt_text:
+                profile.prompt_text = (
+                    self.prompt_manager.build_structured(profile)
+                    if any(
+                        [
+                            profile.must_have,
+                            profile.nice_to_have,
+                            profile.risk_flags,
+                            profile.exclusions,
+                            profile.interview_checks,
+                            profile.evidence_policy,
+                        ]
+                    )
+                    else self.prompt_manager.build_from_jd(profile.job_title, profile.jd_text)
+                )
+                profile.prompt_source = "generated"
+            errors = self.prompt_manager.validate_screening_criteria(profile.prompt_text)
+            if errors:
+                raise ValueError("筛选条件包含不能用于自动招聘评级的条件：" + "、".join(errors))
+            saved = self.repository.save_job_profile(profile)
+            if existing and saved.status != "active":
+                self._stop_work_for_job_profile(int(saved.id))
+            self.refresh_job_profiles(int(saved.id))
+            self.refresh_recruitment_tasks()
+            self.refresh_ai_screen()
+            self.refresh_automation_flow()
+            self.statusBar().showMessage(f"已保存岗位档案：{saved.job_title} V{saved.version}")
+            return saved
+        except Exception as exc:
+            self.job_profiles_page.message_label.setText(f"无法保存岗位档案：{exc}")
+            QMessageBox.warning(self, "无法保存岗位档案", str(exc))
+            return None
+
+    def _clone_job_profile(self, profile_id: int, new_job_title: str) -> None:
+        try:
+            profile = self.repository.clone_job_profile(profile_id, new_job_title)
+            self.refresh_job_profiles(int(profile.id))
+            self.refresh_ai_screen()
+            self.refresh_automation_flow()
+            self.statusBar().showMessage(f"已复制岗位档案：{new_job_title}，当前为草稿")
+        except Exception as exc:
+            QMessageBox.warning(self, "无法复制岗位档案", str(exc))
+
+    def _change_job_profile_status(self, profile_id: int, status: str) -> None:
+        try:
+            profile = self.repository.set_job_profile_status(profile_id, status)
+            if status != "active":
+                self._stop_work_for_job_profile(profile_id)
+            self.refresh_job_profiles(profile_id)
+            self.refresh_recruitment_tasks()
+            self.refresh_ai_screen()
+            self.refresh_automation_flow()
+            self.statusBar().showMessage(
+                f"岗位状态已更新：{profile.job_title} → {status}（V{profile.version}）"
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "无法更新岗位状态", str(exc))
+
+    def _stop_work_for_job_profile(self, profile_id: int) -> None:
+        self.repository.pause_active_recruitment_tasks_for_role(
+            profile_id, "岗位已暂停或结束，关联招聘任务自动暂停。"
+        )
+        if self.config.automation_flow.profile_id == profile_id:
+            self.config.automation_flow.enabled = False
+            self.config_service.save(self.config)
+            self._automation_armed = False
+            self._queued_automation_batches.clear()
+            self.automation_flow_page.set_waiting(False)
+        if (
+            self._ai_screening_thread is not None
+            and self._active_screening_profile_id == profile_id
+        ):
+            self._ai_screening_thread[1].request_stop()
+            self.automation_flow_page.set_status("岗位已暂停或结束，正在停止关联的 AI 筛选任务。")
+            self.ai_page.set_status("岗位已暂停或结束，正在停止关联的 AI 筛选任务。")
+        if self._capture_running and self._active_capture_profile_id == profile_id:
+            self.automation_worker.request_stop()
+            self.dashboard_page.set_message("岗位已暂停或结束，正在停止关联的采集任务。")
+
     def _ensure_builtin_screening_profiles(self) -> None:
         if any(str(row.get("job_title") or "") == "证券交易员" for row in self.repository.list_screening_profiles()):
             return
         profile = ScreeningProfile(
             job_title="证券交易员",
+            status="active",
             jd_text="负责证券交易执行、交易风险控制、交易记录复盘与异常处理。",
             prompt_text="",
             must_have=["候选人资料中存在明确的证券或金融产品交易证据"],
@@ -978,84 +1700,27 @@ class MainWindow(QMainWindow):
             },
         )
         profile.prompt_text = self.prompt_manager.build_structured(profile)
-        self.repository.save_screening_profile(profile)
+        self.repository.save_job_profile(profile)
 
     def _save_screening_profile(self, payload: dict[str, object]) -> ScreeningProfile | None:
-        try:
-            evidence_policy = dict(payload.get("evidence_policy") or {})
-            if "_invalid" in evidence_policy:
-                raise ValueError("证据策略必须是有效 JSON")
-            structured_profile = ScreeningProfile(
-                id=int(payload["id"]) if payload.get("id") is not None else None,
-                job_title=str(payload.get("job_title") or "").strip(),
-                jd_text=str(payload.get("jd_text") or "").strip(),
-                prompt_text=str(payload.get("prompt_text") or ""),
-                prompt_source=str(payload.get("prompt_source") or "generated"),
-                must_have=list(payload.get("must_have") or []),
-                nice_to_have=list(payload.get("nice_to_have") or []),
-                risk_flags=list(payload.get("risk_flags") or []),
-                exclusions=list(payload.get("exclusions") or []),
-                interview_checks=list(payload.get("interview_checks") or []),
-                evidence_policy=evidence_policy,
-            )
-            prompt_text = str(payload.get("prompt_text") or "")
-            prompt_source = str(payload.get("prompt_source") or "generated")
-            if not prompt_text:
-                prompt_text = (
-                    self.prompt_manager.build_structured(structured_profile)
-                    if any(
-                        [
-                            structured_profile.must_have,
-                            structured_profile.nice_to_have,
-                            structured_profile.risk_flags,
-                            structured_profile.exclusions,
-                            structured_profile.interview_checks,
-                            structured_profile.evidence_policy,
-                        ]
-                    )
-                    else self.prompt_manager.build_from_jd(
-                        structured_profile.job_title,
-                        structured_profile.jd_text,
-                    )
-                )
-                prompt_source = "generated"
-            errors = self.prompt_manager.validate_screening_criteria(prompt_text)
-            if errors:
-                raise ValueError("筛选条件包含不能用于自动招聘评级的条件：" + "、".join(errors))
-            structured_profile.prompt_text = prompt_text
-            structured_profile.prompt_source = prompt_source
-            profile = self.repository.save_screening_profile(structured_profile)
-            self.ai_page.current_profile_id = profile.id
-            self.refresh_ai_screen()
-            self.refresh_automation_flow()
-            self._load_screening_profile(int(profile.id))
-            self.statusBar().showMessage(f"已保存筛选方案：{profile.job_title}")
-            return profile
-        except Exception as exc:
-            QMessageBox.warning(self, "无法保存筛选方案", str(exc))
-            return None
+        return self._save_job_profile(payload)
 
     def _clone_screening_profile(self, profile_id: int, new_job_title: str) -> None:
-        try:
-            profile = self.repository.clone_screening_profile(profile_id, new_job_title)
-            self.ai_page.current_profile_id = profile.id
-            self.refresh_ai_screen()
-            self._load_screening_profile(int(profile.id))
-            self.statusBar().showMessage(f"已复制筛选方案：{new_job_title}")
-        except Exception as exc:
-            QMessageBox.warning(self, "无法复制筛选方案", str(exc))
+        self._clone_job_profile(profile_id, new_job_title)
 
     def _delete_screening_profile(self, profile_id: int) -> None:
         self.repository.delete_screening_profile(profile_id)
+        self._stop_work_for_job_profile(profile_id)
         if self.config.automation_flow.profile_id == profile_id:
             self.config.automation_flow.enabled = False
             self.config.automation_flow.profile_id = None
             self.config_service.save(self.config)
             self.automation_flow_page.enabled_checkbox.setChecked(False)
-        self.ai_page.clear_profile()
+        self.job_profiles_page.clear_profile()
         self.refresh_ai_screen()
         self.refresh_automation_flow()
-        self.statusBar().showMessage("筛选方案已删除")
+        self.refresh_job_profiles()
+        self.statusBar().showMessage("岗位档案已结束，历史记录已保留")
 
     def _start_ai_screening(self, payload: dict[str, object]) -> None:
         if self._ai_screening_thread is not None:
@@ -1063,8 +1728,13 @@ class MainWindow(QMainWindow):
             return
 
         profile_payload = dict(payload.get("profile") or {})
-        profile = self._save_screening_profile(profile_payload)
-        if profile is None:
+        profile_id = profile_payload.get("id")
+        if profile_id is None:
+            QMessageBox.warning(self, "请选择岗位", "请先在岗位中心建立并启用岗位档案。")
+            return
+        profile = self.repository.get_job_profile(int(profile_id))
+        if profile is None or profile.get("status") != "active":
+            QMessageBox.warning(self, "岗位不可执行", "所选岗位不是招聘中状态，请到岗位中心确认。")
             return
         candidates = self.repository.list_screening_candidates(
             job_title=str(payload.get("source_job_title") or ""),
@@ -1076,7 +1746,7 @@ class MainWindow(QMainWindow):
             return
 
         worker_payload = dict(payload)
-        worker_payload["profile"] = profile.to_dict()
+        worker_payload["profile"] = dict(profile)
         worker_payload["candidates"] = candidates
         worker_payload["origin"] = "manual"
         self._launch_ai_screening(worker_payload, origin="manual")
@@ -1089,10 +1759,21 @@ class MainWindow(QMainWindow):
         if run is None:
             QMessageBox.warning(self, "Run not found", f"Screening run #{run_id} was not found.")
             return
-        profile = self.repository.get_screening_profile(int(run["profile_id"]))
-        if profile is None:
+        current_profile = self.repository.get_job_profile(int(run["profile_id"]))
+        if current_profile is None:
             QMessageBox.warning(self, "Profile missing", "The screening profile for this run no longer exists.")
             return
+        run_version = int(run["profile_version"] or 0)
+        profile = (
+            self.repository.get_job_profile_version(int(run["profile_id"]), run_version)
+            if run_version > 0
+            else None
+        )
+        if profile is None:
+            if run_version > 0:
+                QMessageBox.warning(self, "Version missing", "This run's saved job profile version is missing.")
+                return
+            profile = current_profile
         candidates = self.repository.list_screening_run_candidates(run_id)
         if not candidates:
             QMessageBox.information(self, "No tasks", "This run has no persisted screening tasks to resume.")
@@ -1127,6 +1808,7 @@ class MainWindow(QMainWindow):
             "batch_id": run["batch_id"],
             "candidates": candidates,
             "origin": "manual",
+            "task_id": run["task_id"],
         }
         self._launch_ai_screening(worker_payload, origin="manual")
 
@@ -1143,6 +1825,23 @@ class MainWindow(QMainWindow):
         self._resume_ai_screening_run(run_id, reset_failed=False)
 
     def _launch_ai_screening(self, worker_payload: dict[str, object], origin: str) -> None:
+        profile_payload = dict(worker_payload.get("profile") or {})
+        profile_id = profile_payload.get("id")
+        current_profile = (
+            self.repository.get_job_profile(int(profile_id))
+            if profile_id is not None
+            else None
+        )
+        if current_profile is None or current_profile.get("status") != "active":
+            message = "所选岗位已暂停或结束，不能启动新的 AI 筛选任务。"
+            if origin == "automation":
+                self.automation_flow_page.set_running(False)
+                self.automation_flow_page.set_status(message)
+            else:
+                self.ai_page.set_running(False)
+                self.ai_page.set_status(message)
+                QMessageBox.warning(self, "岗位不可用", message)
+            return
         worker_payload["provider"] = self._prepare_provider_payload(
             dict(worker_payload.get("provider") or {})
         )
@@ -1177,6 +1876,12 @@ class MainWindow(QMainWindow):
         thread.finished.connect(thread.deleteLater)
         thread.finished.connect(self._clear_ai_screening_thread)
         self._ai_screening_thread = (thread, worker)
+        self._active_screening_profile_id = int(dict(worker_payload["profile"])["id"])
+        self._active_ai_recruitment_task_id = (
+            int(worker_payload["task_id"])
+            if worker_payload.get("task_id") is not None
+            else None
+        )
         self._ai_screening_origin = origin
         if origin == "automation":
             self.automation_flow_page.set_waiting(False)
@@ -1234,6 +1939,7 @@ class MainWindow(QMainWindow):
             return
         payload = {
             "batch_id": int(batch_id),
+            "task_id": capture_result.get("recruitment_task_id") or self.config.automation_flow.task_id,
             "job_title": str(capture_result.get("job_title") or self.config.automation_flow.job_title),
             "source_url": str(capture_result.get("source_url") or self.config.automation_flow.source_url),
         }
@@ -1251,10 +1957,37 @@ class MainWindow(QMainWindow):
         flow = self.config.automation_flow
         if not flow.enabled or flow.profile_id is None:
             return
+        imported_profile_id = capture_result.get("job_profile_id")
+        if imported_profile_id is not None and int(imported_profile_id) != int(flow.profile_id):
+            self._automation_armed = False
+            self.automation_flow_page.set_status("采集批次与当前岗位档案不一致，已停止自动筛选。")
+            return
+        imported_task_id = capture_result.get("task_id") or capture_result.get("recruitment_task_id")
+        if imported_task_id is not None and flow.task_id is not None and int(imported_task_id) != int(flow.task_id):
+            self._automation_armed = False
+            self.automation_flow_page.set_status("采集批次与当前招聘任务不一致，已停止自动筛选。")
+            return
         profile_row = self.repository.get_screening_profile(int(flow.profile_id))
         if profile_row is None:
             self.automation_flow_page.set_status("自动化筛选方案已不存在，请重新选择并保存。")
             return
+        if str(profile_row.get("status") or "") != "active":
+            self._automation_armed = False
+            self._queued_automation_batches.clear()
+            self.automation_flow_page.set_status("所选岗位已暂停或结束，自动化筛选已停止。")
+            return
+        if flow.task_id is not None:
+            task = self.repository.get_recruitment_task(int(flow.task_id))
+            if task is None:
+                self.automation_flow_page.set_status("招聘任务不存在，自动化筛选已停止。")
+                return
+            task_profile = self.repository.get_job_profile_version(
+                int(flow.profile_id), int(task["profile_version"])
+            )
+            if task_profile is None:
+                self.automation_flow_page.set_status("招聘任务固定的岗位版本缺失，自动化筛选已停止。")
+                return
+            profile_row = task_profile
         batch_id = int(capture_result["batch_id"])
         candidates = self.repository.list_screening_candidates(
             batch_id=batch_id,
@@ -1283,6 +2016,7 @@ class MainWindow(QMainWindow):
             "limit": flow.max_candidates,
             "candidates": candidates,
             "origin": "automation",
+            "task_id": capture_result.get("task_id") or flow.task_id,
         }
         self._automation_armed = False
         self._launch_ai_screening(worker_payload, origin="automation")
@@ -1315,6 +2049,17 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"AI 初筛结束：完成 {result.get('completed', 0)}，失败 {result.get('failed', 0)}"
         )
+        run = self.repository.get_screening_run(run_id)
+        task_id = run["task_id"] if run is not None else None
+        if task_id is not None:
+            task = self.repository.get_recruitment_task(int(task_id))
+            if task is not None and task.get("status") == "running":
+                self.repository.set_recruitment_task_status(
+                    int(task_id),
+                    "waiting_user",
+                    message=str(result.get("message") or "AI 初筛完成，等待人工复核"),
+                )
+            self.refresh_recruitment_tasks(int(task_id))
 
     def _on_ai_screening_failed(self, message: str) -> None:
         if self._ai_screening_origin == "automation":
@@ -1325,9 +2070,12 @@ class MainWindow(QMainWindow):
             self.ai_page.set_status(f"AI 初筛失败：{message}")
             QMessageBox.critical(self, "AI 初筛失败", message)
         self.statusBar().showMessage("AI 初筛失败")
+        self._mark_recruitment_task_failed(self._active_ai_recruitment_task_id, message)
 
     def _clear_ai_screening_thread(self) -> None:
         self._ai_screening_thread = None
+        self._active_screening_profile_id = None
+        self._active_ai_recruitment_task_id = None
         self._ai_screening_origin = "manual"
         if self._queued_automation_batches:
             queued = self._queued_automation_batches.pop(0)
@@ -1432,15 +2180,29 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(progress.message or "任务执行中")
 
     def _on_capture_finished(self, result) -> None:
+        task_id = self._active_capture_task_id
         self._capture_running = False
+        self._active_capture_profile_id = None
+        self._active_capture_task_id = None
         self.dashboard_page.set_running(False)
         self.dashboard_page.update_result(result)
         self.refresh_candidates()
         self.refresh_dashboard_stats()
         self.statusBar().showMessage(result.message or f"采集结束：{result.status}")
+        if task_id is not None:
+            self.repository.update_recruitment_task_progress(
+                task_id,
+                current_step="AI 初筛" if result.status == "completed" else "等待人工处理",
+                message=result.message or result.status,
+            )
+            self.refresh_recruitment_tasks(task_id)
         if result.status in {"completed", "stopped"}:
             self._queue_automation_screening(result.to_dict())
         if result.status == "waiting_user":
+            if task_id is not None:
+                self.repository.set_recruitment_task_status(
+                    task_id, "waiting_user", message=result.message or "等待人工处理"
+                )
             QMessageBox.information(self, "需要手动处理", result.message or "请完成登录或验证后再继续。")
 
     def _on_extension_imported(self, result: dict[str, object]) -> None:
@@ -1452,25 +2214,55 @@ class MainWindow(QMainWindow):
         )
         self.statusBar().showMessage(f"扩展导入完成：批次 #{result.get('batch_id')}")
         self._queue_automation_screening(result)
+        task_id = result.get("recruitment_task_id")
+        if task_id is not None:
+            self.repository.update_recruitment_task_progress(
+                int(task_id), current_step="AI 初筛", message=f"批次 #{result.get('batch_id')} 已导入"
+            )
+            self.refresh_recruitment_tasks(int(task_id))
 
-    def _on_extension_import_error(self, message: str) -> None:
+    def _on_extension_import_error(self, error: dict[str, object]) -> None:
+        message = str(error.get("message") or "扩展导入失败")
+        task_id = error.get("recruitment_task_id")
+        try:
+            task_id = int(task_id) if task_id is not None else None
+        except (TypeError, ValueError):
+            task_id = None
         self.dashboard_page.set_message(message)
         if self.config.automation_flow.enabled:
             self.automation_flow_page.set_status(f"采集导入失败：{message}")
         self.statusBar().showMessage("扩展导入失败")
+        self._mark_recruitment_task_failed(task_id, message)
 
     def _on_worker_error(self, message: str) -> None:
+        task_id = self._active_capture_task_id
         self._capture_running = False
+        self._active_capture_profile_id = None
+        self._active_capture_task_id = None
         self.dashboard_page.set_running(False)
         self.dashboard_page.set_message(message)
         if self._automation_armed:
             self.automation_flow_page.set_status(f"自动化采集失败：{message}")
         self.statusBar().showMessage("任务失败")
+        self._mark_recruitment_task_failed(task_id, message)
         QMessageBox.critical(self, "任务失败", message)
+
+    def _mark_recruitment_task_failed(self, task_id: int | None, message: str) -> None:
+        if task_id is None:
+            return
+        task = self.repository.get_recruitment_task(int(task_id))
+        if task is not None and task.get("status") == "running":
+            self.repository.set_recruitment_task_status(int(task_id), "failed", message=message)
+            self.refresh_recruitment_tasks(int(task_id))
 
     def _on_export_finished(self, result) -> None:
         export_label = result.export_format.upper()
         self.statusBar().showMessage(f"{export_label} 导出完成：{result.file_path}")
+        if result.task_id is not None:
+            self.repository.update_recruitment_task_progress(
+                int(result.task_id), current_step="结果已导出", message=str(result.file_path)
+            )
+            self.refresh_recruitment_tasks(int(result.task_id))
         QMessageBox.information(
             self,
             "导出完成",
@@ -1485,12 +2277,22 @@ class MainWindow(QMainWindow):
         page = self._page_scroll_areas[index].widget()
         if page is self.automation_flow_page:
             self.refresh_automation_flow()
+        elif page is self.recruitment_tasks_page:
+            self.refresh_recruitment_tasks()
+        elif page is self.job_profiles_page:
+            self.refresh_job_profiles()
         elif page is self.candidates_page:
             self.refresh_candidates()
         elif page is self.ai_page:
             self.refresh_ai_screen()
         elif page is self.review_page:
             self.refresh_review_queue()
+        elif page is self.ai_human_comparison_page:
+            self.refresh_ai_human_comparison()
+        elif page is self.next_actions_page:
+            self.refresh_next_actions()
+        elif page is self.product_development_page:
+            self.refresh_product_development()
 
     def _append_log_line(self, message: str) -> None:
         self.log_view.appendPlainText(message)

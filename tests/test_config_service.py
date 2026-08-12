@@ -4,8 +4,15 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from core.config import LEGACY_CSV_COLUMNS, REVIEW_CSV_COLUMNS_V1, REVIEW_CSV_COLUMNS_V2, ConfigService
+from core.config import (
+    LEGACY_CSV_COLUMNS,
+    REVIEW_CSV_COLUMNS_V1,
+    REVIEW_CSV_COLUMNS_V2,
+    ConfigService,
+    DataDirectoryAccessError,
+)
 from core.models import DEFAULT_CSV_COLUMNS, AutomationFlowConfig
 
 
@@ -134,6 +141,24 @@ class ConfigServiceTest(unittest.TestCase):
             self.assertEqual(loaded.default_job_title, "Keep this role")
             self.assertNotIn("api_key", raw["ai_provider"])
             self.assertNotIn("api_key", raw["automation_flow"])
+
+    def test_directory_access_failures_are_converted_to_data_directory_access_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            blocked = root / "data"
+
+            def fail_on_data(path: Path) -> Path:
+                if path == blocked:
+                    raise PermissionError("denied")
+                path.mkdir(parents=True, exist_ok=True)
+                return path
+
+            with patch("core.config.ensure_directory", side_effect=fail_on_data):
+                with self.assertRaises(DataDirectoryAccessError) as caught:
+                    ConfigService(app_root=root)
+
+            self.assertEqual(caught.exception.path, blocked)
+            self.assertIsInstance(caught.exception.cause, PermissionError)
 
 
 if __name__ == "__main__":

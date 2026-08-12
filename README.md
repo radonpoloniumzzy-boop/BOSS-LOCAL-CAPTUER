@@ -47,6 +47,23 @@ You can also launch the app by double-clicking either:
 - `launch_boss_local_tool.vbs` in the project root
 - `Boss Local Capture Tool.lnk` on your Windows desktop
 
+### Local Web Workbench (Phase 1)
+
+The browser workbench foundation runs separately from the existing desktop UI:
+
+```powershell
+cd D:\codex\BOSS-LOCAL-CAPTURE-review
+cd web\frontend
+npm.cmd install
+npm.cmd run build
+cd ..\..
+.\.venv\Scripts\python.exe web_app.py
+```
+
+It opens `http://127.0.0.1:17864` after the health check succeeds. The first-run page confirms the data directory, then the home page reads real candidate and batch totals from the existing repository. The desktop program and web program cannot use the same database at the same time.
+
+Phase 1 does not move recruiting workflows into the browser. The Chrome extension still uses the desktop API on `127.0.0.1:17863`.
+
 First launch creates:
 
 - `data/config.json`
@@ -95,6 +112,8 @@ The extension popup lets you set:
 ## UI Pages
 
 - `Dashboard`: open browser, show status, show local API endpoint, export latest batch
+- `Job Center`: maintain one versioned source of truth for each hiring role
+- `Recruitment Tasks`: lock a job version, set platform targets and quotas, start the two-window workflow, and open recent exports
 - `Automation Flow`: choose a saved screening profile and automatically screen each newly collected batch
 - `Candidates`: search, filter, inspect details, export current result set
 - `Settings`: browser path, export path, selectors path, local API port, logging, scroll config
@@ -102,6 +121,8 @@ The extension popup lets you set:
 - `Review`: V3 placeholder
 
 ## Automated Collection And Screening
+
+Recommended workflow: create a job in `Job Center`, create and start a task in `Recruitment Tasks`, then click `AUTO` once in the recruiting platform. The app links capture batches, AI runs, and exports to that task. The extension popup closes after the AUTO run finishes, exports can be opened inside the task page, and AI screening uses the configured API instead of a separate AI website.
 
 1. Create and save the target role in `AI Screen`, including its JD and screening prompt.
 2. Open `Automation Flow` and select that saved screening profile.
@@ -172,6 +193,15 @@ boss_local_tool/
 ```powershell
 cd boss_local_tool
 python -m unittest discover -s tests -v
+```
+
+Web foundation and frontend:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\test_web_foundation.py tests\test_desktop_web_transition.py -q
+cd web\frontend
+npm.cmd test
+npm.cmd run build
 ```
 
 ## Package

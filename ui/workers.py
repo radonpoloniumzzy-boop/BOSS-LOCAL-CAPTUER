@@ -162,9 +162,42 @@ class CandidatePageWorker(QObject):
             if kind == "review":
                 result = self.repository.page_manual_review_candidates(
                     role_id=(int(filters["role_id"]) if filters.get("role_id") is not None else None),
+                    queue_category=str(filters.get("queue_category") or "all"),
                     page=page,
                     page_size=page_size,
                 )
+                result["summary"] = self.repository.get_manual_review_workbench_summary(
+                    role_id=(int(filters["role_id"]) if filters.get("role_id") is not None else None)
+                )
+                result["kind"] = kind
+                result["rows"] = [dict(row) for row in result["rows"]]
+                self.finished.emit(request_id, result)
+                return
+            if kind == "ai_human_comparison":
+                role_id = int(filters["role_id"]) if filters.get("role_id") is not None else None
+                result = self.repository.page_ai_human_comparisons(
+                    role_id=role_id,
+                    comparison_status=str(filters.get("comparison_status") or "all"),
+                    page=page,
+                    page_size=page_size,
+                )
+                result["summary"] = self.repository.get_ai_human_comparison_summary(
+                    role_id=role_id
+                )
+                result["kind"] = kind
+                result["rows"] = [dict(row) for row in result["rows"]]
+                self.finished.emit(request_id, result)
+                return
+            if kind == "next_actions":
+                role_id = int(filters["role_id"]) if filters.get("role_id") is not None else None
+                result = self.repository.page_next_actions(
+                    view=str(filters.get("view") or "pending"),
+                    role_id=role_id,
+                    owner=str(filters.get("owner") or ""),
+                    page=page,
+                    page_size=page_size,
+                )
+                result["summary"] = self.repository.get_next_action_summary(role_id=role_id)
                 result["kind"] = kind
                 result["rows"] = [dict(row) for row in result["rows"]]
                 self.finished.emit(request_id, result)
@@ -284,6 +317,7 @@ class AIScreeningWorker(QObject):
                 origin=str(self.payload.get("origin") or "manual"),
                 progress_callback=self.progress.emit,
                 run_id=self.payload.get("run_id"),
+                task_id=self.payload.get("task_id"),
             )
             self.finished.emit(result)
         except Exception as exc:

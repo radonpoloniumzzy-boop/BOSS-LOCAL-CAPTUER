@@ -1,5 +1,7 @@
 # Chrome Extension
 
+完成采集并成功导入后，弹窗中的“下载当前批次 CSV 到 Downloads”按钮会启用。按钮始终使用本次采集返回的批次 ID，并通过 Chrome 下载到默认 Downloads 目录；重新打开弹窗后仍可下载最近一次成功采集的批次。切换本地接口地址或 Token 后，旧批次会自动清除，防止下载到另一数据库中的同号批次。
+
 Load this folder as an unpacked Chrome extension:
 
 ```text

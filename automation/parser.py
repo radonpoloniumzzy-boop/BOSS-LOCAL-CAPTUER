@@ -28,7 +28,12 @@ class CandidateParser:
         education_text = normalize_text(str(raw_card.get("education_text") or ""))
         summary_text = normalize_text(str(raw_card.get("summary_text") or ""))
         detail_url = normalize_text(str(raw_card.get("detail_url") or ""))
-        platform_uid = normalize_text(str(raw_card.get("platform_uid") or ""))
+        source_platform = self.normalize_source_platform(
+            str(raw_card.get("platform") or ""),
+            source_url,
+        )
+        raw_platform_uid = normalize_text(str(raw_card.get("platform_uid") or ""))
+        platform_uid = self.canonicalize_platform_uid(source_platform, raw_platform_uid) or raw_platform_uid
         tags = raw_card.get("tags_text") or []
         if isinstance(tags, list):
             tags_text = " | ".join(filter(None, [normalize_text(str(item)) for item in tags]))
@@ -52,6 +57,7 @@ class CandidateParser:
             source_url=normalize_text(source_url),
             capture_time=capture_time,
             raw_card_text=raw_text,
+            source_platform=source_platform,
             name=name,
             active_status=active_status,
             expected_salary=expected_salary,
@@ -77,20 +83,60 @@ class CandidateParser:
         stable_key = coalesce(platform_uid, detail_url)
         if stable_key:
             return f"platform:{stable_key}"
-        fingerprint = "||".join(
-            [
-                normalize_text(name).lower(),
-                normalize_text(expected_salary).lower(),
-                normalize_text(work_experience_text).lower(),
-                normalize_text(education_text).lower(),
-            ]
-        )
-        if fingerprint.strip("|"):
+
+        normalized_name = normalize_text(name).lower()
+        supporting_fields = [
+            normalize_text(expected_salary).lower(),
+            normalize_text(work_experience_text).lower(),
+            normalize_text(education_text).lower(),
+        ]
+        if normalized_name and any(supporting_fields):
+            fingerprint = "||".join([normalized_name, *supporting_fields])
             return f"fingerprint:{short_hash(fingerprint)}"
         return f"raw:{raw_text_hash}"
+
+    @staticmethod
+    def canonicalize_platform_uid(source_platform: str, platform_uid: str) -> str:
+        normalized_uid = normalize_text(platform_uid)
+        if not normalized_uid:
+            return ""
+        normalized_platform = normalize_text(source_platform).lower()
+        if ":" in normalized_uid:
+            prefix = normalize_text(normalized_uid.split(":", 1)[0]).lower()
+            if normalized_platform and normalized_platform != "unknown":
+                if prefix == normalized_platform:
+                    return normalized_uid
+                return f"{normalized_platform}:{normalized_uid}"
+            if prefix and prefix != "unknown":
+                return normalized_uid
+            return ""
+        if not normalized_platform or normalized_platform == "unknown":
+            return ""
+        return f"{normalized_platform}:{normalized_uid}"
+
+    @staticmethod
+    def canonicalize_source_candidate_id(source_platform: str, source_candidate_id: str) -> str:
+        normalized_candidate_id = normalize_text(source_candidate_id)
+        if not normalized_candidate_id:
+            return ""
+        normalized_platform = normalize_text(source_platform).lower()
+        if not normalized_platform or normalized_platform == "unknown":
+            return ""
+        return f"{normalized_platform}:{normalized_candidate_id}"
+
+    @staticmethod
+    def normalize_source_platform(platform: str, source_url: str) -> str:
+        normalized = normalize_text(platform).lower()
+        if normalized:
+            return normalized
+        url = normalize_text(source_url).lower()
+        if "liepin" in url:
+            return "liepin"
+        if "zhipin" in url or "boss" in url:
+            return "boss"
+        return "unknown"
 
     def _log(self, level: str, message: str, *args) -> None:
         if not self.logger:
             return
         getattr(self.logger, level, self.logger.info)(message, *args)
-

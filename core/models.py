@@ -59,6 +59,7 @@ class AIProviderConfig:
 @dataclass(slots=True)
 class AutomationFlowConfig:
     enabled: bool = False
+    task_id: int | None = None
     profile_id: int | None = None
     job_title: str = ""
     source_url: str = "https://www.zhipin.com/web/geek/recommend"
@@ -80,6 +81,7 @@ class AppConfig:
     target_url: str = "https://www.zhipin.com/web/geek/recommend"
     local_api_port: int = 17863
     local_api_token: str = ""
+    web_plugin_last_verified_at: str = ""
     scroll_mode: str = "page"
     scroll_step: int = 900
     scroll_wait_seconds: float = 1.5
@@ -107,6 +109,8 @@ class CollectOptions:
     source_url: str
     note: str = ""
     auto_export: bool = False
+    role_id: int | None = None
+    task_id: int | None = None
 
 
 @dataclass(slots=True)
@@ -117,6 +121,7 @@ class CandidateRecord:
     source_url: str
     capture_time: str
     raw_card_text: str
+    source_platform: str = ""
     name: str = ""
     active_status: str = ""
     expected_salary: str = ""
@@ -140,11 +145,19 @@ class CaptureBatch:
     source_url: str
     start_time: str
     status: str
+    source_platform: str = ""
     note: str = ""
+    request_id: str = ""
+    request_payload_hash: str = ""
+    role_id: int | None = None
+    task_id: int | None = None
     id: int | None = None
     end_time: str = ""
     total_collected: int = 0
     total_new: int = 0
+    total_updated: int = 0
+    total_skipped: int = 0
+    total_failed: int = 0
     created_at: str = ""
     updated_at: str = ""
 
@@ -162,6 +175,9 @@ class CaptureBatchItem:
     job_title: str
     source_url: str
     raw_card_text: str
+    source_platform: str = ""
+    platform_uid: str = ""
+    ingest_status: str = "new"
     name: str = ""
     active_status: str = ""
     expected_salary: str = ""
@@ -213,6 +229,7 @@ class ExportResult:
     row_count: int
     mode: str
     export_format: str = "csv"
+    task_id: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -224,6 +241,16 @@ class ScreeningProfile:
     jd_text: str
     prompt_text: str
     prompt_source: str = "generated"
+    department: str = ""
+    hiring_manager: str = ""
+    location: str = ""
+    employment_type: str = ""
+    experience_requirement: str = ""
+    education_requirement: str = ""
+    target_hires: int = 1
+    recruitment_deadline: str = ""
+    priority: str = "normal"
+    status: str = "draft"
     must_have: list[str] = field(default_factory=list)
     nice_to_have: list[str] = field(default_factory=list)
     risk_flags: list[str] = field(default_factory=list)
@@ -232,6 +259,55 @@ class ScreeningProfile:
     evidence_policy: dict[str, Any] = field(default_factory=dict)
     version: int = 1
     parent_profile_id: int | None = None
+    id: int | None = None
+    created_at: str = ""
+    updated_at: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+# The existing type name remains as a compatibility alias for older integrations.
+JobProfile = ScreeningProfile
+
+
+@dataclass(slots=True)
+class RecruitmentTask:
+    name: str
+    role_id: int
+    platform: str = "boss"
+    source_url: str = ""
+    profile_version: int = 0
+    target_candidates: int = 0
+    target_ssr: int = 0
+    minimum_rating: str = "SR"
+    view_quota: int = 0
+    greeting_quota: int = 0
+    status: str = "ready"
+    current_step: str = "待启动"
+    latest_message: str = ""
+    id: int | None = None
+    created_at: str = ""
+    updated_at: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
+class NextAction:
+    subject_type: str
+    action_type: str
+    title: str
+    due_at: str
+    role_id: int
+    candidate_id: int | None = None
+    task_id: int | None = None
+    owner: str = ""
+    priority: str = "normal"
+    status: str = "pending"
+    note: str = ""
+    completed_at: str = ""
     id: int | None = None
     created_at: str = ""
     updated_at: str = ""

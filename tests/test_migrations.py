@@ -9,6 +9,111 @@ from storage.migrations import apply_migrations
 
 
 class MigrationTest(unittest.TestCase):
+    def test_version_16_capture_items_add_platform_columns_before_index(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            connection = sqlite3.connect(str(Path(tmp_dir) / "version_16.db"))
+            connection.executescript(
+                """
+                CREATE TABLE schema_version (version INTEGER NOT NULL PRIMARY KEY);
+                INSERT INTO schema_version(version) VALUES (16);
+
+                CREATE TABLE candidates (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    candidate_key TEXT NOT NULL UNIQUE,
+                    raw_text_hash TEXT NOT NULL,
+                    platform_uid TEXT,
+                    job_title TEXT NOT NULL,
+                    source_url TEXT NOT NULL,
+                    capture_time TEXT NOT NULL,
+                    name TEXT,
+                    active_status TEXT,
+                    expected_salary TEXT,
+                    work_experience_text TEXT,
+                    education_text TEXT,
+                    tags_text TEXT,
+                    summary_text TEXT,
+                    raw_card_text TEXT NOT NULL,
+                    detail_url TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE capture_batches (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_title TEXT NOT NULL,
+                    source_url TEXT NOT NULL,
+                    start_time TEXT NOT NULL,
+                    end_time TEXT,
+                    total_collected INTEGER NOT NULL DEFAULT 0,
+                    total_new INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL,
+                    note TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    collection_run_id TEXT NOT NULL DEFAULT '',
+                    content_fingerprint TEXT NOT NULL DEFAULT '',
+                    source_document_id TEXT NOT NULL DEFAULT '',
+                    source_frame_id INTEGER,
+                    source_frame_url TEXT NOT NULL DEFAULT '',
+                    collection_metadata_json TEXT NOT NULL DEFAULT '{}',
+                    role_id INTEGER,
+                    task_id INTEGER
+                );
+
+                CREATE TABLE capture_batch_items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    batch_id INTEGER NOT NULL,
+                    candidate_id INTEGER NOT NULL,
+                    candidate_key TEXT NOT NULL,
+                    raw_text_hash TEXT NOT NULL,
+                    capture_time TEXT NOT NULL,
+                    job_title TEXT NOT NULL,
+                    source_url TEXT NOT NULL,
+                    name TEXT,
+                    active_status TEXT,
+                    expected_salary TEXT,
+                    work_experience_text TEXT,
+                    education_text TEXT,
+                    tags_text TEXT,
+                    summary_text TEXT,
+                    raw_card_text TEXT NOT NULL,
+                    detail_url TEXT,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(batch_id) REFERENCES capture_batches(id) ON DELETE CASCADE,
+                    FOREIGN KEY(candidate_id) REFERENCES candidates(id) ON DELETE CASCADE,
+                    UNIQUE(batch_id, candidate_key)
+                );
+                """
+            )
+
+            try:
+                apply_migrations(connection)
+            except Exception:
+                connection.close()
+                raise
+
+            item_columns = {
+                row[1]
+                for row in connection.execute(
+                    "PRAGMA table_info(capture_batch_items)"
+                ).fetchall()
+            }
+            item_indexes = {
+                row[1]
+                for row in connection.execute(
+                    "PRAGMA index_list(capture_batch_items)"
+                ).fetchall()
+            }
+            version = connection.execute(
+                "SELECT version FROM schema_version"
+            ).fetchone()[0]
+            self.assertIn("source_platform", item_columns)
+            self.assertIn("platform_uid", item_columns)
+            self.assertIn("ingest_status", item_columns)
+            self.assertIn("idx_capture_batch_items_platform_capture", item_indexes)
+            self.assertEqual(version, 17)
+            connection.close()
+
     def test_existing_screening_tasks_get_claim_columns_before_claim_index(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             connection = sqlite3.connect(str(Path(tmp_dir) / "old_tasks.db"))
@@ -60,7 +165,7 @@ class MigrationTest(unittest.TestCase):
             self.assertIn("next_attempt_at", task_columns)
             self.assertIn("failure_category", task_columns)
             self.assertIn("idx_screening_tasks_claim", indexes)
-            self.assertEqual(version, 13)
+            self.assertEqual(version, 17)
             connection.close()
 
     def test_existing_screening_runs_table_gets_origin_column(self) -> None:
@@ -112,6 +217,9 @@ class MigrationTest(unittest.TestCase):
             profile_columns = {
                 row[1] for row in connection.execute("PRAGMA table_info(candidate_profiles)").fetchall()
             }
+            job_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(screening_profiles)").fetchall()
+            }
             version = connection.execute("SELECT version FROM schema_version").fetchone()[0]
             self.assertIn("origin", columns)
             self.assertIn("request_payload_hash", task_columns)
@@ -144,7 +252,12 @@ class MigrationTest(unittest.TestCase):
             self.assertIn("industry_tags_json", profile_columns)
             self.assertIn("skill_tags_json", profile_columns)
             self.assertIn("profile_completeness", profile_columns)
-            self.assertEqual(version, 13)
+            self.assertIn("department", job_columns)
+            self.assertIn("hiring_manager", job_columns)
+            self.assertIn("target_hires", job_columns)
+            self.assertIn("status", job_columns)
+            self.assertIn("profile_version", columns)
+            self.assertEqual(version, 17)
             connection.close()
 
     def test_existing_screening_results_are_backfilled_as_tasks(self) -> None:
@@ -292,6 +405,15 @@ class MigrationTest(unittest.TestCase):
                 FROM screening_results
                 """
             ).fetchone()
+            job_row = connection.execute(
+                "SELECT status, target_hires FROM screening_profiles WHERE id = 1"
+            ).fetchone()
+            version_row = connection.execute(
+                "SELECT profile_id, version FROM job_profile_versions WHERE profile_id = 1"
+            ).fetchone()
+            run_version = connection.execute(
+                "SELECT profile_version FROM screening_runs WHERE id = 1"
+            ).fetchone()[0]
             version = connection.execute("SELECT version FROM schema_version").fetchone()[0]
             self.assertIsNotNone(row)
             self.assertEqual(tuple(row), (
@@ -311,7 +433,10 @@ class MigrationTest(unittest.TestCase):
             self.assertEqual(tuple(event_row), (1, 1, "", "screened", "migration_backfill"))
             self.assertEqual(tuple(profile_row), (1, "Legacy Candidate", "Sales", "", ""))
             self.assertEqual(tuple(result_row), ("", "[]", "[]", "[]", ""))
-            self.assertEqual(version, 13)
+            self.assertEqual(tuple(job_row), ("active", 1))
+            self.assertEqual(tuple(version_row), (1, 1))
+            self.assertEqual(run_version, 0)
+            self.assertEqual(version, 17)
             connection.close()
 
 

@@ -6,10 +6,22 @@ import sqlite3
 from collections.abc import Iterable
 from datetime import datetime, timedelta
 
-from core.models import CandidateRecord, CaptureBatch, CaptureBatchItem, ScreeningProfile, ScreeningResult
+from core.models import (
+    CandidateRecord,
+    CaptureBatch,
+    CaptureBatchItem,
+    NextAction,
+    RecruitmentTask,
+    ScreeningProfile,
+    ScreeningResult,
+)
 from core.utils import now_iso
 from storage.db import DatabaseManager
 from talent.profile_builder import StandardProfileBuilder
+
+
+class IdempotencyConflictError(ValueError):
+    """Raised when the same idempotency key is reused with different content."""
 
 
 RECRUITMENT_STATUSES = {
@@ -30,6 +42,8 @@ USER_REASON_CODES = {
     "priority_candidate",
     "manual_review_passed",
     "manual_review_rejected",
+    "manual_review_needs_info",
+    "manual_review_deferred",
     "salary_mismatch",
     "location_mismatch",
     "experience_gap",
@@ -50,6 +64,141 @@ SYSTEM_REASON_CODES = {
 
 REASON_CODES = USER_REASON_CODES | SYSTEM_REASON_CODES
 
+MANUAL_REVIEW_TRIGGER_CONDITION = """
+    (
+        m.match_status IN ('manual_check', 'hold', 'ai_failed')
+        OR m.latest_confidence = 'low'
+        OR r.recommended_action IN ('manual_check', 'hold')
+        OR TRIM(COALESCE(r.risk_json, '')) NOT IN ('', '[]')
+    )
+"""
+MANUAL_REVIEW_ACTIVE_CONDITION = f"""
+    (
+        m.recruitment_status = 'screened'
+        OR (m.recruitment_status = 'collected' AND {MANUAL_REVIEW_TRIGGER_CONDITION})
+    )
+"""
+MANUAL_REVIEW_NEEDS_INFO_CONDITION = (
+    "COALESCE(le.reason_code, '') = 'manual_review_needs_info'"
+)
+MANUAL_REVIEW_DEFERRED_CONDITION = (
+    "COALESCE(le.reason_code, '') = 'manual_review_deferred'"
+)
+MANUAL_REVIEW_PRIORITY_BASE_CONDITION = f"""
+    (
+        m.latest_rating IN ('SSR', 'SR')
+        OR {MANUAL_REVIEW_TRIGGER_CONDITION}
+    )
+"""
+MANUAL_REVIEW_PRIORITY_CONDITION = f"""
+    (
+        NOT ({MANUAL_REVIEW_NEEDS_INFO_CONDITION})
+        AND NOT ({MANUAL_REVIEW_DEFERRED_CONDITION})
+        AND {MANUAL_REVIEW_PRIORITY_BASE_CONDITION}
+    )
+"""
+MANUAL_REVIEW_PENDING_CONDITION = f"""
+    (
+        NOT ({MANUAL_REVIEW_NEEDS_INFO_CONDITION})
+        AND NOT ({MANUAL_REVIEW_DEFERRED_CONDITION})
+        AND NOT ({MANUAL_REVIEW_PRIORITY_BASE_CONDITION})
+    )
+"""
+
+AI_HUMAN_COMPARISON_CTE = """
+WITH comparison_samples AS (
+    SELECT
+        m.candidate_id,
+        m.role_id,
+        c.name,
+        c.raw_card_text,
+        p.job_title AS role_title,
+        r.rating AS latest_rating,
+        r.confidence AS latest_confidence,
+        r.recommended_action,
+        r.persona,
+        r.evidence_json,
+        r.gap_json,
+        r.risk_json,
+        r.created_at AS screened_at,
+        m.human_decision,
+        he.note AS human_note,
+        he.changed_at AS human_reviewed_at,
+        CASE
+            WHEN r.recommended_action IN ('manual_check', 'hold') THEN 'uncertain'
+            WHEN r.recommended_action IN ('priority_outreach', 'normal_review')
+                 OR r.rating IN ('UR', 'SSR', 'SR', 'R') THEN 'recommended'
+            WHEN r.rating = 'N' THEN 'not_recommended'
+            ELSE 'uncertain'
+        END AS ai_decision
+    FROM candidate_role_matches m
+    JOIN candidates c ON c.id = m.candidate_id
+    JOIN screening_profiles p ON p.id = m.role_id
+    JOIN candidate_role_status_events he
+      ON he.id = (
+        SELECT e2.id
+        FROM candidate_role_status_events e2
+        WHERE e2.candidate_id = m.candidate_id
+          AND e2.role_id = m.role_id
+          AND e2.reason_code = m.human_decision
+        ORDER BY e2.changed_at DESC, e2.id DESC
+        LIMIT 1
+      )
+    JOIN screening_results r
+      ON r.id = (
+        SELECT r2.id
+        FROM screening_results r2
+        JOIN screening_runs sr2 ON sr2.id = r2.run_id
+        WHERE r2.candidate_id = m.candidate_id
+          AND sr2.profile_id = m.role_id
+          AND r2.created_at <= he.changed_at
+        ORDER BY r2.created_at DESC, r2.id DESC
+        LIMIT 1
+      )
+    WHERE m.human_decision IN ('manual_review_passed', 'manual_review_rejected')
+), classified_comparisons AS (
+    SELECT
+        *,
+        CASE
+            WHEN ai_decision = 'uncertain' THEN 'manual_resolved'
+            WHEN (ai_decision = 'recommended' AND human_decision = 'manual_review_passed')
+              OR (ai_decision = 'not_recommended' AND human_decision = 'manual_review_rejected')
+                THEN 'agreement'
+            ELSE 'disagreement'
+        END AS comparison_status,
+        CASE
+            WHEN ai_decision = 'recommended' AND human_decision = 'manual_review_passed'
+                THEN 'consistent_recommendation'
+            WHEN ai_decision = 'not_recommended' AND human_decision = 'manual_review_rejected'
+                THEN 'consistent_rejection'
+            WHEN ai_decision = 'recommended' AND human_decision = 'manual_review_rejected'
+                THEN 'ai_overestimated'
+            WHEN ai_decision = 'not_recommended' AND human_decision = 'manual_review_passed'
+                THEN 'ai_underestimated'
+            WHEN human_decision = 'manual_review_passed' THEN 'uncertain_human_passed'
+            ELSE 'uncertain_human_rejected'
+        END AS difference_type
+    FROM comparison_samples
+)
+"""
+
+JOB_PROFILE_STATUS_TRANSITIONS = {
+    "draft": {"active", "closed"},
+    "active": {"paused", "closed"},
+    "paused": {"active", "closed"},
+    "closed": set(),
+}
+
+RECRUITMENT_TASK_STATUS_TRANSITIONS = {
+    "ready": {"running", "paused", "cancelled"},
+    "running": {"waiting_user", "paused", "completed", "failed", "cancelled"},
+    "waiting_user": {"running", "paused", "cancelled"},
+    "paused": {"running", "cancelled"},
+    "failed": {"running", "cancelled"},
+    "completed": set(),
+    "cancelled": set(),
+}
+
 
 class CandidateRepository:
     def __init__(self, db: DatabaseManager, logger=None, profile_builder=None) -> None:
@@ -57,30 +206,662 @@ class CandidateRepository:
         self.logger = logger
         self.profile_builder = profile_builder or StandardProfileBuilder()
 
-    def create_batch(self, job_title: str, source_url: str, note: str = "") -> CaptureBatch:
+    def create_batch(
+        self,
+        job_title: str,
+        source_url: str,
+        note: str = "",
+        source_platform: str = "",
+        request_id: str = "",
+        request_payload_hash: str = "",
+        role_id: int | None = None,
+        task_id: int | None = None,
+    ) -> CaptureBatch:
         connection = self.db.get_connection()
+        self._validate_batch_context(role_id=role_id, task_id=task_id)
         timestamp = now_iso()
         cursor = connection.execute(
             """
             INSERT INTO capture_batches(
-                job_title, source_url, start_time, status, note, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                job_title, source_url, source_platform, request_id, request_payload_hash,
+                start_time, status, note, role_id, task_id, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (job_title, source_url, timestamp, "running", note, timestamp, timestamp),
+            (
+                job_title,
+                source_url,
+                source_platform,
+                request_id,
+                request_payload_hash,
+                timestamp,
+                "running",
+                note,
+                role_id,
+                task_id,
+                timestamp,
+                timestamp,
+            ),
         )
         connection.commit()
         batch = CaptureBatch(
-            id=cursor.lastrowid,
+            id=int(cursor.lastrowid),
             job_title=job_title,
             source_url=source_url,
+            source_platform=source_platform,
             start_time=timestamp,
             status="running",
             note=note,
+            request_id=request_id,
+            request_payload_hash=request_payload_hash,
+            role_id=role_id,
+            task_id=task_id,
             created_at=timestamp,
             updated_at=timestamp,
         )
         self._log("info", "Created capture batch %s for job %s", batch.id, job_title)
         return batch
+
+    def claim_intake_batch(
+        self,
+        job_title: str,
+        source_url: str,
+        note: str = "",
+        source_platform: str = "",
+        request_id: str = "",
+        request_payload_hash: str = "",
+        role_id: int | None = None,
+        task_id: int | None = None,
+    ) -> tuple[CaptureBatch, bool]:
+        normalized_request_id = str(request_id or "").strip()
+        if not normalized_request_id:
+            return (
+                self.create_batch(
+                    job_title,
+                    source_url,
+                    note=note,
+                    source_platform=source_platform,
+                    request_id="",
+                    request_payload_hash=request_payload_hash,
+                    role_id=role_id,
+                    task_id=task_id,
+                ),
+                False,
+            )
+
+        connection = self.db.get_connection()
+        self._validate_batch_context(role_id=role_id, task_id=task_id)
+        timestamp = now_iso()
+        try:
+            cursor = connection.execute(
+                """
+                INSERT INTO capture_batches(
+                    job_title, source_url, source_platform, request_id, request_payload_hash,
+                    start_time, status, note, role_id, task_id, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    job_title,
+                    source_url,
+                    source_platform,
+                    normalized_request_id,
+                    request_payload_hash,
+                    timestamp,
+                    "running",
+                    note,
+                    role_id,
+                    task_id,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            connection.commit()
+            return (
+                CaptureBatch(
+                    id=int(cursor.lastrowid),
+                    job_title=job_title,
+                    source_url=source_url,
+                    source_platform=source_platform,
+                    start_time=timestamp,
+                    status="running",
+                    note=note,
+                    request_id=normalized_request_id,
+                    request_payload_hash=request_payload_hash,
+                    role_id=role_id,
+                    task_id=task_id,
+                    created_at=timestamp,
+                    updated_at=timestamp,
+                ),
+                False,
+            )
+        except sqlite3.IntegrityError:
+            connection.rollback()
+            row = connection.execute(
+                "SELECT * FROM capture_batches WHERE request_id = ?",
+                (normalized_request_id,),
+            ).fetchone()
+            if row is None:
+                raise
+            if str(row["request_payload_hash"] or "") != request_payload_hash:
+                raise IdempotencyConflictError("幂等请求标识已被其他导入内容占用。")
+            return (self._capture_batch_from_row(row), True)
+
+    def _validate_batch_context(self, *, role_id: int | None, task_id: int | None) -> None:
+        if role_id is not None:
+            profile = self.get_job_profile(int(role_id))
+            if profile is None:
+                raise ValueError("岗位档案不存在")
+            if str(profile.get("status") or "") != "active":
+                raise ValueError("所选岗位档案不是招聘中状态，不能创建采集批次")
+        if task_id is not None:
+            task = self.get_recruitment_task(int(task_id))
+            if task is None:
+                raise ValueError("招聘任务不存在")
+            if int(task["role_id"]) != int(role_id or 0):
+                raise ValueError("招聘任务与采集岗位不一致")
+            if str(task["status"]) != "running":
+                raise ValueError("招聘任务不是执行中状态，不能创建采集批次")
+
+    @staticmethod
+    def _capture_batch_from_row(row: sqlite3.Row) -> CaptureBatch:
+        return CaptureBatch(
+            id=int(row["id"]),
+            job_title=str(row["job_title"] or ""),
+            source_url=str(row["source_url"] or ""),
+            source_platform=str(row["source_platform"] or ""),
+            start_time=str(row["start_time"] or ""),
+            end_time=str(row["end_time"] or ""),
+            total_collected=int(row["total_collected"] or 0),
+            total_new=int(row["total_new"] or 0),
+            total_updated=int(row["total_updated"] or 0),
+            total_skipped=int(row["total_skipped"] or 0),
+            total_failed=int(row["total_failed"] or 0),
+            status=str(row["status"] or ""),
+            note=str(row["note"] or ""),
+            request_id=str(row["request_id"] or ""),
+            request_payload_hash=str(row["request_payload_hash"] or ""),
+            role_id=row["role_id"],
+            task_id=row["task_id"],
+            created_at=str(row["created_at"] or ""),
+            updated_at=str(row["updated_at"] or ""),
+        )
+
+    def save_recruitment_task(self, task: RecruitmentTask) -> RecruitmentTask:
+        connection = self.db.get_connection()
+        task.name = task.name.strip()
+        if not task.name:
+            raise ValueError("招聘任务名称不能为空")
+        if task.platform not in {"boss", "liepin"}:
+            raise ValueError("招聘平台无效")
+        if not task.source_url.strip():
+            raise ValueError("招聘任务必须填写来源页面")
+        if task.target_candidates > 0 and task.target_ssr > task.target_candidates:
+            raise ValueError("SSR 目标不能超过候选人目标")
+        profile = self.get_job_profile(int(task.role_id))
+        if profile is None:
+            raise ValueError("岗位档案不存在")
+        if str(profile.get("status") or "") != "active":
+            raise ValueError("只有招聘中的岗位才能创建或编辑招聘任务")
+        if task.id is None and task.status != "ready":
+            raise ValueError("新招聘任务必须从待启动状态开始")
+        if self.get_job_profile_version(int(task.role_id), int(profile.get("version") or 1)) is None:
+            raise ValueError("当前岗位版本快照不存在，不能创建招聘任务")
+        timestamp = now_iso()
+        if task.id is None:
+            task.profile_version = int(profile.get("version") or 1)
+            cursor = connection.execute(
+                """
+                INSERT INTO recruitment_tasks(
+                    name, role_id, profile_version, platform, source_url,
+                    target_candidates, target_ssr, minimum_rating, view_quota,
+                    greeting_quota, status, current_step, latest_message,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    task.name.strip(), task.role_id, task.profile_version, task.platform,
+                    task.source_url, max(0, task.target_candidates), max(0, task.target_ssr),
+                    task.minimum_rating, max(0, task.view_quota), max(0, task.greeting_quota),
+                    task.status, task.current_step, task.latest_message, timestamp, timestamp,
+                ),
+            )
+            task.id = int(cursor.lastrowid)
+            task.created_at = timestamp
+        else:
+            existing = self.get_recruitment_task(int(task.id))
+            if existing is None:
+                raise ValueError("招聘任务不存在")
+            if str(existing["status"]) != "ready":
+                raise ValueError("招聘任务启动后不能修改目标、平台或额度；请复制或新建任务")
+            task.role_id = int(existing["role_id"])
+            task.profile_version = int(existing["profile_version"])
+            connection.execute(
+                """
+                UPDATE recruitment_tasks
+                SET name = ?, platform = ?, source_url = ?, target_candidates = ?,
+                    target_ssr = ?, minimum_rating = ?, view_quota = ?, greeting_quota = ?,
+                    current_step = ?, latest_message = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    task.name.strip(), task.platform, task.source_url,
+                    max(0, task.target_candidates), max(0, task.target_ssr), task.minimum_rating,
+                    max(0, task.view_quota), max(0, task.greeting_quota), task.current_step,
+                    task.latest_message, timestamp, task.id,
+                ),
+            )
+            task.status = str(existing["status"])
+            task.created_at = str(existing["created_at"])
+        connection.commit()
+        task.updated_at = timestamp
+        return task
+
+    def list_recruitment_tasks(self, *, role_id: int | None = None) -> list[dict[str, object]]:
+        sql = """
+            SELECT t.*, p.job_title AS role_title
+            FROM recruitment_tasks t
+            JOIN screening_profiles p ON p.id = t.role_id
+        """
+        params: tuple[object, ...] = ()
+        if role_id is not None:
+            sql += " WHERE t.role_id = ?"
+            params = (role_id,)
+        sql += " ORDER BY t.updated_at DESC, t.id DESC"
+        return [dict(row) for row in self.db.get_connection().execute(sql, params).fetchall()]
+
+    def get_recruitment_task(self, task_id: int) -> dict[str, object] | None:
+        row = self.db.get_connection().execute(
+            """
+            SELECT t.*, p.job_title AS role_title
+            FROM recruitment_tasks t
+            JOIN screening_profiles p ON p.id = t.role_id
+            WHERE t.id = ?
+            """,
+            (task_id,),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def set_recruitment_task_status(
+        self,
+        task_id: int,
+        status: str,
+        *,
+        message: str = "",
+    ) -> RecruitmentTask:
+        row = self.get_recruitment_task(task_id)
+        if row is None:
+            raise ValueError("招聘任务不存在")
+        current = str(row["status"])
+        if status != current and status not in RECRUITMENT_TASK_STATUS_TRANSITIONS.get(current, set()):
+            if current in {"completed", "cancelled"}:
+                raise ValueError("已进入终态的招聘任务不能重新开启")
+            raise ValueError(f"招聘任务状态不能从 {current} 变更为 {status}")
+        if status == "running":
+            profile = self.get_job_profile(int(row["role_id"]))
+            if profile is None or profile.get("status") != "active":
+                raise ValueError("关联岗位不是招聘中状态，不能启动招聘任务")
+            if self.get_job_profile_version(int(row["role_id"]), int(row["profile_version"])) is None:
+                raise ValueError("招聘任务固定的岗位版本不存在")
+        step = {
+            "ready": "待启动", "running": "采集与筛选", "waiting_user": "等待人工处理",
+            "paused": "已暂停", "completed": "已完成", "failed": "执行失败",
+            "cancelled": "已取消",
+        }[status]
+        timestamp = now_iso()
+        self.db.get_connection().execute(
+            """
+            UPDATE recruitment_tasks
+            SET status = ?, current_step = ?, latest_message = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (status, step, message, timestamp, task_id),
+        )
+        self.db.get_connection().commit()
+        updated = self.get_recruitment_task(task_id)
+        return RecruitmentTask(
+            **{key: updated[key] for key in RecruitmentTask.__dataclass_fields__ if key in updated}
+        )
+
+    def get_recruitment_task_summary(self, task_id: int) -> dict[str, object]:
+        task = self.get_recruitment_task(task_id)
+        if task is None:
+            raise ValueError("招聘任务不存在")
+        connection = self.db.get_connection()
+        counts = connection.execute(
+            """
+            SELECT COUNT(DISTINCT b.id) AS batch_count,
+                   COUNT(DISTINCT bi.candidate_id) AS candidate_count
+            FROM capture_batches b
+            LEFT JOIN capture_batch_items bi ON bi.batch_id = b.id
+            WHERE b.task_id = ?
+            """,
+            (task_id,),
+        ).fetchone()
+        runs = connection.execute(
+            "SELECT COUNT(*) AS run_count FROM screening_runs WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+        exports = connection.execute(
+            "SELECT COUNT(*) AS export_count FROM export_records WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+        return {
+            **task,
+            "batch_count": int(counts["batch_count"] or 0),
+            "candidate_count": int(counts["candidate_count"] or 0),
+            "run_count": int(runs["run_count"] or 0),
+            "export_count": int(exports["export_count"] or 0),
+        }
+
+    def update_recruitment_task_progress(
+        self,
+        task_id: int,
+        *,
+        current_step: str,
+        message: str = "",
+    ) -> None:
+        self.db.get_connection().execute(
+            """
+            UPDATE recruitment_tasks
+            SET current_step = ?, latest_message = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (current_step, message, now_iso(), task_id),
+        )
+        self.db.get_connection().commit()
+
+    def save_next_action(self, action: NextAction) -> NextAction:
+        action.title = action.title.strip()
+        action.owner = action.owner.strip()
+        action.note = action.note.strip()
+        if not action.title:
+            raise ValueError("下一步动作标题不能为空")
+        if action.subject_type not in {"candidate_role", "recruitment_task"}:
+            raise ValueError("下一步动作关联对象无效")
+        allowed_types = {
+            "outreach", "follow_up", "collect_info", "manual_review", "interview",
+            "interview_feedback", "offer_follow_up", "revisit", "other",
+        }
+        if action.action_type not in allowed_types:
+            raise ValueError("下一步动作类型无效")
+        if action.priority not in {"low", "normal", "high", "urgent"}:
+            raise ValueError("下一步动作优先级无效")
+        try:
+            parsed_due_at = datetime.fromisoformat(action.due_at)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("下一步动作截止时间无效") from exc
+        if parsed_due_at.tzinfo is not None:
+            parsed_due_at = parsed_due_at.astimezone().replace(tzinfo=None)
+        action.due_at = parsed_due_at.isoformat(timespec="seconds")
+        connection = self.db.get_connection()
+        if action.subject_type == "candidate_role":
+            if action.candidate_id is None or action.task_id is not None:
+                raise ValueError("候选人待办必须关联候选人岗位关系")
+            match = connection.execute(
+                "SELECT id FROM candidate_role_matches WHERE candidate_id = ? AND role_id = ?",
+                (action.candidate_id, action.role_id),
+            ).fetchone()
+            if match is None:
+                raise ValueError("候选人岗位关系不存在")
+        else:
+            if action.task_id is None or action.candidate_id is not None:
+                raise ValueError("招聘任务待办必须关联招聘任务")
+            task = self.get_recruitment_task(int(action.task_id))
+            if task is None or int(task["role_id"]) != int(action.role_id):
+                raise ValueError("招聘任务与岗位不一致")
+        timestamp = now_iso()
+        if action.id is None:
+            if action.status != "pending":
+                raise ValueError("新建下一步动作必须为待处理")
+            cursor = connection.execute(
+                """
+                INSERT INTO next_actions(
+                    subject_type, candidate_id, role_id, task_id, action_type, title,
+                    owner, due_at, priority, status, note, completed_at, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, NULL, ?, ?)
+                """,
+                (
+                    action.subject_type, action.candidate_id, action.role_id, action.task_id,
+                    action.action_type, action.title, action.owner, action.due_at,
+                    action.priority, action.note, timestamp, timestamp,
+                ),
+            )
+            action.id = int(cursor.lastrowid)
+            action.created_at = timestamp
+            action.status = "pending"
+        else:
+            existing = self.get_next_action(int(action.id))
+            if existing is None:
+                raise ValueError("下一步动作不存在")
+            if str(existing["status"]) != "pending":
+                raise ValueError("已结束的下一步动作不能编辑")
+            connection.execute(
+                """
+                UPDATE next_actions
+                SET action_type = ?, title = ?, owner = ?, due_at = ?, priority = ?,
+                    note = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    action.action_type, action.title, action.owner, action.due_at,
+                    action.priority, action.note, timestamp, action.id,
+                ),
+            )
+            action.subject_type = str(existing["subject_type"])
+            action.candidate_id = existing["candidate_id"]
+            action.role_id = int(existing["role_id"])
+            action.task_id = existing["task_id"]
+            action.status = "pending"
+            action.created_at = str(existing["created_at"])
+        connection.commit()
+        action.updated_at = timestamp
+        return action
+
+    def get_next_action(self, action_id: int) -> dict[str, object] | None:
+        row = self.db.get_connection().execute(
+            "SELECT * FROM next_actions WHERE id = ?", (action_id,)
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def set_next_action_status(self, action_id: int, status: str) -> NextAction:
+        if status not in {"completed", "cancelled"}:
+            raise ValueError("下一步动作结束状态无效")
+        existing = self.get_next_action(action_id)
+        if existing is None:
+            raise ValueError("下一步动作不存在")
+        if str(existing["status"]) != "pending":
+            raise ValueError("下一步动作已经结束")
+        timestamp = now_iso()
+        completed_at = timestamp if status == "completed" else None
+        connection = self.db.get_connection()
+        connection.execute(
+            """
+            UPDATE next_actions
+            SET status = ?, completed_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (status, completed_at, timestamp, action_id),
+        )
+        connection.commit()
+        updated = self.get_next_action(action_id)
+        assert updated is not None
+        return NextAction(
+            **{key: updated[key] for key in NextAction.__dataclass_fields__ if key in updated}
+        )
+
+    def page_next_actions(
+        self,
+        *,
+        view: str = "pending",
+        role_id: int | None = None,
+        owner: str = "",
+        page: int = 1,
+        page_size: int = 100,
+    ) -> dict[str, object]:
+        if view not in {"pending", "today", "overdue", "next_7_days", "completed", "all"}:
+            raise ValueError("下一步动作视图无效")
+        page, page_size, _offset = self._normalize_page(page, page_size)
+        where: list[str] = []
+        params: list[object] = []
+        if view == "pending":
+            where.append("a.status = 'pending'")
+        elif view == "today":
+            where.extend(["a.status = 'pending'", "DATE(a.due_at) = DATE('now', 'localtime')"])
+        elif view == "overdue":
+            where.extend([
+                "a.status = 'pending'",
+                "a.due_at < STRFTIME('%Y-%m-%dT%H:%M:%S', 'now', 'localtime')",
+            ])
+        elif view == "next_7_days":
+            where.extend([
+                "a.status = 'pending'",
+                "DATE(a.due_at) BETWEEN DATE('now', 'localtime', '+1 day') "
+                "AND DATE('now', 'localtime', '+7 day')",
+            ])
+        elif view == "completed":
+            where.append("a.status = 'completed'")
+        if role_id is not None:
+            where.append("a.role_id = ?")
+            params.append(role_id)
+        if owner.strip():
+            where.append("a.owner = ?")
+            params.append(owner.strip())
+        where_sql = "WHERE " + " AND ".join(where) if where else ""
+        connection = self.db.get_connection()
+        total_row = connection.execute(
+            f"SELECT COUNT(*) AS value FROM next_actions a {where_sql}", params
+        ).fetchone()
+        total = int(total_row["value"] or 0)
+        last_page = max(1, (total + page_size - 1) // page_size)
+        page = min(page, last_page)
+        rows = list(
+            connection.execute(
+                f"""
+                SELECT
+                    a.*,
+                    p.job_title AS role_title,
+                    c.name AS candidate_name,
+                    t.name AS task_name
+                FROM next_actions a
+                JOIN screening_profiles p ON p.id = a.role_id
+                LEFT JOIN candidates c ON c.id = a.candidate_id
+                LEFT JOIN recruitment_tasks t ON t.id = a.task_id
+                {where_sql}
+                ORDER BY
+                    CASE a.status WHEN 'pending' THEN 1 ELSE 2 END,
+                    CASE a.priority WHEN 'urgent' THEN 1 WHEN 'high' THEN 2
+                         WHEN 'normal' THEN 3 ELSE 4 END,
+                    a.due_at,
+                    a.id DESC
+                LIMIT ? OFFSET ?
+                """,
+                [*params, page_size, (page - 1) * page_size],
+            ).fetchall()
+        )
+        return {"rows": rows, "total": total, "page": page, "page_size": page_size}
+
+    def get_next_action_summary(self, *, role_id: int | None = None) -> dict[str, int]:
+        where = "WHERE (? IS NULL OR role_id = ?)"
+        row = self.db.get_connection().execute(
+            f"""
+            SELECT
+                SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending_total,
+                SUM(CASE WHEN status = 'pending'
+                              AND DATE(due_at) = DATE('now', 'localtime')
+                         THEN 1 ELSE 0 END) AS today,
+                SUM(CASE WHEN status = 'pending'
+                              AND due_at < STRFTIME('%Y-%m-%dT%H:%M:%S', 'now', 'localtime')
+                         THEN 1 ELSE 0 END) AS overdue,
+                SUM(CASE WHEN status = 'pending'
+                              AND DATE(due_at) BETWEEN DATE('now', 'localtime', '+1 day')
+                                                   AND DATE('now', 'localtime', '+7 day')
+                         THEN 1 ELSE 0 END) AS next_7_days,
+                SUM(CASE WHEN status = 'completed'
+                              AND DATE(completed_at) = DATE('now', 'localtime')
+                         THEN 1 ELSE 0 END) AS completed_today
+            FROM next_actions
+            {where}
+            """,
+            (role_id, role_id),
+        ).fetchone()
+        return {
+            "pending_total": int(row["pending_total"] or 0),
+            "today": int(row["today"] or 0),
+            "overdue": int(row["overdue"] or 0),
+            "next_7_days": int(row["next_7_days"] or 0),
+            "completed_today": int(row["completed_today"] or 0),
+        }
+
+    def pause_active_recruitment_tasks_for_role(self, role_id: int, message: str) -> list[int]:
+        rows = self.db.get_connection().execute(
+            """
+            SELECT id FROM recruitment_tasks
+            WHERE role_id = ? AND status IN ('ready', 'running', 'waiting_user')
+            """,
+            (role_id,),
+        ).fetchall()
+        task_ids = [int(row["id"]) for row in rows]
+        if task_ids:
+            placeholders = ",".join("?" for _ in task_ids)
+            self.db.get_connection().execute(
+                f"""
+                UPDATE recruitment_tasks
+                SET status = 'paused', current_step = '已暂停', latest_message = ?, updated_at = ?
+                WHERE id IN ({placeholders})
+                """,
+                (message, now_iso(), *task_ids),
+            )
+            self.db.get_connection().commit()
+        return task_ids
+
+    def record_export(
+        self,
+        *,
+        file_path: str,
+        export_format: str,
+        row_count: int,
+        batch_id: int | None,
+        role_id: int | None,
+    ) -> int | None:
+        task_id = None
+        if batch_id is not None:
+            row = self.db.get_connection().execute(
+                "SELECT task_id, role_id FROM capture_batches WHERE id = ?", (batch_id,)
+            ).fetchone()
+            if row is not None:
+                task_id = row["task_id"]
+                role_id = role_id or row["role_id"]
+        cursor = self.db.get_connection().execute(
+            """
+            INSERT INTO export_records(task_id, role_id, batch_id, file_path, export_format, row_count, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (task_id, role_id, batch_id, file_path, export_format, row_count, now_iso()),
+        )
+        self.db.get_connection().commit()
+        return int(task_id) if task_id is not None else None
+
+    def list_export_records(self, *, task_id: int | None = None, limit: int = 50) -> list[dict[str, object]]:
+        sql = "SELECT * FROM export_records"
+        params: list[object] = []
+        if task_id is not None:
+            sql += " WHERE task_id = ?"
+            params.append(task_id)
+        sql += " ORDER BY created_at DESC, id DESC LIMIT ?"
+        params.append(max(1, limit))
+        return [dict(row) for row in self.db.get_connection().execute(sql, params).fetchall()]
+
+    def find_job_profile_by_title(
+        self,
+        job_title: str,
+        *,
+        active_only: bool = False,
+    ) -> dict[str, object] | None:
+        status_sql = " AND status = 'active'" if active_only else ""
+        row = self.db.get_connection().execute(
+            f"SELECT * FROM screening_profiles WHERE job_title = ?{status_sql}",
+            (str(job_title or "").strip(),),
+        ).fetchone()
+        return self._decode_screening_profile(row) if row is not None else None
 
     def finalize_batch(
         self,
@@ -88,6 +869,9 @@ class CandidateRepository:
         status: str,
         total_collected: int,
         total_new: int,
+        total_updated: int = 0,
+        total_skipped: int = 0,
+        total_failed: int = 0,
         note: str = "",
     ) -> None:
         connection = self.db.get_connection()
@@ -95,29 +879,58 @@ class CandidateRepository:
         connection.execute(
             """
             UPDATE capture_batches
-            SET end_time = ?, total_collected = ?, total_new = ?, status = ?, note = ?, updated_at = ?
+            SET end_time = ?, total_collected = ?, total_new = ?, total_updated = ?,
+                total_skipped = ?, total_failed = ?, status = ?, note = ?, updated_at = ?
             WHERE id = ?
             """,
-            (timestamp, total_collected, total_new, status, note, timestamp, batch_id),
+            (
+                timestamp,
+                total_collected,
+                total_new,
+                total_updated,
+                total_skipped,
+                total_failed,
+                status,
+                note,
+                timestamp,
+                batch_id,
+            ),
         )
         connection.commit()
         self._log(
             "info",
-            "Finalized batch %s with status=%s total_collected=%s total_new=%s",
+            "Finalized batch %s with status=%s total_collected=%s total_new=%s total_updated=%s total_skipped=%s total_failed=%s",
             batch_id,
             status,
             total_collected,
             total_new,
+            total_updated,
+            total_skipped,
+            total_failed,
         )
 
-    def upsert_batch_candidates(self, batch_id: int, candidates: Iterable[CandidateRecord]) -> dict[str, int]:
+    def upsert_batch_candidates(
+        self,
+        batch_id: int,
+        candidates: Iterable[CandidateRecord],
+        *,
+        role_id: int | None = None,
+    ) -> dict[str, object]:
         connection = self.db.get_connection()
         inserted_candidates = 0
+        updated_candidates = 0
+        skipped_candidates = 0
         inserted_batch_items = 0
         processed = 0
+        seen_keys: set[str] = set()
+        candidate_results: list[dict[str, object]] = []
         with connection:
             for candidate in candidates:
                 processed += 1
+                if candidate.candidate_key in seen_keys:
+                    skipped_candidates += 1
+                    continue
+                seen_keys.add(candidate.candidate_key)
                 existing = connection.execute(
                     "SELECT * FROM candidates WHERE candidate_key = ?",
                     (candidate.candidate_key,),
@@ -126,13 +939,22 @@ class CandidateRepository:
                     candidate_id = self._insert_candidate(connection, candidate)
                     inserted_candidates += 1
                     profile_candidate = candidate
+                    ingest_status = "new"
                 else:
                     candidate_id = int(existing["id"])
                     merged = self._merge_candidate(existing, candidate)
                     self._update_candidate(connection, candidate_id, merged)
                     profile_candidate = merged
+                    updated_candidates += 1
+                    ingest_status = "updated"
                 profile_candidate.id = candidate_id
                 self._upsert_candidate_profile(connection, profile_candidate)
+                if role_id is not None:
+                    self._ensure_candidate_role_match_exists(
+                        connection,
+                        candidate_id=candidate_id,
+                        role_id=role_id,
+                    )
 
                 snapshot = CaptureBatchItem(
                     batch_id=batch_id,
@@ -143,6 +965,9 @@ class CandidateRepository:
                     job_title=candidate.job_title,
                     source_url=candidate.source_url,
                     raw_card_text=candidate.raw_card_text,
+                    source_platform=candidate.source_platform,
+                    platform_uid=candidate.platform_uid,
+                    ingest_status=ingest_status,
                     name=candidate.name,
                     active_status=candidate.active_status,
                     expected_salary=candidate.expected_salary,
@@ -156,9 +981,10 @@ class CandidateRepository:
                     """
                     INSERT OR IGNORE INTO capture_batch_items(
                         batch_id, candidate_id, candidate_key, raw_text_hash, capture_time, job_title,
-                        source_url, name, active_status, expected_salary, work_experience_text,
+                        source_url, source_platform, platform_uid, ingest_status, name,
+                        active_status, expected_salary, work_experience_text,
                         education_text, tags_text, summary_text, raw_card_text, detail_url, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         snapshot.batch_id,
@@ -168,6 +994,9 @@ class CandidateRepository:
                         snapshot.capture_time,
                         snapshot.job_title,
                         snapshot.source_url,
+                        snapshot.source_platform,
+                        snapshot.platform_uid,
+                        snapshot.ingest_status,
                         snapshot.name,
                         snapshot.active_status,
                         snapshot.expected_salary,
@@ -182,6 +1011,13 @@ class CandidateRepository:
                 )
                 if cursor.rowcount > 0:
                     inserted_batch_items += 1
+                candidate_results.append(
+                    {
+                        "candidate_id": candidate_id,
+                        "candidate_key": candidate.candidate_key,
+                        "ingest_status": ingest_status,
+                    }
+                )
         self._log(
             "info",
             "Upserted %s candidates for batch=%s inserted_candidates=%s inserted_batch_items=%s",
@@ -193,14 +1029,50 @@ class CandidateRepository:
         return {
             "processed": processed,
             "inserted_candidates": inserted_candidates,
+            "updated_candidates": updated_candidates,
+            "skipped_candidates": skipped_candidates,
+            "failed_candidates": 0,
             "inserted_batch_items": inserted_batch_items,
+            "candidate_results": candidate_results,
         }
+
+    def _ensure_candidate_role_match_exists(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        candidate_id: int,
+        role_id: int,
+        timestamp: str | None = None,
+    ) -> None:
+        created_at = timestamp or now_iso()
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO candidate_role_matches(
+                candidate_id,
+                role_id,
+                latest_confidence,
+                match_status,
+                recruitment_status,
+                human_decision,
+                created_at,
+                updated_at
+            ) VALUES (?, ?, '', 'collected', 'collected', '', ?, ?)
+            """,
+            (
+                candidate_id,
+                role_id,
+                created_at,
+                created_at,
+            ),
+        )
 
     def list_candidates(
         self,
         keyword: str = "",
         job_title: str = "",
         batch_id: int | None = None,
+        source_platform: str = "",
+        unbound_only: bool = False,
         city: str = "",
         years_min: int | str | None = None,
         years_max: int | str | None = None,
@@ -216,6 +1088,8 @@ class CandidateRepository:
             keyword=keyword,
             job_title=job_title,
             batch_id=batch_id,
+            source_platform=source_platform,
+            unbound_only=unbound_only,
             city=city,
             years_min=years_min,
             years_max=years_max,
@@ -259,9 +1133,30 @@ class CandidateRepository:
             cp.skill_tags_json,
             cp.last_active_at,
             cp.profile_completeness,
+            lbi.batch_id AS latest_batch_id,
+            lbi.capture_time AS latest_capture_time,
+            lbi.job_title AS latest_source_job_title,
+            lbi.source_platform AS latest_source_platform,
+            lbi.ingest_status AS latest_ingest_status,
+            lb.role_id AS latest_batch_role_id,
+            lb.total_new AS latest_batch_total_new,
+            lb.total_updated AS latest_batch_total_updated,
+            CASE
+                WHEN EXISTS (
+                    SELECT 1 FROM candidate_role_matches mx WHERE mx.candidate_id = c.id
+                ) THEN 1 ELSE 0
+            END AS has_role_binding,
             COUNT(DISTINCT bi2.batch_id) AS batch_count
         FROM candidates c
         LEFT JOIN capture_batch_items bi2 ON bi2.candidate_id = c.id
+        LEFT JOIN capture_batch_items lbi ON lbi.id = (
+            SELECT bi3.id
+            FROM capture_batch_items bi3
+            WHERE bi3.candidate_id = c.id
+            ORDER BY bi3.capture_time DESC, bi3.id DESC
+            LIMIT 1
+        )
+        LEFT JOIN capture_batches lb ON lb.id = lbi.batch_id
         LEFT JOIN candidate_role_matches lm ON lm.id = (
             SELECT m2.id
             FROM candidate_role_matches m2
@@ -379,6 +1274,8 @@ class CandidateRepository:
         keyword: str = "",
         job_title: str = "",
         batch_id: int | None = None,
+        source_platform: str = "",
+        unbound_only: bool = False,
         city: str = "",
         years_min: int | str | None = None,
         years_max: int | str | None = None,
@@ -395,6 +1292,13 @@ class CandidateRepository:
             joins += " JOIN capture_batch_items bi ON bi.candidate_id = c.id "
             filters.append("bi.batch_id = ?")
             params.append(batch_id)
+        if source_platform:
+            filters.append("c.source_platform = ?")
+            params.append(source_platform.strip())
+        if unbound_only:
+            filters.append(
+                "NOT EXISTS (SELECT 1 FROM candidate_role_matches mx WHERE mx.candidate_id = c.id)"
+            )
         if keyword:
             token = f"%{keyword}%"
             filters.append(
@@ -543,6 +1447,7 @@ class CandidateRepository:
             candidate_key=str(row["candidate_key"]),
             raw_text_hash=str(row["raw_text_hash"]),
             platform_uid=str(row["platform_uid"] or ""),
+            source_platform=str(row["source_platform"] or ""),
             job_title=str(row["job_title"] or ""),
             source_url=str(row["source_url"] or ""),
             capture_time=str(row["capture_time"] or ""),
@@ -564,11 +1469,188 @@ class CandidateRepository:
         return list(
             connection.execute(
                 """
-                SELECT * FROM capture_batches
-                ORDER BY start_time DESC
+                SELECT *
+                FROM capture_batches
+                ORDER BY start_time DESC, id DESC
                 """
             ).fetchall()
         )
+
+    def get_batch_by_request_id(self, request_id: str) -> dict[str, object] | None:
+        row = self.db.get_connection().execute(
+            "SELECT * FROM capture_batches WHERE request_id = ?",
+            (request_id,),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def get_capture_batch(self, batch_id: int) -> dict[str, object] | None:
+        row = self.db.get_connection().execute(
+            "SELECT * FROM capture_batches WHERE id = ?",
+            (batch_id,),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def page_capture_batches(
+        self,
+        *,
+        source_platform: str = "",
+        page: int = 1,
+        page_size: int = 20,
+    ) -> dict[str, object]:
+        page, page_size, offset = self._normalize_page(page, page_size)
+        filters: list[str] = []
+        params: list[object] = []
+        if source_platform.strip():
+            filters.append("source_platform = ?")
+            params.append(source_platform.strip())
+        where_sql = f"WHERE {' AND '.join(filters)}" if filters else ""
+        total = int(
+            self.db.get_connection().execute(
+                f"SELECT COUNT(*) FROM capture_batches {where_sql}",
+                params,
+            ).fetchone()[0]
+        )
+        rows = self.db.get_connection().execute(
+            f"""
+            SELECT *
+            FROM capture_batches
+            {where_sql}
+            ORDER BY start_time DESC, id DESC
+            LIMIT ? OFFSET ?
+            """,
+            [*params, page_size, offset],
+        ).fetchall()
+        today = now_iso()[:10]
+        summary_row = self.db.get_connection().execute(
+            f"""
+            SELECT
+                COUNT(*) AS batch_count,
+                COALESCE(SUM(total_collected), 0) AS received,
+                COALESCE(SUM(total_new), 0) AS added
+            FROM capture_batches
+            {where_sql}{' AND' if where_sql else ' WHERE'} substr(start_time, 1, 10) = ?
+            """,
+            [*params, today],
+        ).fetchone()
+        return {
+            "rows": [dict(row) for row in rows],
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "today_summary": dict(summary_row),
+        }
+
+    def page_capture_batch_candidates(
+        self,
+        batch_id: int,
+        *,
+        page: int = 1,
+        page_size: int = 100,
+    ) -> dict[str, object]:
+        page, page_size, offset = self._normalize_page(page, page_size)
+        total = int(
+            self.db.get_connection().execute(
+                "SELECT COUNT(*) FROM capture_batch_items WHERE batch_id = ?",
+                (batch_id,),
+            ).fetchone()[0]
+        )
+        rows = self.db.get_connection().execute(
+            """
+            SELECT
+                bi.*,
+                c.source_platform AS candidate_source_platform,
+                CASE
+                    WHEN EXISTS (
+                        SELECT 1 FROM candidate_role_matches m WHERE m.candidate_id = bi.candidate_id
+                    ) THEN 1 ELSE 0
+                END AS has_role_binding
+            FROM capture_batch_items bi
+            JOIN candidates c ON c.id = bi.candidate_id
+            WHERE bi.batch_id = ?
+            ORDER BY bi.id ASC
+            LIMIT ? OFFSET ?
+            """,
+            (batch_id, page_size, offset),
+        ).fetchall()
+        return {"rows": [dict(row) for row in rows], "total": total, "page": page, "page_size": page_size}
+
+    def get_capture_batch_export_rows(self, batch_id: int) -> list[dict[str, object]]:
+        rows = self.db.get_connection().execute(
+            """
+            SELECT
+                bi.name,
+                bi.active_status,
+                bi.expected_salary,
+                bi.work_experience_text,
+                bi.education_text,
+                bi.tags_text,
+                bi.summary_text,
+                bi.raw_card_text,
+                bi.job_title,
+                bi.source_url,
+                bi.capture_time,
+                bi.detail_url,
+                bi.candidate_key
+            FROM capture_batch_items bi
+            WHERE bi.batch_id = ?
+            ORDER BY bi.id ASC
+            """,
+            (batch_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_latest_capture_batch_for_task(self, task_id: int) -> dict[str, object] | None:
+        row = self.db.get_connection().execute(
+            """
+            SELECT * FROM capture_batches
+            WHERE task_id = ?
+            ORDER BY start_time DESC, id DESC
+            LIMIT 1
+            """,
+            (task_id,),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def get_capture_batch_quality_metrics(self, batch_id: int) -> dict[str, object]:
+        batch = self.db.get_connection().execute(
+            "SELECT * FROM capture_batches WHERE id = ?",
+            (batch_id,),
+        ).fetchone()
+        if batch is None:
+            raise ValueError("采集批次不存在")
+        counts = self.db.get_connection().execute(
+            """
+            SELECT
+                COUNT(*) AS unique_candidates,
+                SUM(
+                    CASE WHEN bi.id = (
+                        SELECT MIN(first_bi.id)
+                        FROM capture_batch_items first_bi
+                        WHERE first_bi.candidate_id = bi.candidate_id
+                    ) THEN 1 ELSE 0 END
+                ) AS new_candidates,
+                SUM(
+                    CASE WHEN TRIM(COALESCE(bi.name, '')) <> ''
+                              AND TRIM(COALESCE(bi.raw_card_text, '')) <> ''
+                              AND TRIM(COALESCE(bi.source_url, '')) <> ''
+                         THEN 1 ELSE 0 END
+                ) AS core_complete,
+                SUM(
+                    CASE WHEN TRIM(COALESCE(bi.source_url, '')) = TRIM(COALESCE(?, ''))
+                         THEN 1 ELSE 0 END
+                ) AS source_consistent
+            FROM capture_batch_items bi
+            WHERE bi.batch_id = ?
+            """,
+            (batch["source_url"], batch_id),
+        ).fetchone()
+        return {
+            **dict(batch),
+            "unique_candidates": int(counts["unique_candidates"] or 0),
+            "new_candidates": int(counts["new_candidates"] or 0),
+            "core_complete": int(counts["core_complete"] or 0),
+            "source_consistent": int(counts["source_consistent"] or 0),
+        }
 
     def list_job_titles(self) -> list[str]:
         connection = self.db.get_connection()
@@ -671,23 +1753,54 @@ class CandidateRepository:
             "latest_batch_status": str(latest_batch["status"]) if latest_batch else "idle",
         }
 
-    def save_screening_profile(self, profile: ScreeningProfile) -> ScreeningProfile:
+    def save_job_profile(
+        self,
+        profile: ScreeningProfile,
+        *,
+        allow_title_upsert: bool = False,
+    ) -> ScreeningProfile:
         connection = self.db.get_connection()
         timestamp = now_iso()
         existing = None
         if profile.id is not None:
             existing = connection.execute(
-                "SELECT id, created_at, version FROM screening_profiles WHERE id = ?",
+                "SELECT id, created_at, version, status FROM screening_profiles WHERE id = ?",
                 (profile.id,),
             ).fetchone()
         if existing is None:
-            existing = connection.execute(
-                "SELECT id, created_at, version FROM screening_profiles WHERE job_title = ?",
+            title_match = connection.execute(
+                "SELECT id, created_at, version, status FROM screening_profiles WHERE job_title = ?",
                 (profile.job_title,),
             ).fetchone()
+            if title_match is not None and not allow_title_upsert:
+                raise ValueError("同名岗位档案已存在")
+            existing = title_match
+
+        if profile.id is not None:
+            duplicate = connection.execute(
+                "SELECT id FROM screening_profiles WHERE job_title = ? AND id <> ?",
+                (profile.job_title, int(profile.id)),
+            ).fetchone()
+            if duplicate is not None:
+                raise ValueError("同名岗位档案已存在")
+        if existing is not None:
+            self._validate_job_profile_status_transition(
+                str(existing["status"] or "draft"),
+                profile.status,
+            )
 
         values = (
             profile.job_title,
+            profile.department,
+            profile.hiring_manager,
+            profile.location,
+            profile.employment_type,
+            profile.experience_requirement,
+            profile.education_requirement,
+            max(1, int(profile.target_hires)),
+            profile.recruitment_deadline,
+            profile.priority,
+            profile.status,
             profile.jd_text,
             profile.prompt_text,
             profile.prompt_source,
@@ -698,43 +1811,77 @@ class CandidateRepository:
             json.dumps(profile.interview_checks, ensure_ascii=False),
             json.dumps(profile.evidence_policy, ensure_ascii=False, sort_keys=True),
         )
-        if existing is None:
-            cursor = connection.execute(
-                """
-                INSERT INTO screening_profiles(
-                    job_title, jd_text, prompt_text, prompt_source,
-                    must_have_json, nice_to_have_json, risk_flags_json, exclusions_json,
-                    interview_checks_json, evidence_policy_json, version, parent_profile_id,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (*values, max(1, int(profile.version)), profile.parent_profile_id, timestamp, timestamp),
-            )
-            profile.id = int(cursor.lastrowid)
-            profile.created_at = timestamp
-        else:
-            profile.id = int(existing["id"])
-            profile.created_at = str(existing["created_at"])
-            profile.version = int(existing["version"] or 1) + 1
+
+        with connection:
+            if existing is None:
+                profile.version = max(1, int(profile.version))
+                cursor = connection.execute(
+                    """
+                    INSERT INTO screening_profiles(
+                        job_title, department, hiring_manager, location, employment_type,
+                        experience_requirement, education_requirement, target_hires,
+                        recruitment_deadline, priority, status,
+                        jd_text, prompt_text, prompt_source,
+                        must_have_json, nice_to_have_json, risk_flags_json, exclusions_json,
+                        interview_checks_json, evidence_policy_json, version, parent_profile_id,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (*values, profile.version, profile.parent_profile_id, timestamp, timestamp),
+                )
+                profile.id = int(cursor.lastrowid)
+                profile.created_at = timestamp
+            else:
+                profile.id = int(existing["id"])
+                profile.created_at = str(existing["created_at"])
+                profile.version = int(existing["version"] or 1) + 1
+                connection.execute(
+                    """
+                    UPDATE screening_profiles
+                    SET job_title = ?, department = ?, hiring_manager = ?, location = ?,
+                        employment_type = ?, experience_requirement = ?,
+                        education_requirement = ?, target_hires = ?, recruitment_deadline = ?,
+                        priority = ?, status = ?, jd_text = ?, prompt_text = ?, prompt_source = ?,
+                        must_have_json = ?, nice_to_have_json = ?, risk_flags_json = ?,
+                        exclusions_json = ?, interview_checks_json = ?, evidence_policy_json = ?,
+                        version = ?, parent_profile_id = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (*values, profile.version, profile.parent_profile_id, timestamp, profile.id),
+                )
+            profile.updated_at = timestamp
             connection.execute(
                 """
-                UPDATE screening_profiles
-                SET job_title = ?, jd_text = ?, prompt_text = ?, prompt_source = ?,
-                    must_have_json = ?, nice_to_have_json = ?, risk_flags_json = ?,
-                    exclusions_json = ?, interview_checks_json = ?, evidence_policy_json = ?,
-                    version = ?, parent_profile_id = ?, updated_at = ?
-                WHERE id = ?
+                INSERT INTO job_profile_versions(profile_id, version, snapshot_json, created_at)
+                VALUES (?, ?, ?, ?)
                 """,
-                (*values, profile.version, profile.parent_profile_id, timestamp, profile.id),
+                (
+                    int(profile.id),
+                    int(profile.version),
+                    json.dumps(profile.to_dict(), ensure_ascii=False, sort_keys=True),
+                    timestamp,
+                ),
             )
-        profile.updated_at = timestamp
-        connection.commit()
         return profile
 
-    def list_screening_profiles(self) -> list[dict[str, object]]:
+    def save_screening_profile(self, profile: ScreeningProfile) -> ScreeningProfile:
+        if profile.status == "draft":
+            profile.status = "active"
+        return self.save_job_profile(profile, allow_title_upsert=True)
+
+    def list_job_profiles(self, *, active_only: bool = False) -> list[dict[str, object]]:
         connection = self.db.get_connection()
-        rows = connection.execute("SELECT * FROM screening_profiles ORDER BY updated_at DESC").fetchall()
+        sql = "SELECT * FROM screening_profiles"
+        params: tuple[object, ...] = ()
+        if active_only:
+            sql += " WHERE status = ?"
+            params = ("active",)
+        sql += " ORDER BY updated_at DESC"
+        rows = connection.execute(sql, params).fetchall()
         return [self._decode_screening_profile(row) for row in rows]
+
+    def list_screening_profiles(self) -> list[dict[str, object]]:
+        return self.list_job_profiles()
 
     def get_screening_profile(self, profile_id: int) -> dict[str, object] | None:
         row = self.db.get_connection().execute(
@@ -742,6 +1889,51 @@ class CandidateRepository:
             (profile_id,),
         ).fetchone()
         return self._decode_screening_profile(row) if row is not None else None
+
+    def get_job_profile(self, profile_id: int) -> dict[str, object] | None:
+        return self.get_screening_profile(profile_id)
+
+    def list_job_profile_versions(self, profile_id: int) -> list[dict[str, object]]:
+        rows = self.db.get_connection().execute(
+            """
+            SELECT version, snapshot_json, created_at
+            FROM job_profile_versions
+            WHERE profile_id = ?
+            ORDER BY version DESC
+            """,
+            (profile_id,),
+        ).fetchall()
+        result: list[dict[str, object]] = []
+        for row in rows:
+            try:
+                snapshot = json.loads(str(row["snapshot_json"] or "{}"))
+            except (TypeError, json.JSONDecodeError):
+                snapshot = {}
+            result.append(
+                {
+                    "version": int(row["version"]),
+                    "snapshot": snapshot if isinstance(snapshot, dict) else {},
+                    "created_at": str(row["created_at"] or ""),
+                }
+            )
+        return result
+
+    def get_job_profile_version(self, profile_id: int, version: int) -> dict[str, object] | None:
+        row = self.db.get_connection().execute(
+            """
+            SELECT snapshot_json
+            FROM job_profile_versions
+            WHERE profile_id = ? AND version = ?
+            """,
+            (profile_id, version),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            snapshot = json.loads(str(row["snapshot_json"] or "{}"))
+        except (TypeError, json.JSONDecodeError):
+            return None
+        return snapshot if isinstance(snapshot, dict) else None
 
     @staticmethod
     def _decode_screening_profile(row: sqlite3.Row) -> dict[str, object]:
@@ -760,22 +1952,32 @@ class CandidateRepository:
                 result[target] = {} if target == "evidence_policy" else []
         return result
 
-    def clone_screening_profile(self, profile_id: int, new_job_title: str) -> ScreeningProfile:
+    def clone_job_profile(self, profile_id: int, new_job_title: str) -> ScreeningProfile:
         source = self.get_screening_profile(profile_id)
         if source is None:
-            raise ValueError("筛选方案不存在")
+            raise ValueError("岗位档案不存在")
         title = str(new_job_title or "").strip()
         if not title:
-            raise ValueError("复制方案必须填写新名称")
+            raise ValueError("复制岗位必须填写新名称")
         duplicate = self.db.get_connection().execute(
             "SELECT id FROM screening_profiles WHERE job_title = ?",
             (title,),
         ).fetchone()
         if duplicate is not None:
-            raise ValueError("同名筛选方案已存在")
-        return self.save_screening_profile(
+            raise ValueError("同名岗位档案已存在")
+        return self.save_job_profile(
             ScreeningProfile(
                 job_title=title,
+                department=str(source.get("department") or ""),
+                hiring_manager=str(source.get("hiring_manager") or ""),
+                location=str(source.get("location") or ""),
+                employment_type=str(source.get("employment_type") or ""),
+                experience_requirement=str(source.get("experience_requirement") or ""),
+                education_requirement=str(source.get("education_requirement") or ""),
+                target_hires=int(source.get("target_hires") or 1),
+                recruitment_deadline=str(source.get("recruitment_deadline") or ""),
+                priority=str(source.get("priority") or "normal"),
+                status="draft",
                 jd_text=str(source.get("jd_text") or ""),
                 prompt_text=str(source.get("prompt_text") or ""),
                 prompt_source=str(source.get("prompt_source") or "generated"),
@@ -789,10 +1991,37 @@ class CandidateRepository:
             )
         )
 
+    def clone_screening_profile(self, profile_id: int, new_job_title: str) -> ScreeningProfile:
+        return self.clone_job_profile(profile_id, new_job_title)
+
+    def set_job_profile_status(self, profile_id: int, status: str) -> ScreeningProfile:
+        if status not in {"draft", "active", "paused", "closed"}:
+            raise ValueError("岗位状态无效")
+        source = self.get_job_profile(profile_id)
+        if source is None:
+            raise ValueError("岗位档案不存在")
+        values = {
+            key: source.get(key)
+            for key in ScreeningProfile.__dataclass_fields__
+            if key in source
+        }
+        profile = ScreeningProfile(**values)
+        profile.status = status
+        return self.save_job_profile(profile)
+
+    @staticmethod
+    def _validate_job_profile_status_transition(current: str, target: str) -> None:
+        if target not in JOB_PROFILE_STATUS_TRANSITIONS:
+            raise ValueError("岗位状态无效")
+        if target == current:
+            return
+        if target not in JOB_PROFILE_STATUS_TRANSITIONS.get(current, set()):
+            if current == "closed":
+                raise ValueError("已结束的岗位档案不能重新开启")
+            raise ValueError(f"岗位状态不能从 {current} 变更为 {target}")
+
     def delete_screening_profile(self, profile_id: int) -> None:
-        connection = self.db.get_connection()
-        connection.execute("DELETE FROM screening_profiles WHERE id = ?", (profile_id,))
-        connection.commit()
+        self.set_job_profile_status(profile_id, "closed")
 
     def create_screening_run(
         self,
@@ -804,22 +2033,41 @@ class CandidateRepository:
         model: str,
         total_candidates: int,
         origin: str = "manual",
+        task_id: int | None = None,
     ) -> int:
         connection = self.db.get_connection()
+        profile = self.get_job_profile(profile_id)
+        if profile is None:
+            raise ValueError("岗位档案不存在")
+        if str(profile.get("status") or "") != "active":
+            raise ValueError("所选岗位档案不是招聘中状态，不能创建筛选任务")
+        if task_id is not None:
+            task = self.get_recruitment_task(task_id)
+            if task is None or int(task["role_id"]) != profile_id:
+                raise ValueError("招聘任务与筛选岗位不一致")
+            if str(task["status"]) != "running":
+                raise ValueError("招聘任务不是执行中状态，不能创建筛选任务")
+        effective_profile_version = (
+            int(task["profile_version"])
+            if task_id is not None
+            else int(profile.get("version") or 1)
+        )
         cursor = connection.execute(
             """
             INSERT INTO screening_runs(
-                profile_id, source_job_title, batch_id, provider, model, origin, status,
+                profile_id, profile_version, source_job_title, batch_id, provider, model, origin, task_id, status,
                 total_candidates, completed_candidates, failed_candidates, started_at
-            ) VALUES (?, ?, ?, ?, ?, ?, 'running', ?, 0, 0, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, 0, 0, ?)
             """,
             (
                 profile_id,
+                effective_profile_version,
                 source_job_title,
                 batch_id,
                 provider,
                 model,
                 origin,
+                task_id,
                 total_candidates,
                 now_iso(),
             ),
@@ -841,6 +2089,11 @@ class CandidateRepository:
         candidate_texts: dict[int, str] | None = None,
         max_retry_count: int = 2,
     ) -> int:
+        profile = self.get_job_profile(role_id)
+        if profile is None:
+            raise ValueError("岗位档案不存在")
+        if str(profile.get("status") or "") != "active":
+            raise ValueError("所选岗位档案不是招聘中状态，不能创建筛选任务")
         connection = self.db.get_connection()
         timestamp = now_iso()
         inserted = 0
@@ -2314,26 +3567,29 @@ class CandidateRepository:
         self,
         *,
         role_id: int | None = None,
+        queue_category: str = "all",
         limit: int = 300,
         offset: int = 0,
         include_total: bool = False,
     ) -> list[sqlite3.Row]:
         connection = self.db.get_connection()
-        where = [
-            """
-            (
-                m.match_status IN ('manual_check', 'hold', 'ai_failed')
-                OR m.latest_confidence = 'low'
-                OR r.recommended_action IN ('manual_check', 'hold')
-                OR TRIM(COALESCE(r.risk_json, '')) NOT IN ('', '[]')
-            )
-            AND m.recruitment_status IN ('collected', 'screened')
-            """
-        ]
+        where = [MANUAL_REVIEW_ACTIVE_CONDITION]
         params: list[object] = []
         if role_id is not None:
             where.append("m.role_id = ?")
             params.append(role_id)
+        category_conditions = {
+            "all": "",
+            "priority": MANUAL_REVIEW_PRIORITY_CONDITION,
+            "pending": MANUAL_REVIEW_PENDING_CONDITION,
+            "needs_info": MANUAL_REVIEW_NEEDS_INFO_CONDITION,
+            "deferred": MANUAL_REVIEW_DEFERRED_CONDITION,
+        }
+        normalized_category = str(queue_category or "all").strip()
+        if normalized_category not in category_conditions:
+            raise ValueError(f"Unsupported manual review queue category: {queue_category}")
+        if category_conditions[normalized_category]:
+            where.append(category_conditions[normalized_category])
         where_sql = "WHERE " + " AND ".join(where)
         total_select = ", COUNT(*) OVER() AS _page_total" if include_total else ""
         params.extend([max(1, min(int(limit), 1000)), max(0, int(offset))])
@@ -2378,6 +3634,45 @@ class CandidateRepository:
                     t.retry_count,
                     t.max_retry_count,
                     t.updated_at AS task_updated_at,
+                    le.reason_code AS latest_review_reason_code,
+                    le.note AS latest_review_note,
+                    le.changed_at AS latest_review_at,
+                    (
+                        SELECT GROUP_CONCAT(history_line, CHAR(10))
+                        FROM (
+                            SELECT
+                                e.changed_at || '｜' || e.to_status || '｜' ||
+                                e.reason_code || '｜' || COALESCE(e.note, '') AS history_line
+                            FROM candidate_role_status_events e
+                            WHERE e.candidate_id = m.candidate_id
+                              AND e.role_id = m.role_id
+                              AND (
+                                  e.operator = 'review_workbench'
+                                  OR e.reason_code IN (
+                                      'manual_review_passed', 'manual_review_rejected',
+                                      'manual_review_needs_info', 'manual_review_deferred'
+                                  )
+                              )
+                            ORDER BY e.changed_at DESC, e.id DESC
+                            LIMIT 10
+                        )
+                    ) AS review_history_text,
+                    CASE
+                        WHEN {MANUAL_REVIEW_DEFERRED_CONDITION} THEN 'deferred'
+                        WHEN {MANUAL_REVIEW_NEEDS_INFO_CONDITION} THEN 'needs_info'
+                        WHEN {MANUAL_REVIEW_PRIORITY_CONDITION} THEN 'priority'
+                        ELSE 'pending'
+                    END AS review_bucket,
+                    CASE
+                        WHEN {MANUAL_REVIEW_DEFERRED_CONDITION} THEN '已暂缓'
+                        WHEN {MANUAL_REVIEW_NEEDS_INFO_CONDITION} THEN '待补充资料'
+                        WHEN m.latest_rating IN ('SSR', 'SR') THEN '高评级候选人'
+                        WHEN m.match_status = 'ai_failed' THEN 'AI 筛选失败'
+                        WHEN m.latest_confidence = 'low' THEN 'AI 判断不确定'
+                        WHEN TRIM(COALESCE(r.risk_json, '')) NOT IN ('', '[]') THEN '存在风险需确认'
+                        WHEN m.match_status IN ('manual_check', 'hold') THEN '规则要求人工确认'
+                        ELSE '普通待复核'
+                    END AS priority_reason,
                     CASE
                         WHEN m.match_status = 'manual_check' THEN '规则分流：人工确认'
                         WHEN m.match_status = 'hold' THEN '规则分流：暂缓'
@@ -2401,17 +3696,36 @@ class CandidateRepository:
                     WHERE t2.candidate_id = m.candidate_id
                       AND t2.role_id = m.role_id
                     ORDER BY t2.updated_at DESC, t2.id DESC
+                      LIMIT 1
+                  )
+                LEFT JOIN candidate_role_status_events le
+                  ON le.id = (
+                    SELECT e2.id
+                    FROM candidate_role_status_events e2
+                    WHERE e2.candidate_id = m.candidate_id
+                      AND e2.role_id = m.role_id
+                      AND (
+                          e2.operator = 'review_workbench'
+                          OR e2.reason_code IN (
+                              'manual_review_passed', 'manual_review_rejected',
+                              'manual_review_needs_info', 'manual_review_deferred'
+                          )
+                      )
+                    ORDER BY e2.changed_at DESC, e2.id DESC
                     LIMIT 1
                   )
                 {where_sql}
                 ORDER BY
                     CASE
-                        WHEN m.match_status = 'manual_check' THEN 1
-                        WHEN m.match_status = 'ai_failed' THEN 2
-                        WHEN m.latest_confidence = 'low' THEN 3
-                        WHEN TRIM(COALESCE(r.risk_json, '')) NOT IN ('', '[]') THEN 4
-                        WHEN m.match_status = 'hold' THEN 5
-                        ELSE 6
+                        WHEN {MANUAL_REVIEW_PRIORITY_CONDITION} THEN 1
+                        WHEN {MANUAL_REVIEW_PENDING_CONDITION} THEN 2
+                        WHEN {MANUAL_REVIEW_NEEDS_INFO_CONDITION} THEN 3
+                        WHEN {MANUAL_REVIEW_DEFERRED_CONDITION} THEN 4
+                        ELSE 5
+                    END,
+                    CASE m.latest_rating
+                        WHEN 'SSR' THEN 1 WHEN 'SR' THEN 2 WHEN 'R' THEN 3
+                        WHEN 'N' THEN 4 ELSE 5
                     END,
                     m.updated_at DESC
                 LIMIT ? OFFSET ?
@@ -2434,8 +3748,200 @@ class CandidateRepository:
             offset=offset,
             include_total=True,
         )
-        total = int(rows[0]["_page_total"]) if rows else 0
+        if rows:
+            total = int(rows[0]["_page_total"])
+        else:
+            first_row = self.list_manual_review_candidates(
+                **filters,
+                limit=1,
+                offset=0,
+                include_total=True,
+            )
+            total = int(first_row[0]["_page_total"]) if first_row else 0
+            last_page = max(1, (total + page_size - 1) // page_size)
+            if total and page > last_page:
+                page = last_page
+                rows = self.list_manual_review_candidates(
+                    **filters,
+                    limit=page_size,
+                    offset=(page - 1) * page_size,
+                    include_total=True,
+                )
+            elif not total:
+                page = 1
         return {"rows": rows, "total": total, "page": page, "page_size": page_size}
+
+    def get_manual_review_workbench_summary(
+        self,
+        *,
+        role_id: int | None = None,
+    ) -> dict[str, int]:
+        where = [MANUAL_REVIEW_ACTIVE_CONDITION]
+        params: list[object] = []
+        if role_id is not None:
+            where.append("m.role_id = ?")
+            params.append(role_id)
+        row = self.db.get_connection().execute(
+            f"""
+            SELECT
+                COUNT(*) AS pending_total,
+                SUM(CASE WHEN {MANUAL_REVIEW_PRIORITY_CONDITION} THEN 1 ELSE 0 END)
+                    AS high_priority,
+                SUM(CASE WHEN {MANUAL_REVIEW_NEEDS_INFO_CONDITION} THEN 1 ELSE 0 END)
+                    AS needs_info,
+                SUM(CASE WHEN {MANUAL_REVIEW_DEFERRED_CONDITION} THEN 1 ELSE 0 END)
+                    AS deferred,
+                SUM(CASE WHEN COALESCE(cp.profile_completeness, 0) < 60 THEN 1 ELSE 0 END)
+                    AS incomplete_profiles,
+                SUM(CASE WHEN m.match_status IN ('manual_check', 'ai_failed')
+                              OR m.latest_confidence = 'low'
+                         THEN 1 ELSE 0 END)
+                    AS ai_uncertain
+            FROM candidate_role_matches m
+            LEFT JOIN screening_results r ON r.id = m.screening_result_id
+            LEFT JOIN candidate_profiles cp ON cp.candidate_id = m.candidate_id
+            LEFT JOIN candidate_role_status_events le
+              ON le.id = (
+                SELECT e2.id
+                FROM candidate_role_status_events e2
+                WHERE e2.candidate_id = m.candidate_id
+                  AND e2.role_id = m.role_id
+                  AND (
+                      e2.operator = 'review_workbench'
+                      OR e2.reason_code IN (
+                          'manual_review_passed', 'manual_review_rejected',
+                          'manual_review_needs_info', 'manual_review_deferred'
+                      )
+                  )
+                ORDER BY e2.changed_at DESC, e2.id DESC
+                LIMIT 1
+              )
+            WHERE {' AND '.join(where)}
+            """,
+            params,
+        ).fetchone()
+        event_where = [
+            "(operator = 'review_workbench' OR reason_code IN ("
+            "'manual_review_passed', 'manual_review_rejected', "
+            "'manual_review_needs_info', 'manual_review_deferred'))",
+            "SUBSTR(changed_at, 1, 10) = DATE('now', 'localtime')",
+        ]
+        event_params: list[object] = []
+        if role_id is not None:
+            event_where.append("role_id = ?")
+            event_params.append(role_id)
+        reviewed_today = self.db.get_connection().execute(
+            f"""
+            SELECT COUNT(DISTINCT candidate_id || ':' || role_id) AS value
+            FROM candidate_role_status_events
+            WHERE {' AND '.join(event_where)}
+            """,
+            event_params,
+        ).fetchone()
+        return {
+            "pending_total": int(row["pending_total"] or 0),
+            "high_priority": int(row["high_priority"] or 0),
+            "needs_info": int(row["needs_info"] or 0),
+            "deferred": int(row["deferred"] or 0),
+            "incomplete_profiles": int(row["incomplete_profiles"] or 0),
+            "ai_uncertain": int(row["ai_uncertain"] or 0),
+            "reviewed_today": int(reviewed_today["value"] or 0),
+        }
+
+    def page_ai_human_comparisons(
+        self,
+        *,
+        role_id: int | None = None,
+        comparison_status: str = "all",
+        page: int = 1,
+        page_size: int = 100,
+    ) -> dict[str, object]:
+        normalized_status = str(comparison_status or "all").strip()
+        allowed_statuses = {"all", "agreement", "disagreement", "manual_resolved"}
+        if normalized_status not in allowed_statuses:
+            raise ValueError(f"Unsupported AI-human comparison status: {comparison_status}")
+        page, page_size, _offset = self._normalize_page(page, page_size)
+        where = ["(? IS NULL OR role_id = ?)"]
+        params: list[object] = [role_id, role_id]
+        if normalized_status != "all":
+            where.append("comparison_status = ?")
+            params.append(normalized_status)
+        where_sql = " AND ".join(where)
+        connection = self.db.get_connection()
+        count_row = connection.execute(
+            f"""
+            {AI_HUMAN_COMPARISON_CTE}
+            SELECT COUNT(*) AS value
+            FROM classified_comparisons
+            WHERE {where_sql}
+            """,
+            params,
+        ).fetchone()
+        total = int(count_row["value"] or 0)
+        last_page = max(1, (total + page_size - 1) // page_size)
+        page = min(page, last_page)
+        offset = (page - 1) * page_size
+        rows = list(
+            connection.execute(
+                f"""
+                {AI_HUMAN_COMPARISON_CTE}
+                SELECT *
+                FROM classified_comparisons
+                WHERE {where_sql}
+                ORDER BY
+                    CASE comparison_status
+                        WHEN 'disagreement' THEN 1
+                        WHEN 'manual_resolved' THEN 2
+                        ELSE 3
+                    END,
+                    human_reviewed_at DESC,
+                    candidate_id DESC
+                LIMIT ? OFFSET ?
+                """,
+                [*params, page_size, offset],
+            ).fetchall()
+        )
+        return {"rows": rows, "total": total, "page": page, "page_size": page_size}
+
+    def get_ai_human_comparison_summary(
+        self,
+        *,
+        role_id: int | None = None,
+    ) -> dict[str, int | float]:
+        row = self.db.get_connection().execute(
+            f"""
+            {AI_HUMAN_COMPARISON_CTE}
+            SELECT
+                COUNT(*) AS compared_total,
+                SUM(CASE WHEN comparison_status = 'agreement' THEN 1 ELSE 0 END)
+                    AS agreement_count,
+                SUM(CASE WHEN comparison_status = 'disagreement' THEN 1 ELSE 0 END)
+                    AS disagreement_count,
+                SUM(CASE WHEN comparison_status = 'manual_resolved' THEN 1 ELSE 0 END)
+                    AS manual_resolved_count,
+                SUM(CASE WHEN human_decision = 'manual_review_passed' THEN 1 ELSE 0 END)
+                    AS human_passed_count,
+                SUM(CASE WHEN human_decision = 'manual_review_rejected' THEN 1 ELSE 0 END)
+                    AS human_rejected_count
+            FROM classified_comparisons
+            WHERE (? IS NULL OR role_id = ?)
+            """,
+            (role_id, role_id),
+        ).fetchone()
+        agreement_count = int(row["agreement_count"] or 0)
+        disagreement_count = int(row["disagreement_count"] or 0)
+        decisive_total = agreement_count + disagreement_count
+        return {
+            "compared_total": int(row["compared_total"] or 0),
+            "agreement_count": agreement_count,
+            "disagreement_count": disagreement_count,
+            "manual_resolved_count": int(row["manual_resolved_count"] or 0),
+            "human_passed_count": int(row["human_passed_count"] or 0),
+            "human_rejected_count": int(row["human_rejected_count"] or 0),
+            "agreement_rate": round(agreement_count * 100 / decisive_total, 1)
+            if decisive_total
+            else 0.0,
+        }
 
     def get_manual_review_quality_summary(
         self,
@@ -2999,15 +4505,16 @@ class CandidateRepository:
         cursor = connection.execute(
             """
             INSERT INTO candidates(
-                candidate_key, raw_text_hash, platform_uid, job_title, source_url, capture_time, name,
+                candidate_key, raw_text_hash, platform_uid, source_platform, job_title, source_url, capture_time, name,
                 active_status, expected_salary, work_experience_text, education_text, tags_text,
                 summary_text, raw_card_text, detail_url, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 candidate.candidate_key,
                 candidate.raw_text_hash,
                 candidate.platform_uid,
+                candidate.source_platform,
                 candidate.job_title,
                 candidate.source_url,
                 candidate.capture_time,
@@ -3030,7 +4537,7 @@ class CandidateRepository:
         connection.execute(
             """
             UPDATE candidates
-            SET raw_text_hash = ?, platform_uid = ?, job_title = ?, source_url = ?, capture_time = ?,
+            SET raw_text_hash = ?, platform_uid = ?, source_platform = ?, job_title = ?, source_url = ?, capture_time = ?,
                 name = ?, active_status = ?, expected_salary = ?, work_experience_text = ?, education_text = ?,
                 tags_text = ?, summary_text = ?, raw_card_text = ?, detail_url = ?, updated_at = ?
             WHERE id = ?
@@ -3038,6 +4545,7 @@ class CandidateRepository:
             (
                 candidate.raw_text_hash,
                 candidate.platform_uid,
+                candidate.source_platform,
                 candidate.job_title,
                 candidate.source_url,
                 candidate.capture_time,
@@ -3064,6 +4572,7 @@ class CandidateRepository:
             candidate_key=candidate.candidate_key,
             raw_text_hash=prefer(candidate.raw_text_hash, existing["raw_text_hash"]),
             platform_uid=prefer(candidate.platform_uid, existing["platform_uid"]),
+            source_platform=prefer(candidate.source_platform, existing["source_platform"]),
             job_title=prefer(candidate.job_title, existing["job_title"]),
             source_url=prefer(candidate.source_url, existing["source_url"]),
             capture_time=prefer(candidate.capture_time, existing["capture_time"]),

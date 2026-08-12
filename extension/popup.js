@@ -1,7 +1,11 @@
 const DEFAULTS = {
   jobTitle: "Boss 推荐牛人",
+  jobProfileId: null,
+  recruitmentTaskId: null,
   apiBase: "http://127.0.0.1:17863",
   apiToken: "",
+  connectionMode: "",
+  connectionModeConfirmed: true,
   scrollMode: "hold_end",
   scrollStep: 900,
   scrollWaitMs: 30,
@@ -13,6 +17,8 @@ const DEFAULTS = {
   batchActionDelaySeconds: 5,
   maxBatchSessions: 50,
   chatAutomationEnabled: false,
+  lastCompletedBatchId: null,
+  lastCompletedBatchConnection: null,
 };
 
 const OLD_DEFAULT_SCROLL_WAIT_MS = 1500;
@@ -58,13 +64,27 @@ const fields = {
 const statusEl = document.getElementById("status");
 const batchStatusEl = document.getElementById("batchStatus");
 const batchLogEl = document.getElementById("batchLog");
+const webIntakeStatusEl = document.getElementById("webIntakeStatus");
 const automationAutoButton = document.getElementById("automationAuto");
 const pairingCodeInput = document.getElementById("pairingCode");
 const applyPairingCodeButton = document.getElementById("applyPairingCode");
+const downloadCurrentBatchButton = document.getElementById("downloadCurrentBatch");
+const retryWebIntakeButton = document.getElementById("retryWebIntake");
+const openWebWorkbenchButton = document.getElementById("openWebWorkbench");
 let batchStatusTimer = null;
+let activeJobProfileId = null;
+let activeRecruitmentTaskId = null;
+let activeConnectionMode = "";
+let activeConnectionModeConfirmed = true;
+let lastCompletedBatchId = null;
+let lastCompletedBatchConnection = null;
+let lastCompletedWebBatch = null;
 
 automationAutoButton.addEventListener("click", () => runAutomation());
 applyPairingCodeButton.addEventListener("click", () => applyPairingCodeAndTest());
+downloadCurrentBatchButton.addEventListener("click", () => downloadCurrentBatch());
+retryWebIntakeButton.addEventListener("click", () => retryWebIntake());
+openWebWorkbenchButton.addEventListener("click", () => openWebWorkbench());
 document.getElementById("scrollWaitDown").addEventListener("click", () => adjustScrollWait(-30));
 document.getElementById("scrollWaitUp").addEventListener("click", () => adjustScrollWait(30));
 document.getElementById("collectCurrent").addEventListener("click", () => runCollection(false));
@@ -76,6 +96,12 @@ document.getElementById("requestAndDownload").addEventListener("click", () => ru
 document.getElementById("startBatchRequest").addEventListener("click", () => startBatch("request_resume"));
 document.getElementById("startBatchDownload").addEventListener("click", () => startBatch("download_only"));
 document.getElementById("stopBatch").addEventListener("click", () => stopBatch());
+fields.apiBase.addEventListener("input", () => {
+  return switchToDesktopCompatibilityMode();
+});
+fields.apiToken.addEventListener("input", () => {
+  return switchToDesktopCompatibilityMode();
+});
 
 window.addEventListener("beforeunload", () => {
   if (batchStatusTimer) {
@@ -83,14 +109,46 @@ window.addEventListener("beforeunload", () => {
   }
 });
 
-void init();
+if (!globalThis.__bossLocalPopupTestMode) {
+  void init();
+}
+
+async function clearDesktopBatchDownloadState() {
+  lastCompletedBatchId = null;
+  lastCompletedBatchConnection = null;
+  await chrome.storage.local.set({
+    lastCompletedBatchId: null,
+    lastCompletedBatchConnection: null,
+  });
+}
+
+async function switchToDesktopCompatibilityMode() {
+  activeConnectionMode = "desktop";
+  activeConnectionModeConfirmed = true;
+  lastCompletedWebBatch = null;
+  await clearDesktopBatchDownloadState();
+  await chrome.storage.local.set({
+    connectionMode: "desktop",
+    connectionModeConfirmed: true,
+  });
+  syncConnectionControls();
+  syncModeHints();
+  updateBatchDownloadButton();
+}
 
 async function init() {
-  const stored = await chrome.storage.local.get({
+  let stored = await chrome.storage.local.get({
     ...DEFAULTS,
     scrollWaitDefaultVersion: null,
     scrollModeDefaultVersion: null,
   });
+  const migratedConnection = await BossLocalWebIntake.ensureStoredConnectionMode(chrome.storage.local);
+  stored = {
+    ...stored,
+    apiBase: migratedConnection.apiBase,
+    connectionMode: migratedConnection.connectionMode,
+    connectionModeConfirmed: migratedConnection.connectionModeConfirmed,
+  };
   if (stored.scrollWaitDefaultVersion === null && Number(stored.scrollWaitMs) === OLD_DEFAULT_SCROLL_WAIT_MS) {
     stored.scrollWaitMs = DEFAULTS.scrollWaitMs;
     await chrome.storage.local.set({
@@ -118,6 +176,19 @@ async function init() {
       }
     }
   }
+  activeJobProfileId = stored.jobProfileId === null ? null : Number(stored.jobProfileId);
+  activeRecruitmentTaskId = stored.recruitmentTaskId === null ? null : Number(stored.recruitmentTaskId);
+  activeConnectionMode = BossLocalWebIntake.normalizeConnectionMode(stored.connectionMode);
+  activeConnectionModeConfirmed = stored.connectionModeConfirmed !== false;
+  syncConnectionControls();
+  syncModeHints();
+  lastCompletedBatchId = stored.lastCompletedBatchId === null ? null : Number(stored.lastCompletedBatchId);
+  lastCompletedBatchConnection = stored.lastCompletedBatchConnection || null;
+  if (!BossLocalBatchExport.batchBelongsToConnection(lastCompletedBatchConnection, collectSettings())) {
+    await clearDesktopBatchDownloadState();
+  }
+  await refreshWebIntakeStatus(collectSettings(), { updateDownloadButton: false });
+  updateBatchDownloadButton();
   await refreshBatchStatus();
   batchStatusTimer = window.setInterval(() => {
     void refreshBatchStatus();
@@ -130,12 +201,23 @@ async function runAutomation() {
     return;
   }
   const settings = collectSettings();
+  if (isWebWorkbenchMode(settings)) {
+    setStatus("AUTO 采集仍依赖桌面端自动化流程。请切回桌面模式接口地址后再使用。");
+    return;
+  }
   automationAutoButton.disabled = true;
   setStatus("正在读取桌面端自动化方案...");
   try {
     const automation = await startDesktopAutomation(settings, tab.url);
     fields.jobTitle.value = automation.job_title || automation.profile_job_title || settings.jobTitle;
-    await chrome.storage.local.set({ ...collectSettings(), jobTitle: fields.jobTitle.value });
+    activeJobProfileId = automation.profile_id === null ? null : Number(automation.profile_id);
+    activeRecruitmentTaskId = automation.task_id === null ? null : Number(automation.task_id);
+    await chrome.storage.local.set({
+      ...collectSettings(),
+      jobTitle: fields.jobTitle.value,
+      jobProfileId: activeJobProfileId,
+      recruitmentTaskId: activeRecruitmentTaskId,
+    });
     setStatus(
       [
         "自动化方案已确认，准备滚动采集...",
@@ -176,23 +258,63 @@ async function startDesktopAutomation(settings, sourceUrl) {
 
 async function applyPairingCodeAndTest() {
   applyPairingCodeButton.disabled = true;
-  setStatus("正在验证桌面端连接...");
+  setStatus("正在验证本机工作台连接...");
   try {
     const pairing = BossLocalPairing.parsePairingCode(pairingCodeInput.value);
-    const verifiedSettings = {
-      ...collectSettings(),
-      apiBase: normalizeLocalApiBase(pairing.apiBase),
-      apiToken: pairing.apiToken,
-    };
+    let verifiedSettings;
+    if (pairing.pairingCode) {
+      const pairingApiBase = normalizeLocalApiBase(pairing.apiBase || "http://127.0.0.1:17864");
+      let response;
+      try {
+        response = await fetch(`${pairingApiBase}/api/plugin/pair`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pairing_code: pairing.pairingCode }),
+        });
+      } catch (_error) {
+        throw new Error("网页工作台尚未启动，请先运行‘启动网页工作台’。");
+      }
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload?.error?.message || "连接码验证失败，请重新生成。");
+      }
+      verifiedSettings = {
+        ...collectSettings(),
+        apiBase: pairingApiBase,
+        apiToken: String(payload.api_token || ""),
+        connectionMode: BossLocalWebIntake.normalizeConnectionMode(pairing.connectionMode) || "web",
+        connectionModeConfirmed: true,
+      };
+    } else {
+      verifiedSettings = {
+        ...collectSettings(),
+        apiBase: normalizeLocalApiBase(pairing.apiBase),
+        apiToken: pairing.apiToken,
+        connectionMode: BossLocalWebIntake.normalizeConnectionMode(pairing.connectionMode) || "desktop",
+        connectionModeConfirmed: true,
+      };
+    }
     await testLocalApiConnection(verifiedSettings);
     fields.apiBase.value = verifiedSettings.apiBase;
     fields.apiToken.value = verifiedSettings.apiToken;
+    activeConnectionMode = BossLocalWebIntake.normalizeConnectionMode(verifiedSettings.connectionMode);
+    activeConnectionModeConfirmed = verifiedSettings.connectionModeConfirmed !== false;
+    if (!BossLocalBatchExport.batchBelongsToConnection(lastCompletedBatchConnection, verifiedSettings)) {
+      await clearDesktopBatchDownloadState();
+    }
     await chrome.storage.local.set({
       apiBase: fields.apiBase.value,
       apiToken: fields.apiToken.value,
+      connectionMode: activeConnectionMode,
+      connectionModeConfirmed: activeConnectionModeConfirmed,
+      lastCompletedBatchId,
+      lastCompletedBatchConnection,
     });
+    syncConnectionControls(verifiedSettings);
+    updateBatchDownloadButton();
     pairingCodeInput.value = "";
-    setStatus(`桌面端已连接。\n接口地址：${fields.apiBase.value}\nToken 验证：通过`);
+    const target = isWebWorkbenchMode(verifiedSettings) ? "网页工作台" : "桌面兼容模式";
+    setStatus(`已连接${target}。\n服务地址：${fields.apiBase.value}\n连接已记住`);
   } catch (error) {
     setStatus(`连接失败。\n${error.message || String(error)}`);
   } finally {
@@ -202,9 +324,10 @@ async function applyPairingCodeAndTest() {
 
 async function testLocalApiConnection(settings) {
   const apiBase = normalizeLocalApiBase(settings.apiBase);
+  const endpoint = isWebWorkbenchMode(settings) ? "/api/plugin/connection/check" : "/api/connection/check";
   let response;
   try {
-    response = await fetch(`${apiBase}/api/connection/check`, {
+    response = await fetch(`${apiBase}${endpoint}`, {
       method: "GET",
       headers: localApiHeaders(settings),
     });
@@ -218,7 +341,7 @@ async function testLocalApiConnection(settings) {
     result = {};
   }
   if (response.status === 401) {
-    throw new Error("Token 不正确，请从桌面端设置页重新复制连接码。");
+    throw new Error("连接凭证已失效，请重新配对。");
   }
   if (!response.ok || !result.ok) {
     throw new Error(result.error || `桌面端返回状态码 ${response.status}`);
@@ -234,8 +357,135 @@ async function adjustScrollWait(deltaMs) {
   setStatus(`滚动等待毫秒已设置为 ${next}ms。`);
 }
 
+function isWebWorkbenchMode(settings) {
+  return BossLocalWebIntake.isWebWorkbenchMode(settings);
+}
+
+function buildCollectionRunId() {
+  return BossLocalWebIntake.createClientBatchId();
+}
+
+function createWebIntakeError(response, fallbackMessage) {
+  const error = new Error(response?.error || fallbackMessage);
+  error.code = String(response?.code || "");
+  return error;
+}
+
+function formatWebIntakeError(error) {
+  switch (String(error?.code || "")) {
+    case "storage_quota_exceeded":
+      return "网页入库缓存空间已满，请先清理或完成旧批次后再试。";
+    case "pending_limit_exceeded":
+      return "待发送批次已达到上限，请先完成发送或清理旧批次后再继续。";
+    case "network_error":
+      return "无法连接网页工作台，请确认本地网页工作台已启动。";
+    default:
+      return error?.message || String(error);
+  }
+}
+
+function syncModeHints(settings = collectSettings()) {
+  const webMode = isWebWorkbenchMode(settings);
+  automationAutoButton.textContent = webMode ? "AUTO：桌面兼容模式专用" : "AUTO：滚动采集 + AI 初筛";
+  automationAutoButton.title = webMode
+    ? "Web 工作台模式下不使用桌面 AUTO 流程。"
+    : "桌面兼容模式下可直接触发桌面 AUTO 流程。";
+}
+
+function syncConnectionControls(settings = collectSettings()) {
+  applyPairingCodeButton.textContent = isWebWorkbenchMode(settings) && Boolean(settings.apiToken)
+    ? "重新配对"
+    : "连接并记住";
+}
+
+async function refreshWebIntakeStatus(settingsOverride = null, options = {}) {
+  const { updateDownloadButton: shouldUpdateDownloadButton = true } = options;
+  const settings = settingsOverride ? { ...DEFAULTS, ...settingsOverride } : collectSettings();
+  syncModeHints(settings);
+  const response = await chrome.runtime.sendMessage({
+    type: "web_intake_get_status",
+    settings,
+  });
+  if (!response?.ok || !response.view) {
+    webIntakeStatusEl.textContent = `当前模式：${BossLocalWebIntake.modeLabel(settings)}\n网页入库状态读取失败。`;
+    retryWebIntakeButton.disabled = true;
+    return;
+  }
+  const view = response.view;
+  webIntakeStatusEl.textContent = `${view.title}\n${view.message}`;
+  retryWebIntakeButton.disabled = !view.canRetry;
+  const record = response.record || null;
+  if (["completed", "partial", "reused"].includes(String(record?.status || "")) && Number(record?.webResult?.batch_id) > 0) {
+    lastCompletedWebBatch = record;
+  }
+  if (shouldUpdateDownloadButton) {
+    updateBatchDownloadButton();
+  }
+}
+
+async function queueAndSendWebBatch(settings, sourceUrl, merged, runId) {
+  const response = await chrome.runtime.sendMessage({
+    type: "web_intake_enqueue_and_send",
+    settings,
+    sourceUrl,
+    merged,
+    idempotencyKey: runId,
+  });
+  if (!response?.ok) {
+    throw createWebIntakeError(response, "网页工作台发送失败。");
+  }
+  await refreshWebIntakeStatus(settings);
+  return response.record || null;
+}
+
+async function retryWebIntake() {
+  retryWebIntakeButton.disabled = true;
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: "web_intake_retry",
+      settings: collectSettings(),
+    });
+    if (!response?.ok) {
+      throw createWebIntakeError(response, "网页入库重试失败。");
+    }
+    const result = response.record || null;
+    if (result?.message) {
+      setStatus(`网页入库状态已更新。\n${result.message}`);
+    }
+  } catch (error) {
+    setStatus(`重试网页入库失败。\n${error.message || String(error)}`);
+  } finally {
+    await refreshWebIntakeStatus();
+  }
+}
+
+async function openWebWorkbench() {
+  const settings = collectSettings();
+  const url = `${BossLocalWebIntake.deriveWebApiBase(settings)}/`;
+  if (!isWebWorkbenchMode(settings)) {
+    setStatus("当前是旧桌面兼容模式。将打开默认网页工作台 17864 入口；如果网页工作台使用自定义端口，请使用网页连接码重新配对。");
+  }
+  try {
+    const response = await fetch(`${url}api/health`);
+    if (!response.ok) throw new Error("health failed");
+  } catch (_error) {
+    setStatus("网页工作台尚未启动，请先运行‘启动网页工作台’。");
+    return;
+  }
+  await chrome.tabs.create({ url });
+}
+
 async function runCollection(autoScroll, options = {}) {
-  const baseSettings = collectSettings();
+  let baseSettings = collectSettings();
+  const webMode = isWebWorkbenchMode(baseSettings);
+  if (!options.automationRequested && !webMode) {
+    try {
+      baseSettings = await loadDesktopJobProfile(baseSettings);
+    } catch (error) {
+      setStatus(`无法读取当前岗位档案。\n${error.message || String(error)}`);
+      return;
+    }
+  }
   await chrome.storage.local.set(baseSettings);
 
   const tab = await getActiveSupportedTab();
@@ -245,6 +495,13 @@ async function runCollection(autoScroll, options = {}) {
 
   const platform = detectCollectPlatform(tab.url);
   const settings = applyPlatformDefaults(baseSettings, platform);
+  const webSettings = webMode
+    ? {
+        ...settings,
+        jobProfileId: null,
+        recruitmentTaskId: null,
+      }
+    : settings;
   await resetScrollPause(tab.id);
   setStatus(
     autoScroll
@@ -274,13 +531,43 @@ async function runCollection(autoScroll, options = {}) {
     return;
   }
 
+  const runId = buildCollectionRunId();
   try {
-    const imported = await importCards(
-      settings,
-      tab.url,
-      merged,
-      Boolean(options.automationRequested),
-    );
+    if (webMode) {
+      await clearDesktopBatchDownloadState();
+      updateBatchDownloadButton();
+      const webResult = await queueAndSendWebBatch(webSettings, tab.url, merged, runId);
+      const resultStats = webResult?.webResult || {};
+      const firstLine = ["completed", "partial", "reused"].includes(String(webResult?.status || ""))
+        ? "采集完成，已发送到网页工作台。"
+        : "采集完成，但网页入库未完成。";
+      setStatus(
+        [
+          firstLine,
+          `本地去重卡片: ${merged.cards.length}`,
+          `来源平台: ${platform.label}`,
+          `命中 frame: ${merged.framesWithCards}/${merged.framesSeen}`,
+          `网页批次: ${resultStats.batch_id ?? "-"}`,
+          `接收数: ${resultStats.received_count ?? 0}`,
+          `新增数: ${resultStats.inserted_candidates ?? 0}`,
+          `更新数: ${resultStats.updated_candidates ?? 0}`,
+          `跳过数: ${resultStats.skipped_candidates ?? 0}`,
+          `失败数: ${resultStats.failed_candidates ?? 0}`,
+          webResult?.message || "",
+        ].filter(Boolean).join("\n"),
+      );
+      return;
+    }
+
+    const imported = await importCards(settings, tab.url, merged, Boolean(options.automationRequested));
+    lastCompletedBatchId = Number(imported.batch_id) || null;
+    lastCompletedBatchConnection = {
+      connectionMode: settings.connectionMode,
+      apiBase: settings.apiBase,
+      apiToken: settings.apiToken,
+    };
+    await chrome.storage.local.set({ lastCompletedBatchId, lastCompletedBatchConnection });
+    updateBatchDownloadButton();
     setStatus(
       [
         options.automationRequested ? "AUTO 采集完成，已提交 AI 初筛。" : "采集完成。",
@@ -293,8 +580,110 @@ async function runCollection(autoScroll, options = {}) {
       ].join("\n"),
     );
   } catch (error) {
-    setStatus(`导入本地程序失败。\n${error.message || String(error)}`);
+    setStatus(`${webMode ? "发送到网页工作台失败" : "导入本地程序失败"}。\n${formatWebIntakeError(error)}`);
   }
+}
+
+function updateBatchDownloadButton() {
+  const settings = collectSettings();
+  if (isWebWorkbenchMode(settings)) {
+    const webBatchId = Number(lastCompletedWebBatch?.webResult?.batch_id || 0);
+    downloadCurrentBatchButton.disabled = !webBatchId;
+    downloadCurrentBatchButton.textContent = webBatchId
+      ? `导出本批次 #${webBatchId} Markdown`
+      : "导出本批次 Markdown";
+    return;
+  }
+  downloadCurrentBatchButton.disabled = !Number.isInteger(lastCompletedBatchId) || lastCompletedBatchId <= 0;
+  downloadCurrentBatchButton.textContent = lastCompletedBatchId
+    ? `下载当前批次 #${lastCompletedBatchId} CSV 到 Downloads`
+    : "下载当前批次 CSV 到 Downloads";
+}
+
+async function downloadCurrentBatch() {
+  const settings = collectSettings();
+  if (isWebWorkbenchMode(settings)) {
+    const batchId = Number(lastCompletedWebBatch?.webResult?.batch_id || 0);
+    if (!batchId || !(await BossLocalWebIntake.sameConnection(lastCompletedWebBatch?.connection, settings))) {
+      lastCompletedWebBatch = null;
+      updateBatchDownloadButton();
+      setStatus("当前连接没有可导出的 Web 批次，请先完成一次采集。");
+      return;
+    }
+    downloadCurrentBatchButton.disabled = true;
+    try {
+      const result = await BossLocalBatchExport.downloadBatchMarkdown({
+        apiBase: settings.apiBase,
+        apiToken: settings.apiToken,
+        batchId,
+      });
+      setStatus(`批次 #${result.batchId} Markdown 已保存到 Downloads。\n文件：${result.filename}`);
+    } catch (error) {
+      setStatus(`导出 Markdown 失败。\n${error.message || String(error)}`);
+    } finally {
+      updateBatchDownloadButton();
+    }
+    return;
+  }
+  if (!lastCompletedBatchId) {
+    setStatus("当前没有可下载的采集批次，请先完成一次采集。");
+    return;
+  }
+  if (!BossLocalBatchExport.batchBelongsToConnection(lastCompletedBatchConnection, settings)) {
+    lastCompletedBatchId = null;
+    lastCompletedBatchConnection = null;
+    await chrome.storage.local.set({ lastCompletedBatchId: null, lastCompletedBatchConnection: null });
+    updateBatchDownloadButton();
+    setStatus("本地接口连接已变化，旧批次已清除。请先在当前桌面端完成一次采集。");
+    return;
+  }
+  downloadCurrentBatchButton.disabled = true;
+  setStatus(`正在导出批次 #${lastCompletedBatchId} 到 Downloads...`);
+  try {
+    const result = await BossLocalBatchExport.downloadBatchCsv({
+      apiBase: settings.apiBase,
+      apiToken: settings.apiToken,
+      batchId: lastCompletedBatchId,
+    });
+    setStatus(`批次 #${result.batchId} 已提交下载。\n文件：${result.filename}\n位置：Chrome 默认 Downloads 目录`);
+  } catch (error) {
+    setStatus(`下载当前批次失败。\n${error.message || String(error)}`);
+  } finally {
+    updateBatchDownloadButton();
+  }
+}
+
+async function loadDesktopJobProfile(settings) {
+  const apiBase = normalizeLocalApiBase(settings.apiBase);
+  let response;
+  try {
+    response = await fetch(`${apiBase}/api/extension/config`, {
+      headers: localApiHeaders(settings),
+    });
+  } catch (error) {
+    throw new Error(formatLocalApiFetchError(apiBase, error));
+  }
+  const payload = await response.json();
+  if (!response.ok || !payload?.ok) {
+    throw new Error(payload?.error || `桌面端返回状态码 ${response.status}`);
+  }
+  const profileId = payload.result?.job_profile_id;
+  if (profileId === null || profileId === undefined) {
+    throw new Error("请先在桌面端仪表盘选择招聘中的岗位档案。")
+  }
+  activeJobProfileId = Number(profileId);
+  activeRecruitmentTaskId = payload.result?.recruitment_task_id === null || payload.result?.recruitment_task_id === undefined
+    ? null
+    : Number(payload.result.recruitment_task_id);
+  fields.jobTitle.value = String(payload.result?.job_title || settings.jobTitle);
+  const synced = {
+    ...settings,
+    jobProfileId: activeJobProfileId,
+    recruitmentTaskId: activeRecruitmentTaskId,
+    jobTitle: fields.jobTitle.value,
+  };
+  await chrome.storage.local.set(synced);
+  return synced;
 }
 
 async function requestScrollPause() {
@@ -567,6 +956,8 @@ async function importCards(settings, sourceUrl, merged, automationRequested = fa
         "X-Boss-Local-Token": settings.apiToken || "",
       },
       body: JSON.stringify({
+        job_profile_id: settings.jobProfileId,
+        recruitment_task_id: settings.recruitmentTaskId,
         job_title: settings.jobTitle,
         source_url: sourceUrl,
         cards: merged.cards,
@@ -652,9 +1043,13 @@ function collectSettings() {
   const apiBase = normalizeLocalApiBase(fields.apiBase.value.trim() || DEFAULTS.apiBase);
   fields.apiBase.value = apiBase;
   return {
+    jobProfileId: activeJobProfileId,
+    recruitmentTaskId: activeRecruitmentTaskId,
     jobTitle: fields.jobTitle.value.trim() || DEFAULTS.jobTitle,
     apiBase,
     apiToken: fields.apiToken.value.trim(),
+    connectionMode: activeConnectionMode,
+    connectionModeConfirmed: activeConnectionModeConfirmed,
     scrollMode: fields.scrollMode.value,
     scrollStep: Number(fields.scrollStep.value || DEFAULTS.scrollStep),
     scrollWaitMs: Math.max(Number(fields.scrollWaitMs.value || DEFAULTS.scrollWaitMs), 0),
@@ -857,3 +1252,17 @@ function formatLocalApiFetchError(apiBase, error) {
 function setStatus(text) {
   statusEl.textContent = text;
 }
+
+globalThis.BossLocalPopup = {
+  init,
+  runCollection,
+  runAutomation,
+  applyPairingCodeAndTest,
+  retryWebIntake,
+  openWebWorkbench,
+  downloadCurrentBatch,
+  refreshWebIntakeStatus,
+  queueAndSendWebBatch,
+  collectSettings,
+  isWebWorkbenchMode,
+};

@@ -4,11 +4,16 @@ __pycache__/
 .pytest_cache/
 build/
 dist/
+!web/frontend/dist/
+!web/frontend/dist/**
+web/frontend/node_modules/
 logs/*.log
 data/*.db
 data/*.db.bak-*
 data/config.json
 data/browser_profile/
 data/exports/
+data/product_feedback.json
+data/product_feedback.json.tmp
 *.crx
 *.pem

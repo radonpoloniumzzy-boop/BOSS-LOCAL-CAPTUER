@@ -144,7 +144,16 @@ class CaptureService:
         config: AppConfig,
         progress_callback: Callable[[CaptureProgress], None] | None = None,
     ) -> CaptureRunResult:
-        self.reset_stop()
+        if self._stop_requested:
+            return CaptureRunResult(
+                batch_id=None,
+                status="stopped",
+                total_unique=0,
+                total_inserted_candidates=0,
+                total_batch_items=0,
+                rounds_completed=0,
+                message="采集任务在启动前已停止。",
+            )
         page = browser_service.ensure_page(config, options.source_url)
         intervention = browser_service.detect_manual_intervention(page)
         if intervention:
@@ -160,7 +169,23 @@ class CaptureService:
 
         collector = BossCardCollector(selector_config=selector_config, logger=self.logger)
         collector.wait_for_page_ready(page)
-        batch = self.repository.create_batch(options.job_title, options.source_url, options.note)
+        if self._stop_requested:
+            return CaptureRunResult(
+                batch_id=None,
+                status="stopped",
+                total_unique=0,
+                total_inserted_candidates=0,
+                total_batch_items=0,
+                rounds_completed=0,
+                message="采集任务在创建批次前已停止。",
+            )
+        batch = self.repository.create_batch(
+            options.job_title,
+            options.source_url,
+            options.note,
+            role_id=options.role_id,
+            task_id=options.task_id,
+        )
         seen_keys: set[str] = set()
         total_inserted_candidates = 0
         total_batch_items = 0
@@ -249,7 +274,7 @@ class CaptureService:
                 batch_id=batch.id,
                 status=status,
                 total_collected=len(seen_keys),
-                total_new=total_batch_items,
+                total_new=total_inserted_candidates,
                 note=message or options.note,
             )
 

@@ -2,14 +2,19 @@ from __future__ import annotations
 
 import http.client
 import json
+import socket
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
 from automation.importer import CardImportService
 from automation.parser import CandidateParser
 from core.local_api import LocalApiServer
+from core.extension_commands import ExtensionCommandBroker
+from core.models import DEFAULT_CSV_COLUMNS, JobProfile
 from storage.db import DatabaseManager
+from storage.export_service import ExportService
 from storage.repository import CandidateRepository
 
 
@@ -22,8 +27,24 @@ class LocalApiServerTest(unittest.TestCase):
         self.db.initialize()
         self.repository = CandidateRepository(self.db)
         self.service = CardImportService(self.repository, CandidateParser())
-        self.server = LocalApiServer("127.0.0.1", 0, self.service, auth_token=self.token)
+        self.export_service = ExportService(self.repository)
+        self.server = LocalApiServer(
+            "127.0.0.1",
+            0,
+            self.service,
+            auth_token=self.token,
+            download_batch_csv=self._download_batch_csv,
+        )
         self.server.start()
+
+    def _download_batch_csv(self, batch_id: int) -> tuple[str, bytes]:
+        try:
+            return self.export_service.build_batch_csv_download(
+                batch_id,
+                columns=list(DEFAULT_CSV_COLUMNS),
+            )
+        finally:
+            self.db.close_thread_connection()
 
     def tearDown(self) -> None:
         self.server.stop()
@@ -87,9 +108,84 @@ class LocalApiServerTest(unittest.TestCase):
         self.assertEqual(response.status, 200)
         self.assertEqual(payload["result"]["job_title"], "证券交易员")
 
+    def test_extension_claims_and_completes_frontend_command(self) -> None:
+        broker = ExtensionCommandBroker()
+        self.server.extension_command_broker = broker
+        command = broker.enqueue(
+            "collect_current",
+            recruitment_task_id=19,
+            platform="boss",
+            source_url="https://www.zhipin.com/web/geek/recommend",
+        )
+
+        claim = http.client.HTTPConnection("127.0.0.1", self.server.port, timeout=5)
+        claim.request(
+            "GET",
+            "/api/extension/commands/next",
+            headers={"X-Boss-Local-Token": self.token},
+        )
+        claim_response = claim.getresponse()
+        claim_payload = json.loads(claim_response.read().decode("utf-8"))
+        self.assertEqual(claim_payload["result"]["action"], "collect_current")
+        self.assertEqual(claim_payload["result"]["recruitment_task_id"], 19)
+
+        heartbeat = http.client.HTTPConnection("127.0.0.1", self.server.port, timeout=5)
+        heartbeat.request(
+            "POST",
+            f"/api/extension/commands/{command['id']}/heartbeat",
+            body=json.dumps(
+                {"claim_token": claim_payload["result"]["claim_token"]}
+            ).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "X-Boss-Local-Token": self.token,
+            },
+        )
+        heartbeat_response = heartbeat.getresponse()
+        heartbeat_response.read()
+        self.assertEqual(heartbeat_response.status, 200)
+
+        complete = http.client.HTTPConnection("127.0.0.1", self.server.port, timeout=5)
+        complete.request(
+            "POST",
+            f"/api/extension/commands/{command['id']}/complete",
+            body=json.dumps(
+                {
+                    "ok": True,
+                    "message": "采集完成",
+                    "claim_token": claim_payload["result"]["claim_token"],
+                }
+            ).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "X-Boss-Local-Token": self.token,
+            },
+        )
+        complete_response = complete.getresponse()
+        complete_payload = json.loads(complete_response.read().decode("utf-8"))
+        self.assertEqual(complete_response.status, 200)
+        self.assertEqual(complete_payload["result"]["status"], "completed")
+
+    def test_extension_command_endpoint_requires_token(self) -> None:
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.port, timeout=5)
+        connection.request("GET", "/api/extension/commands/next")
+        response = connection.getresponse()
+        payload = json.loads(response.read().decode("utf-8"))
+        self.assertEqual(response.status, 401)
+        self.assertFalse(payload["ok"])
+
     def test_import_endpoint(self) -> None:
+        profile = self.repository.save_job_profile(
+            JobProfile(
+                job_title="Recruiting Intern",
+                jd_text="Recruiting support",
+                prompt_text="Screen recruiting experience",
+                status="active",
+            )
+        )
         body = json.dumps(
             {
+                "job_profile_id": profile.id,
                 "job_title": "Recruiting Intern",
                 "source_url": "https://www.zhipin.com/web/geek/recommend",
                 "cards": [
@@ -118,6 +214,116 @@ class LocalApiServerTest(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual(len(self.repository.list_candidates()), 1)
 
+    def test_batch_csv_download_returns_the_exact_requested_batch(self) -> None:
+        profile = self.repository.save_job_profile(
+            JobProfile(
+                job_title="招聘顾问",
+                jd_text="招聘顾问岗位",
+                prompt_text="筛选招聘经验",
+                status="active",
+            )
+        )
+        first = self.service.import_cards(
+            {
+                "job_profile_id": profile.id,
+                "job_title": "招聘顾问",
+                "source_url": "https://www.zhipin.com/web/geek/recommend",
+                "cards": [{"raw_card_text": "Alice first batch", "name": "Alice"}],
+            }
+        )
+        self.service.import_cards(
+            {
+                "job_profile_id": profile.id,
+                "job_title": "招聘顾问",
+                "source_url": "https://www.zhipin.com/web/geek/recommend",
+                "cards": [{"raw_card_text": "Bob later batch", "name": "Bob"}],
+            }
+        )
+
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.port, timeout=5)
+        connection.request(
+            "GET",
+            f"/api/export/batches/{first['batch_id']}.csv",
+            headers={"X-Boss-Local-Token": self.token},
+        )
+        response = connection.getresponse()
+        content = response.read().decode("utf-8-sig")
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.getheader("Content-Type"), "text/csv; charset=utf-8")
+        self.assertIn(f"batch{first['batch_id']}", response.getheader("Content-Disposition") or "")
+        self.assertIn("Alice", content)
+        self.assertNotIn("Bob", content)
+
+    def test_batch_csv_download_preserves_the_historical_card_snapshot(self) -> None:
+        profile = self.repository.save_job_profile(
+            JobProfile(
+                job_title="招聘顾问",
+                jd_text="招聘顾问岗位",
+                prompt_text="筛选招聘经验",
+                status="active",
+            )
+        )
+        first = self.service.import_cards(
+            {
+                "job_profile_id": profile.id,
+                "job_title": "招聘顾问",
+                "source_url": "https://www.zhipin.com/web/geek/recommend",
+                "cards": [
+                    {
+                        "platform_uid": "candidate-7",
+                        "raw_card_text": "Alice old snapshot",
+                        "name": "Alice Old",
+                        "expected_salary": "10k-12k",
+                    }
+                ],
+            }
+        )
+        self.service.import_cards(
+            {
+                "job_profile_id": profile.id,
+                "job_title": "招聘顾问",
+                "source_url": "https://www.zhipin.com/web/geek/recommend",
+                "cards": [
+                    {
+                        "platform_uid": "candidate-7",
+                        "raw_card_text": "Alice updated snapshot",
+                        "name": "Alice Updated",
+                        "expected_salary": "20k-25k",
+                    }
+                ],
+            }
+        )
+
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.port, timeout=5)
+        connection.request(
+            "GET",
+            f"/api/export/batches/{first['batch_id']}.csv",
+            headers={"X-Boss-Local-Token": self.token},
+        )
+        response = connection.getresponse()
+        content = response.read().decode("utf-8-sig")
+
+        self.assertEqual(response.status, 200)
+        self.assertIn("Alice Old", content)
+        self.assertIn("10k-12k", content)
+        self.assertNotIn("Alice Updated", content)
+        self.assertNotIn("20k-25k", content)
+
+    def test_batch_csv_download_rejects_unknown_batch(self) -> None:
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.port, timeout=5)
+        connection.request(
+            "GET",
+            "/api/export/batches/999999.csv",
+            headers={"X-Boss-Local-Token": self.token},
+        )
+        response = connection.getresponse()
+        payload = json.loads(response.read().decode("utf-8"))
+
+        self.assertEqual(response.status, 404)
+        self.assertFalse(payload["ok"])
+        self.assertIn("不存在", payload["error"])
+
     def test_import_rejects_missing_token(self) -> None:
         body = json.dumps({"cards": [{"raw_card_text": "Mallory"}]}).encode("utf-8")
         connection = http.client.HTTPConnection("127.0.0.1", self.server.port, timeout=5)
@@ -132,6 +338,53 @@ class LocalApiServerTest(unittest.TestCase):
         self.assertEqual(response.status, 401)
         self.assertFalse(payload["ok"])
         self.assertEqual(len(self.repository.list_candidates()), 0)
+
+    def test_missing_token_does_not_wait_forever_for_a_slow_request_body(self) -> None:
+        connection = socket.create_connection(("127.0.0.1", self.server.port), timeout=2)
+        try:
+            connection.sendall(
+                b"POST /api/import/cards HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Content-Type: application/json\r\n"
+                b"Content-Length: 100\r\n\r\n"
+            )
+            started = time.monotonic()
+            response = connection.recv(4096)
+            elapsed = time.monotonic() - started
+        finally:
+            connection.close()
+        self.assertIn(b"401", response)
+        self.assertLess(elapsed, 1.0)
+
+    def test_import_error_reports_request_task_id(self) -> None:
+        errors: list[dict[str, object]] = []
+        self.server.on_error = errors.append
+
+        def fail_import(_payload):
+            raise ValueError("invalid capture payload")
+
+        self.service.import_cards = fail_import
+        body = json.dumps(
+            {"recruitment_task_id": 42, "cards": [{"raw_card_text": "broken"}]}
+        ).encode("utf-8")
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.port, timeout=5)
+        connection.request(
+            "POST",
+            "/api/import/cards",
+            body=body,
+            headers={
+                "Content-Type": "application/json",
+                "X-Boss-Local-Token": self.token,
+            },
+        )
+        response = connection.getresponse()
+        response.read()
+
+        self.assertEqual(response.status, 400)
+        self.assertEqual(
+            errors,
+            [{"message": "invalid capture payload", "recruitment_task_id": 42}],
+        )
 
     def test_options_allows_chrome_private_network_preflight(self) -> None:
         connection = http.client.HTTPConnection("127.0.0.1", self.server.port, timeout=5)

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import re
 import secrets
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable
+from urllib.parse import quote, urlsplit
 
 
 class LocalApiServer:
@@ -15,10 +17,12 @@ class LocalApiServer:
         import_service,
         logger=None,
         on_import: Callable[[dict[str, object]], None] | None = None,
-        on_error: Callable[[str], None] | None = None,
+        on_error: Callable[[dict[str, object]], None] | None = None,
         get_automation_status: Callable[[], dict[str, object]] | None = None,
         start_automation: Callable[[dict[str, object]], dict[str, object]] | None = None,
         get_extension_config: Callable[[], dict[str, object]] | None = None,
+        extension_command_broker=None,
+        download_batch_csv: Callable[[int], tuple[str, bytes]] | None = None,
         auth_token: str = "",
         max_body_bytes: int = 25_000_000,
     ) -> None:
@@ -31,6 +35,8 @@ class LocalApiServer:
         self.get_automation_status = get_automation_status
         self.start_automation = start_automation
         self.get_extension_config = get_extension_config
+        self.extension_command_broker = extension_command_broker
+        self.download_batch_csv = download_batch_csv
         self.auth_token = str(auth_token or "")
         self.max_body_bytes = max_body_bytes
         self._server: ThreadingHTTPServer | None = None
@@ -51,6 +57,31 @@ class LocalApiServer:
                 self._send_json(204, {})
 
             def do_GET(self) -> None:
+                request_path = urlsplit(self.path).path
+                batch_download_match = re.fullmatch(
+                    r"/api/export/batches/([1-9][0-9]*)\.csv",
+                    request_path,
+                )
+                if batch_download_match:
+                    if not self._is_authorized():
+                        self._send_json(401, {"ok": False, "error": "Unauthorized"})
+                        return
+                    if parent.download_batch_csv is None:
+                        self._send_json(503, {"ok": False, "error": "Batch export is unavailable"})
+                        return
+                    try:
+                        filename, content = parent.download_batch_csv(
+                            int(batch_download_match.group(1))
+                        )
+                    except ValueError as exc:
+                        self._send_json(404, {"ok": False, "error": str(exc)})
+                        return
+                    except Exception as exc:
+                        parent._log("exception", "Local API batch export failed: %s", exc)
+                        self._send_json(400, {"ok": False, "error": str(exc)})
+                        return
+                    self._send_csv(filename, content)
+                    return
                 if self.path == "/":
                     self._send_json(
                         200,
@@ -94,13 +125,39 @@ class LocalApiServer:
                     result = parent.get_extension_config() if parent.get_extension_config else {}
                     self._send_json(200, {"ok": True, "result": result})
                     return
+                if self.path == "/api/extension/commands/next":
+                    if not self._is_authorized():
+                        self._send_json(401, {"ok": False, "error": "Unauthorized"})
+                        return
+                    if parent.extension_command_broker is None:
+                        self._send_json(503, {"ok": False, "error": "Extension control is unavailable"})
+                        return
+                    self._send_json(
+                        200,
+                        {"ok": True, "result": parent.extension_command_broker.claim_next()},
+                    )
+                    return
                 self._send_json(404, {"error": "Not found"})
 
             def do_POST(self) -> None:
-                if self.path not in {"/api/import/cards", "/api/automation/start"}:
+                payload: dict[str, object] = {}
+                is_command_completion = (
+                    self.path.startswith("/api/extension/commands/")
+                    and self.path.endswith("/complete")
+                )
+                is_command_heartbeat = (
+                    self.path.startswith("/api/extension/commands/")
+                    and self.path.endswith("/heartbeat")
+                )
+                if (
+                    self.path not in {"/api/import/cards", "/api/automation/start"}
+                    and not is_command_completion
+                    and not is_command_heartbeat
+                ):
                     self._send_json(404, {"error": "Not found"})
                     return
                 if not self._is_authorized():
+                    self._discard_request_body()
                     self._send_json(401, {"ok": False, "error": "Unauthorized"})
                     return
                 try:
@@ -110,6 +167,28 @@ class LocalApiServer:
                         return
                     body = self.rfile.read(content_length).decode("utf-8")
                     payload = json.loads(body or "{}")
+                    if is_command_completion or is_command_heartbeat:
+                        if parent.extension_command_broker is None:
+                            self._send_json(503, {"ok": False, "error": "Extension control is unavailable"})
+                            return
+                        command_id = self.path.removeprefix("/api/extension/commands/")
+                        command_id = command_id.removesuffix(
+                            "/complete" if is_command_completion else "/heartbeat"
+                        )
+                        if is_command_completion:
+                            result = parent.extension_command_broker.complete(
+                                command_id,
+                                claim_token=str(payload.get("claim_token") or ""),
+                                ok=bool(payload.get("ok")),
+                                message=str(payload.get("message") or ""),
+                            )
+                        else:
+                            result = parent.extension_command_broker.heartbeat(
+                                command_id,
+                                claim_token=str(payload.get("claim_token") or ""),
+                            )
+                        self._send_json(200, {"ok": True, "result": result})
+                        return
                     if self.path == "/api/automation/start":
                         if parent.start_automation is None:
                             self._send_json(503, {"ok": False, "error": "Automation is unavailable"})
@@ -125,7 +204,16 @@ class LocalApiServer:
                     message = str(exc)
                     parent._log("exception", "Local API import failed: %s", exc)
                     if self.path == "/api/import/cards" and parent.on_error:
-                        parent.on_error(message)
+                        parent.on_error(
+                            {
+                                "message": message,
+                                "recruitment_task_id": (
+                                    payload.get("recruitment_task_id")
+                                    if isinstance(payload, dict)
+                                    else None
+                                ),
+                            }
+                        )
                     self._send_json(400, {"ok": False, "error": message})
 
             def log_message(self, format: str, *args) -> None:
@@ -144,11 +232,46 @@ class LocalApiServer:
                 if status_code != 204:
                     self.wfile.write(data)
 
+            def _send_csv(self, filename: str, content: bytes) -> None:
+                safe_filename = str(filename).replace("\r", "").replace("\n", "")
+                ascii_stem = re.sub(r"[^A-Za-z0-9._-]+", "_", safe_filename).strip("_.")
+                ascii_fallback = ascii_stem or "batch_export.csv"
+                disposition = (
+                    f'attachment; filename="{ascii_fallback}"; '
+                    f"filename*=UTF-8''{quote(safe_filename)}"
+                )
+                self.send_response(200)
+                self.send_header("Content-Type", "text/csv; charset=utf-8")
+                self.send_header("Content-Disposition", disposition)
+                self.send_header("Content-Length", str(len(content)))
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Boss-Local-Token")
+                self.send_header("Access-Control-Expose-Headers", "Content-Disposition")
+                self.send_header("Access-Control-Allow-Private-Network", "true")
+                self.end_headers()
+                self.wfile.write(content)
+
             def _is_authorized(self) -> bool:
                 if not parent.auth_token:
                     return False
                 supplied = self.headers.get("X-Boss-Local-Token", "")
                 return secrets.compare_digest(str(supplied), parent.auth_token)
+
+            def _discard_request_body(self) -> None:
+                try:
+                    content_length = int(self.headers.get("Content-Length", "0"))
+                except ValueError:
+                    return
+                if not 0 < content_length <= min(parent.max_body_bytes, 64_000):
+                    return
+                previous_timeout = self.connection.gettimeout()
+                try:
+                    self.connection.settimeout(0.25)
+                    self.rfile.read(content_length)
+                except OSError:
+                    pass
+                finally:
+                    self.connection.settimeout(previous_timeout)
 
         self._server = ThreadingHTTPServer((self.host, self.port), Handler)
         self.port = int(self._server.server_address[1])
