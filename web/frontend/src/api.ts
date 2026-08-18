@@ -34,6 +34,7 @@ export type CandidateRow = {
   latest_ingest_status: string;
   latest_batch_role_id: number | null;
   has_role_binding: boolean | number;
+  batch_count: number;
 };
 
 export type CandidateDetail = CandidateRow & {

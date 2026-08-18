@@ -313,6 +313,38 @@ class CandidateIntakeWebApiTest(unittest.TestCase):
         self.assertEqual(by_name.status_code, 200)
         self.assertEqual(len(by_name.json()["rows"]), 1)
         self.assertEqual(by_name.json()["rows"][0]["name"], "Alice Zhang")
+        self.assertEqual(
+            set(by_name.json()["rows"][0].keys()),
+            {
+                "id",
+                "name",
+                "source_platform",
+                "latest_source_platform",
+                "latest_source_job_title",
+                "latest_batch_id",
+                "latest_capture_time",
+                "latest_ingest_status",
+                "latest_batch_role_id",
+                "has_role_binding",
+                "batch_count",
+            },
+        )
+        for forbidden_field in (
+            "raw_card_text",
+            "latest_raw_card_text",
+            "source_url",
+            "latest_source_url",
+            "detail_url",
+            "latest_detail_url",
+            "evidence_json",
+            "gap_json",
+            "risk_json",
+            "recommended_action",
+            "human_decision",
+            "status_events",
+            "role_matches",
+        ):
+            self.assertNotIn(forbidden_field, by_name.json()["rows"][0])
 
         by_job_title = self.client.get("/api/candidates?page=1&page_size=100&keyword=量化研究员")
         self.assertEqual(by_job_title.status_code, 200)
@@ -338,6 +370,50 @@ class CandidateIntakeWebApiTest(unittest.TestCase):
         self.assertEqual(detail_payload["name"], "Bob Li")
         self.assertEqual(detail_payload["latest_source_job_title"], "量化研究员")
         self.assertIn("原始卡片关键词", detail_payload["latest_raw_card_text"])
+        self.assertEqual(
+            set(detail_payload.keys()),
+            {
+                "id",
+                "name",
+                "source_platform",
+                "latest_source_platform",
+                "latest_source_job_title",
+                "latest_batch_id",
+                "latest_capture_time",
+                "latest_ingest_status",
+                "latest_batch_role_id",
+                "has_role_binding",
+                "batch_count",
+                "job_title",
+                "source_url",
+                "capture_time",
+                "raw_card_text",
+                "active_status",
+                "expected_salary",
+                "work_experience_text",
+                "education_text",
+                "tags_text",
+                "summary_text",
+                "detail_url",
+                "latest_raw_card_text",
+                "latest_source_url",
+                "latest_detail_url",
+                "city",
+                "years_experience",
+                "job_family",
+                "job_track",
+            },
+        )
+        for forbidden_field in (
+            "role_matches",
+            "status_events",
+            "evidence_json",
+            "gap_json",
+            "risk_json",
+            "recommended_action",
+            "human_decision",
+        ):
+            self.assertNotIn(forbidden_field, detail_payload)
 
         batch_id = newest_first.json()["rows"][0]["latest_batch_id"]
         batch = self.client.get(f"/api/capture-batches/{batch_id}")

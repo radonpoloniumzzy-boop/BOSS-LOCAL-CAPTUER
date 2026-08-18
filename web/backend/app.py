@@ -49,6 +49,72 @@ class PairingRequest(BaseModel):
     pairing_code: str
 
 
+_CANDIDATE_LIST_FIELDS = (
+    "id",
+    "name",
+    "source_platform",
+    "latest_source_platform",
+    "latest_source_job_title",
+    "latest_batch_id",
+    "latest_capture_time",
+    "latest_ingest_status",
+    "latest_batch_role_id",
+    "has_role_binding",
+    "batch_count",
+)
+
+_CANDIDATE_DETAIL_FIELDS = (
+    "id",
+    "name",
+    "source_platform",
+    "latest_source_platform",
+    "latest_source_job_title",
+    "latest_batch_id",
+    "latest_capture_time",
+    "latest_ingest_status",
+    "latest_batch_role_id",
+    "has_role_binding",
+    "batch_count",
+    "job_title",
+    "source_url",
+    "capture_time",
+    "raw_card_text",
+    "active_status",
+    "expected_salary",
+    "work_experience_text",
+    "education_text",
+    "tags_text",
+    "summary_text",
+    "detail_url",
+    "latest_raw_card_text",
+    "latest_source_url",
+    "latest_detail_url",
+    "city",
+    "years_experience",
+    "job_family",
+    "job_track",
+)
+
+
+def _project_candidate_list_row(row: dict[str, object]) -> dict[str, object]:
+    return {field: row.get(field) for field in _CANDIDATE_LIST_FIELDS}
+
+
+def _project_candidate_detail(detail: dict[str, object]) -> dict[str, object]:
+    candidate = dict(detail["candidate"])
+    standard_profile = detail.get("standard_profile")
+    if isinstance(standard_profile, dict):
+        candidate.update(
+            {
+                "city": standard_profile.get("city"),
+                "years_experience": standard_profile.get("years_experience"),
+                "job_family": standard_profile.get("job_family"),
+                "job_track": standard_profile.get("job_track"),
+            }
+        )
+    return {field: candidate.get(field) for field in _CANDIDATE_DETAIL_FIELDS}
+
+
 def error_response(status_code: int, code: str, message: str) -> JSONResponse:
     return JSONResponse(
         status_code=status_code,
@@ -288,7 +354,7 @@ def create_web_app(
             unbound_only=unbound_only,
             sort=sort,
         )
-        result["rows"] = [dict(row) for row in result["rows"]]
+        result["rows"] = [_project_candidate_list_row(dict(row)) for row in result["rows"]]
         return result
 
     @app.get("/api/candidates/{candidate_id}")
@@ -298,21 +364,7 @@ def create_web_app(
         detail = runtime.repository.get_candidate_detail(candidate_id)
         if detail is None:
             raise ApiError(404, "candidate_not_found", "候选人不存在。")
-        candidate = dict(detail["candidate"])
-        standard_profile = detail.get("standard_profile")
-        if isinstance(standard_profile, dict):
-            candidate.update(
-                {
-                    "city": standard_profile.get("city"),
-                    "years_experience": standard_profile.get("years_experience"),
-                    "job_family": standard_profile.get("job_family"),
-                    "job_track": standard_profile.get("job_track"),
-                }
-            )
-        candidate["appearances"] = detail.get("appearances") or []
-        candidate["role_matches"] = detail.get("role_matches") or []
-        candidate["status_events"] = detail.get("status_events") or []
-        return candidate
+        return _project_candidate_detail(detail)
 
     @app.get("/api/capture-batches")
     def list_capture_batches(
