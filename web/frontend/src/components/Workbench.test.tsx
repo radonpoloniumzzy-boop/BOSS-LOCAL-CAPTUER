@@ -259,8 +259,9 @@ describe("workbench candidate intake views", () => {
     expect(screen.getByText("未绑定岗位")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "最近批次" }));
-    expect(await screen.findByText("#9")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "查看候选人" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "查看候选人" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "导出 Markdown" })).toBeInTheDocument();
+    expect(screen.getAllByText("#9").length).toBeGreaterThan(0);
   });
 
   it("uses explicit refresh ticks for candidate and batch lists", async () => {
@@ -569,8 +570,373 @@ describe("workbench candidate intake views", () => {
     expect(within(detailDrawer).getAllByText("量化研究员").length).toBeGreaterThan(0);
     expect(screen.getByText("原始卡片关键词与快照")).toBeInTheDocument();
 
-    await user.click(within(detailDrawer).getByRole("button", { name: "#11" }));
+    await user.click(within(detailDrawer).getByRole("button", { name: "打开最近批次 #11" }));
     expect(await screen.findByRole("heading", { name: "批次 #11" })).toBeInTheDocument();
+  });
+
+  it("renders the candidate detail in four sections with safe links and missing values", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL) => {
+        const url = String(input);
+        if (url.includes("/api/candidates?")) {
+          return response({
+            rows: [{
+              id: 18,
+              name: "Readable Candidate",
+              source_platform: "boss",
+              latest_source_platform: "boss",
+              latest_source_job_title: "高级交易员岗位职责很长很长需要截断展示",
+              latest_batch_id: 33,
+              latest_capture_time: "2026-08-12T09:00:00",
+              latest_ingest_status: "updated",
+              latest_batch_role_id: null,
+              has_role_binding: 0,
+              batch_count: 3,
+            }],
+            total: 1,
+            page: 1,
+            page_size: 100,
+          });
+        }
+        if (url === "/api/candidates/18") {
+          return response({
+            id: 18,
+            name: "Readable Candidate",
+            source_platform: "boss",
+            latest_source_platform: "boss",
+            latest_source_job_title: "高级交易员岗位职责很长很长需要截断展示",
+            latest_batch_id: 33,
+            latest_capture_time: "2026-08-12T09:00:00",
+            latest_ingest_status: "updated",
+            latest_batch_role_id: null,
+            has_role_binding: 0,
+            job_title: "",
+            source_url: "https://example.test/source",
+            capture_time: "2026-08-12T09:00:00",
+            raw_card_text: "",
+            active_status: "",
+            expected_salary: "",
+            work_experience_text: "",
+            education_text: "",
+            tags_text: "",
+            summary_text: "",
+            detail_url: "javascript:alert(1)",
+            latest_raw_card_text: "",
+            latest_source_url: "https://example.test/source",
+            latest_detail_url: "file:///secret",
+            city: "",
+            years_experience: null,
+            job_family: "",
+            job_track: "",
+            batch_count: 3,
+          });
+        }
+        if (url === "/api/candidates/18/appearances") {
+          return response({ rows: [] });
+        }
+        if (url.includes("/api/capture-batches?")) {
+          return response({ rows: [], total: 0, page: 1, page_size: 20 });
+        }
+        throw new Error(`unexpected request: ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+    render(<Workbench status={status} />);
+
+    await user.click(screen.getByRole("button", { name: "候选人" }));
+    await user.click(await screen.findByRole("button", { name: "查看详情" }));
+    const detailDrawer = await screen.findByRole("complementary", { name: "候选人详情" });
+
+    expect(within(detailDrawer).getByRole("heading", { name: "身份摘要" })).toBeInTheDocument();
+    expect(within(detailDrawer).getByRole("heading", { name: "基础信息" })).toBeInTheDocument();
+    expect(within(detailDrawer).getByRole("heading", { name: "摘要与链接" })).toBeInTheDocument();
+    expect(within(detailDrawer).getByRole("heading", { name: "来源出现历史" })).toBeInTheDocument();
+    expect(within(detailDrawer).getAllByText("未提供").length).toBeGreaterThan(3);
+    expect(within(detailDrawer).getByRole("link", { name: "打开来源页面" })).toHaveAttribute("href", "https://example.test/source");
+    expect(within(detailDrawer).getByRole("link", { name: "打开来源页面" })).toHaveAttribute("target", "_blank");
+    expect(within(detailDrawer).getByRole("link", { name: "打开来源页面" })).toHaveAttribute("rel", "noreferrer");
+    expect(within(detailDrawer).queryByRole("link", { name: "打开候选人详情" })).not.toBeInTheDocument();
+  });
+
+  it("expands, collapses, and copies candidate snapshots with success and failure feedback", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL) => {
+        const url = String(input);
+        if (url.includes("/api/candidates?")) {
+          return response({
+            rows: [{
+              id: 21,
+              name: "Snapshot Candidate",
+              source_platform: "boss",
+              latest_source_platform: "boss",
+              latest_source_job_title: "交易员",
+              latest_batch_id: 61,
+              latest_capture_time: "2026-08-12T10:00:00",
+              latest_ingest_status: "new",
+              latest_batch_role_id: null,
+              has_role_binding: 0,
+              batch_count: 1,
+            }],
+            total: 1,
+            page: 1,
+            page_size: 100,
+          });
+        }
+        if (url === "/api/candidates/21") {
+          return response({
+            id: 21,
+            name: "Snapshot Candidate",
+            source_platform: "boss",
+            latest_source_platform: "boss",
+            latest_source_job_title: "交易员",
+            latest_batch_id: 61,
+            latest_capture_time: "2026-08-12T10:00:00",
+            latest_ingest_status: "new",
+            latest_batch_role_id: null,
+            has_role_binding: 0,
+            job_title: "交易员",
+            source_url: "",
+            capture_time: "2026-08-12T10:00:00",
+            raw_card_text: "",
+            active_status: "",
+            expected_salary: "",
+            work_experience_text: "",
+            education_text: "",
+            tags_text: "",
+            summary_text: "",
+            detail_url: "",
+            latest_raw_card_text: "第一行\n第二行\n第三行\n第四行\n第五行\n第六行\n第七行\n第八行\n第九行",
+            latest_source_url: "",
+            latest_detail_url: "",
+            city: "",
+            years_experience: null,
+            job_family: "",
+            job_track: "",
+            batch_count: 1,
+          });
+        }
+        if (url === "/api/candidates/21/appearances") {
+          return response({ rows: [] });
+        }
+        if (url.includes("/api/capture-batches?")) {
+          return response({ rows: [], total: 0, page: 1, page_size: 20 });
+        }
+        throw new Error(`unexpected request: ${url}`);
+      }),
+    );
+    const writeText = vi.spyOn(navigator.clipboard, "writeText")
+      .mockResolvedValueOnce()
+      .mockRejectedValueOnce(new Error("copy failed"));
+    const user = userEvent.setup();
+    render(<Workbench status={status} />);
+
+    await user.click(screen.getByRole("button", { name: "候选人" }));
+    await user.click(await screen.findByRole("button", { name: "查看详情" }));
+    const detailDrawer = await screen.findByRole("complementary", { name: "候选人详情" });
+
+    await user.click(within(detailDrawer).getByRole("button", { name: "展开完整快照" }));
+    expect(within(detailDrawer).getByRole("button", { name: "收起" })).toBeInTheDocument();
+    await user.click(within(detailDrawer).getByRole("button", { name: "复制快照" }));
+    expect(writeText).toHaveBeenCalledWith("第一行\n第二行\n第三行\n第四行\n第五行\n第六行\n第七行\n第八行\n第九行");
+    expect(await within(detailDrawer).findByRole("status")).toHaveTextContent("已复制快照。");
+    await user.click(within(detailDrawer).getByRole("button", { name: "复制快照" }));
+    expect(await within(detailDrawer).findByRole("status")).toHaveTextContent("复制失败，请稍后重试。");
+  });
+
+  it("navigates batch snapshots in place and closes stale snapshots when pagination changes", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL) => {
+        const url = String(input);
+        if (url.includes("/api/capture-batches?")) {
+          return response({
+            rows: [{
+              id: 75,
+              start_time: "2026-08-12T10:30:00",
+              source_platform: "boss",
+              total_collected: 3,
+              total_new: 2,
+              total_updated: 1,
+              total_skipped: 0,
+              total_failed: 0,
+              status: "completed",
+              role_id: null,
+            }],
+            total: 1,
+            page: 1,
+            page_size: 20,
+            today_summary: { received: 3, added: 2 },
+          });
+        }
+        if (url.includes("/api/capture-batches/75/candidates?page=1&page_size=50")) {
+          return response({
+            rows: [
+              {
+                id: 1,
+                batch_id: 75,
+                candidate_id: 501,
+                name: "第一页候选人甲",
+                source_platform: "boss",
+                platform_uid: "boss:501",
+                job_title: "来源岗位甲",
+                capture_time: "2026-08-12T10:30:00",
+                raw_card_text: "第一页快照甲",
+                ingest_status: "new",
+                has_role_binding: 0,
+              },
+              {
+                id: 2,
+                batch_id: 75,
+                candidate_id: 502,
+                name: "第一页候选人乙",
+                source_platform: "boss",
+                platform_uid: "boss:502",
+                job_title: "来源岗位乙",
+                capture_time: "2026-08-12T10:31:00",
+                raw_card_text: "第一页快照乙",
+                ingest_status: "updated",
+                has_role_binding: 0,
+              },
+            ],
+            total: 51,
+            page: 1,
+            page_size: 50,
+          });
+        }
+        if (url.includes("/api/capture-batches/75/candidates?page=2&page_size=50")) {
+          return response({
+            rows: [
+              {
+                id: 3,
+                batch_id: 75,
+                candidate_id: 503,
+                name: "第二页候选人",
+                source_platform: "boss",
+                platform_uid: "boss:503",
+                job_title: "来源岗位丙",
+                capture_time: "2026-08-12T10:32:00",
+                raw_card_text: "第二页快照",
+                ingest_status: "new",
+                has_role_binding: 0,
+              },
+            ],
+            total: 51,
+            page: 2,
+            page_size: 50,
+          });
+        }
+        throw new Error(`unexpected request: ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+    render(<Workbench status={status} />);
+
+    await user.click(screen.getByRole("button", { name: "最近批次" }));
+    await user.click(await screen.findByRole("button", { name: "查看候选人" }));
+    const snapshotButtons = await screen.findAllByRole("button", { name: "查看原始快照" });
+    await user.click(snapshotButtons[0]);
+
+    const snapshotDrawer = await screen.findByRole("complementary", { name: "原始快照" });
+    expect(within(snapshotDrawer).getByText("第一页候选人甲")).toBeInTheDocument();
+    expect(within(snapshotDrawer).getByText("1 / 2")).toBeInTheDocument();
+    expect(within(snapshotDrawer).getByRole("button", { name: "上一个" })).toBeDisabled();
+
+    await user.click(within(snapshotDrawer).getByRole("button", { name: "下一个" }));
+    expect(await within(snapshotDrawer).findByText("第一页候选人乙")).toBeInTheDocument();
+    expect(within(snapshotDrawer).getByText("2 / 2")).toBeInTheDocument();
+    expect(within(snapshotDrawer).getByRole("button", { name: "下一个" })).toBeDisabled();
+
+    await user.click(screen.getByRole("button", { name: "下一页" }));
+    await waitFor(() => {
+      expect(screen.queryByRole("complementary", { name: "原始快照" })).not.toBeInTheDocument();
+    });
+    expect(await screen.findByText("第二页候选人")).toBeInTheDocument();
+  });
+
+  it("closes drawers with Escape, restores focus, and releases background scroll lock", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL) => {
+        const url = String(input);
+        if (url.includes("/api/candidates?")) {
+          return response({
+            rows: [{
+              id: 31,
+              name: "Focus Candidate",
+              source_platform: "boss",
+              latest_source_platform: "boss",
+              latest_source_job_title: "交易员",
+              latest_batch_id: 91,
+              latest_capture_time: "2026-08-12T11:30:00",
+              latest_ingest_status: "new",
+              latest_batch_role_id: null,
+              has_role_binding: 0,
+              batch_count: 1,
+            }],
+            total: 1,
+            page: 1,
+            page_size: 100,
+          });
+        }
+        if (url === "/api/candidates/31") {
+          return response({
+            id: 31,
+            name: "Focus Candidate",
+            source_platform: "boss",
+            latest_source_platform: "boss",
+            latest_source_job_title: "交易员",
+            latest_batch_id: 91,
+            latest_capture_time: "2026-08-12T11:30:00",
+            latest_ingest_status: "new",
+            latest_batch_role_id: null,
+            has_role_binding: 0,
+            job_title: "交易员",
+            source_url: "",
+            capture_time: "2026-08-12T11:30:00",
+            raw_card_text: "",
+            active_status: "",
+            expected_salary: "",
+            work_experience_text: "",
+            education_text: "",
+            tags_text: "",
+            summary_text: "",
+            detail_url: "",
+            latest_raw_card_text: "快照",
+            latest_source_url: "",
+            latest_detail_url: "",
+            city: "",
+            years_experience: null,
+            job_family: "",
+            job_track: "",
+            batch_count: 1,
+          });
+        }
+        if (url === "/api/candidates/31/appearances") {
+          return response({ rows: [] });
+        }
+        if (url.includes("/api/capture-batches?")) {
+          return response({ rows: [], total: 0, page: 1, page_size: 20 });
+        }
+        throw new Error(`unexpected request: ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+    render(<Workbench status={status} />);
+
+    await user.click(screen.getByRole("button", { name: "候选人" }));
+    const detailButton = await screen.findByRole("button", { name: "查看详情" });
+    await user.click(detailButton);
+    expect(await screen.findByRole("complementary", { name: "候选人详情" })).toBeInTheDocument();
+    expect(document.body.style.overflow).toBe("hidden");
+
+    await user.keyboard("{Escape}");
+    await waitFor(() => {
+      expect(screen.queryByRole("complementary", { name: "候选人详情" })).not.toBeInTheDocument();
+    });
+    expect(document.body.style.overflow).toBe("");
+    expect(detailButton).toHaveFocus();
   });
 
   it("opens a batch by ID from the batch page even when it is not on the first page", async () => {

@@ -1,7 +1,9 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
-import { Search, X } from "lucide-react";
+import { ExternalLink, Search, X } from "lucide-react";
 import { ApiRequestError, CandidateAppearanceRow, CandidateDetail, CandidateRow, PagedResponse, requestJson } from "../../api";
+import { Drawer } from "./Drawer";
 import { formatDate, Loadable, Pager, RefreshButton, StatusBadge, TableState } from "./common";
+import { SnapshotTextBlock } from "./SnapshotTextBlock";
 
 const empty: Loadable<CandidateRow> = { rows: [], total: 0, page: 1, page_size: 100, loading: false, error: "" };
 const emptyAppearances: AppearanceLoadable = { rows: [], loading: false, error: "" };
@@ -11,6 +13,22 @@ type AppearanceLoadable = {
   loading: boolean;
   error: string;
 };
+
+function displayValue(value: string | number | null | undefined) {
+  if (value === null || value === undefined) return "未提供";
+  if (typeof value === "number") return String(value);
+  return value.trim() ? value : "未提供";
+}
+
+function safeHttpUrl(value: string) {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
 
 export function CandidatesPage({ onOpenBatch }: { onOpenBatch: (batchId: number) => void }) {
   const [keywordInput, setKeywordInput] = useState("");
@@ -157,15 +175,15 @@ export function CandidatesPage({ onOpenBatch }: { onOpenBatch: (batchId: number)
         />
         {!data.loading && !data.error && data.rows.length > 0 && (
           <div className="table-scroll">
-            <table className="workbench-table candidate-table candidate-table-detailed">
+            <table className="workbench-table candidate-table candidate-table-readability">
               <thead>
                 <tr>
                   <th>候选人</th>
-                  <th>来源</th>
                   <th>来源岗位</th>
-                  <th>岗位状态</th>
+                  <th>来源平台</th>
+                  <th>岗位绑定</th>
                   <th>最近采集</th>
-                  <th>批次</th>
+                  <th>最近批次</th>
                   <th>本次结果</th>
                   <th>操作</th>
                 </tr>
@@ -174,18 +192,26 @@ export function CandidatesPage({ onOpenBatch }: { onOpenBatch: (batchId: number)
                 {data.rows.map((row) => (
                   <tr key={row.id}>
                     <td>
-                      <button className="table-link-button" onClick={() => openDetail(row.id)}>
-                        <strong className="primary-cell">{row.name || `候选人 #${row.id}`}</strong>
-                      </button>
-                      <small>内部 ID {row.id}</small>
+                      <div className="candidate-anchor-cell">
+                        <button className="table-link-button" onClick={() => openDetail(row.id)}>
+                          <strong className="primary-cell">{row.name || `候选人 #${row.id}`}</strong>
+                        </button>
+                        <small>内部 ID {row.id}</small>
+                      </div>
+                    </td>
+                    <td className="text-cell">
+                      <span className="line-clamp-2" title={row.latest_source_job_title || "未提供"}>
+                        {row.latest_source_job_title || "未提供"}
+                      </span>
                     </td>
                     <td><StatusBadge>{row.latest_source_platform || row.source_platform || "unknown"}</StatusBadge></td>
-                    <td className="text-cell">{row.latest_source_job_title || "未提供"}</td>
                     <td><StatusBadge tone={row.has_role_binding ? "success" : "muted"}>{row.has_role_binding ? "已绑定岗位" : "未绑定岗位"}</StatusBadge></td>
                     <td className="numeric">{formatDate(row.latest_capture_time)}</td>
-                    <td>{row.latest_batch_id ? <button className="text-button" onClick={() => onOpenBatch(row.latest_batch_id)}>#{row.latest_batch_id}</button> : "—"}</td>
+                    <td className="numeric">
+                      {row.latest_batch_id ? <button className="text-button" onClick={() => onOpenBatch(row.latest_batch_id)}>#{row.latest_batch_id}</button> : "未提供"}
+                    </td>
                     <td><StatusBadge tone={row.latest_ingest_status === "updated" ? "info" : "success"}>{row.latest_ingest_status === "updated" ? "更新" : "新增"}</StatusBadge></td>
-                    <td><button className="secondary-button" onClick={() => openDetail(row.id)}>查看详情</button></td>
+                    <td><button className="secondary-button row-hover-action" onClick={() => openDetail(row.id)}>查看详情</button></td>
                   </tr>
                 ))}
               </tbody>
@@ -235,95 +261,158 @@ function CandidateDetailDrawer({
   onRetryAppearances: () => void;
   onOpenBatch: (batchId: number) => void;
 }) {
+  const sourceUrl = safeHttpUrl(detail?.latest_source_url || detail?.source_url || "");
+  const detailUrl = safeHttpUrl(detail?.latest_detail_url || detail?.detail_url || "");
+
   return (
-    <div className="drawer-backdrop" onClick={onClose}>
-      <aside className="snapshot-drawer detail-drawer" aria-label="候选人详情" onClick={(event) => event.stopPropagation()}>
-        <header>
-          <div>
-            <p className="eyebrow">候选人详情</p>
-            <h2>{detail?.name || "候选人详情"}</h2>
-            {detail && <p>{detail.latest_source_platform || detail.source_platform || "unknown"} · 最近采集 {formatDate(detail.latest_capture_time)}</p>}
-          </div>
-          <button className="icon-button" onClick={onClose} aria-label="关闭候选人详情"><X size={17} /></button>
-        </header>
-        {loading && <div className="table-state skeleton-state"><span />正在读取候选人详情…</div>}
-        {!loading && error && <div className="table-state error-table-state">{error}</div>}
-        {!loading && !error && detail && (
-          <>
-            <div className="detail-chip-row">
-              <StatusBadge>{detail.latest_source_platform || detail.source_platform || "unknown"}</StatusBadge>
-              <StatusBadge tone={detail.has_role_binding ? "success" : "muted"}>{detail.has_role_binding ? "已绑定岗位" : "未绑定岗位"}</StatusBadge>
-              <StatusBadge tone={detail.latest_ingest_status === "updated" ? "info" : "success"}>{detail.latest_ingest_status === "updated" ? "最近为更新" : "最近为新增"}</StatusBadge>
+    <Drawer label="候选人详情" className="drawer-panel detail-drawer-panel" onClose={onClose}>
+      <header className="drawer-header">
+        <div>
+          <p className="eyebrow">候选人详情</p>
+          <h2>{detail?.name || "候选人详情"}</h2>
+          {detail && <p>{detail.latest_source_platform || detail.source_platform || "unknown"} · 最近采集 {formatDate(detail.latest_capture_time)}</p>}
+        </div>
+        <button className="icon-button" onClick={onClose} aria-label="关闭候选人详情"><X size={17} /></button>
+      </header>
+      {loading && <div className="table-state skeleton-state"><span />正在读取候选人详情…</div>}
+      {!loading && error && <div className="table-state error-table-state">{error}</div>}
+      {!loading && !error && detail && (
+        <div className="detail-layout">
+          <section className="detail-section-card">
+            <div className="detail-section-headline">
+              <span className="eyebrow">区域 A</span>
+              <h3>身份摘要</h3>
+            </div>
+            <div className="detail-identity">
+              <div className="detail-identity-main">
+                <strong>{detail.name || `候选人 #${detail.id}`}</strong>
+                <div className="detail-chip-row">
+                  <StatusBadge>{detail.latest_source_platform || detail.source_platform || "unknown"}</StatusBadge>
+                  <StatusBadge tone={detail.has_role_binding ? "success" : "muted"}>{detail.has_role_binding ? "已绑定岗位" : "未绑定岗位"}</StatusBadge>
+                  <StatusBadge tone={detail.latest_ingest_status === "updated" ? "info" : "success"}>{detail.latest_ingest_status === "updated" ? "最近为更新" : "最近为新增"}</StatusBadge>
+                </div>
+              </div>
+              <dl className="detail-summary-grid">
+                <div><dt>最近采集时间</dt><dd className="numeric">{formatDate(detail.latest_capture_time)}</dd></div>
+                <div>
+                  <dt>最近批次</dt>
+                  <dd>
+                    {detail.latest_batch_id ? (
+                      <button
+                        className="text-button numeric"
+                        aria-label={`打开最近批次 #${detail.latest_batch_id}`}
+                        onClick={() => onOpenBatch(detail.latest_batch_id)}
+                      >
+                        #{detail.latest_batch_id}
+                      </button>
+                    ) : "未提供"}
+                  </dd>
+                </div>
+              </dl>
+            </div>
+          </section>
+
+          <section className="detail-section-card">
+            <div className="detail-section-headline">
+              <span className="eyebrow">区域 B</span>
+              <h3>基础信息</h3>
             </div>
             <dl className="detail-grid">
-              <div><dt>来源岗位</dt><dd>{detail.latest_source_job_title || detail.job_title || "未提供"}</dd></div>
-              <div><dt>最近批次</dt><dd>{detail.latest_batch_id ? <button className="text-button" onClick={() => onOpenBatch(detail.latest_batch_id)}>#{detail.latest_batch_id}</button> : "—"}</dd></div>
-              <div><dt>最近采集</dt><dd>{formatDate(detail.latest_capture_time)}</dd></div>
-              <div><dt>来源链接</dt><dd className="break-all">{detail.latest_source_url || detail.source_url || "未保存"}</dd></div>
-              <div><dt>详情链接</dt><dd className="break-all">{detail.latest_detail_url || detail.detail_url || "未保存"}</dd></div>
-              <div><dt>基础状态</dt><dd>{detail.active_status || "未提供"}</dd></div>
-              <div><dt>期望薪资</dt><dd>{detail.expected_salary || "未提供"}</dd></div>
-              <div><dt>工作经验</dt><dd>{detail.work_experience_text || "未提供"}</dd></div>
-              <div><dt>学历</dt><dd>{detail.education_text || "未提供"}</dd></div>
-              <div><dt>标签</dt><dd>{detail.tags_text || "未提供"}</dd></div>
-              <div><dt>城市</dt><dd>{detail.city || "未提供"}</dd></div>
-              <div><dt>批次数</dt><dd>{detail.batch_count || 0}</dd></div>
+              <div><dt>来源岗位</dt><dd>{displayValue(detail.latest_source_job_title || detail.job_title)}</dd></div>
+              <div><dt>城市</dt><dd>{displayValue(detail.city)}</dd></div>
+              <div><dt>工作经验</dt><dd>{displayValue(detail.work_experience_text)}</dd></div>
+              <div><dt>学历</dt><dd>{displayValue(detail.education_text)}</dd></div>
+              <div><dt>期望薪资</dt><dd>{displayValue(detail.expected_salary)}</dd></div>
+              <div><dt>基础状态</dt><dd>{displayValue(detail.active_status)}</dd></div>
+              <div><dt>标签</dt><dd>{displayValue(detail.tags_text)}</dd></div>
+              <div><dt>历史批次数</dt><dd className="numeric">{displayValue(detail.batch_count)}</dd></div>
             </dl>
-            <section className="detail-section">
-              <h3>摘要</h3>
-              <p>{detail.summary_text || "未提供摘要。"}</p>
-            </section>
-            <section className="detail-section">
-              <h3>原始卡片快照</h3>
-              <pre>{detail.latest_raw_card_text || detail.raw_card_text || "未保存原始快照"}</pre>
-            </section>
-            <section className="detail-section">
-              <div className="detail-section-header">
+          </section>
+
+          <section className="detail-section-card">
+            <div className="detail-section-headline">
+              <span className="eyebrow">区域 C</span>
+              <h3>摘要与链接</h3>
+            </div>
+            <div className="detail-prose-block">
+              <p>{detail.summary_text || "未提供"}</p>
+            </div>
+            <div className="button-row detail-link-row">
+              {sourceUrl && (
+                <a className="secondary-button" href={sourceUrl} target="_blank" rel="noreferrer">
+                  <ExternalLink size={14} />
+                  打开来源页面
+                </a>
+              )}
+              {detailUrl && (
+                <a className="secondary-button" href={detailUrl} target="_blank" rel="noreferrer">
+                  <ExternalLink size={14} />
+                  打开候选人详情
+                </a>
+              )}
+              {!sourceUrl && !detailUrl && <span className="muted">未提供可打开的来源链接。</span>}
+            </div>
+            <div className="snapshot-preview-section">
+              <h4>原始卡片快照</h4>
+              <SnapshotTextBlock text={detail.latest_raw_card_text || detail.raw_card_text || ""} collapsible previewLines={8} />
+            </div>
+          </section>
+
+          <section className="detail-section-card">
+            <div className="detail-section-headline detail-section-headline-row">
+              <div>
+                <span className="eyebrow">区域 D</span>
                 <h3>来源出现历史</h3>
-                <RefreshButton onClick={onRetryAppearances} label="重新读取来源历史" />
               </div>
-              {appearances.loading && <div className="table-state skeleton-state"><span />正在读取来源出现历史…</div>}
-              {!appearances.loading && appearances.error && (
-                <div className="table-state error-table-state">
-                  <p>{appearances.error}</p>
-                  <button className="secondary-button" onClick={onRetryAppearances}>重试</button>
-                </div>
-              )}
-              {!appearances.loading && !appearances.error && appearances.rows.length === 0 && (
-                <div className="table-state">还没有来源出现历史。</div>
-              )}
-              {!appearances.loading && !appearances.error && appearances.rows.length > 0 && (
-                <div className="table-scroll">
-                  <table className="workbench-table compact-table">
-                    <thead>
-                      <tr>
-                        <th>批次</th>
-                        <th>平台</th>
-                        <th>来源岗位</th>
-                        <th>采集时间</th>
-                        <th>结果</th>
-                        <th>操作</th>
+              <RefreshButton onClick={onRetryAppearances} label="重新读取来源历史" />
+            </div>
+            {appearances.loading && <div className="table-state skeleton-state"><span />正在读取来源出现历史…</div>}
+            {!appearances.loading && appearances.error && (
+              <div className="table-state error-table-state">
+                <p>{appearances.error}</p>
+                <button className="secondary-button" onClick={onRetryAppearances}>重试</button>
+              </div>
+            )}
+            {!appearances.loading && !appearances.error && appearances.rows.length === 0 && (
+              <div className="table-state compact-empty-state">还没有来源出现历史。</div>
+            )}
+            {!appearances.loading && !appearances.error && appearances.rows.length > 0 && (
+              <div className="table-scroll">
+                <table className="workbench-table compact-table appearance-table">
+                  <thead>
+                    <tr>
+                      <th>批次</th>
+                      <th>平台</th>
+                      <th>来源岗位</th>
+                      <th>采集时间</th>
+                      <th>结果</th>
+                      <th>操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {appearances.rows.map((row) => (
+                      <tr key={`${row.batch_id}-${row.capture_time}-${row.source_platform}`}>
+                        <td className="numeric">
+                          <button className="text-button" onClick={() => onOpenBatch(row.batch_id)}>#{row.batch_id}</button>
+                        </td>
+                        <td><StatusBadge>{row.source_platform || "unknown"}</StatusBadge></td>
+                        <td className="text-cell">
+                          <span className="line-clamp-2" title={row.source_job_title || "未提供"}>
+                            {row.source_job_title || "未提供"}
+                          </span>
+                        </td>
+                        <td className="numeric">{formatDate(row.capture_time)}</td>
+                        <td><StatusBadge tone={row.ingest_status === "updated" ? "info" : "success"}>{row.ingest_status === "updated" ? "更新" : "新增"}</StatusBadge></td>
+                        <td><button className="secondary-button" onClick={() => onOpenBatch(row.batch_id)}>查看批次</button></td>
                       </tr>
-                    </thead>
-                    <tbody>
-                      {appearances.rows.map((row) => (
-                        <tr key={`${row.batch_id}-${row.capture_time}-${row.source_platform}`}>
-                          <td>#{row.batch_id}</td>
-                          <td><StatusBadge>{row.source_platform || "unknown"}</StatusBadge></td>
-                          <td className="text-cell">{row.source_job_title || "未提供"}</td>
-                          <td className="numeric">{formatDate(row.capture_time)}</td>
-                          <td><StatusBadge tone={row.ingest_status === "updated" ? "info" : "success"}>{row.ingest_status === "updated" ? "更新" : "新增"}</StatusBadge></td>
-                          <td><button className="secondary-button" onClick={() => onOpenBatch(row.batch_id)}>查看批次</button></td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </section>
-          </>
-        )}
-      </aside>
-    </div>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+        </div>
+      )}
+    </Drawer>
   );
 }

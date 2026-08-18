@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowLeft, Download, X } from "lucide-react";
 import { ApiRequestError, BatchCandidateRow, CaptureBatchRow, downloadBatchMarkdown, PagedResponse, requestJson } from "../../api";
+import { Drawer } from "./Drawer";
 import { formatDate, Loadable, Pager, RefreshButton, StatusBadge, TableState } from "./common";
+import { SnapshotTextBlock } from "./SnapshotTextBlock";
 
 const emptyBatches: Loadable<CaptureBatchRow> = { rows: [], total: 0, page: 1, page_size: 20, loading: false, error: "" };
 const emptyCandidates: Loadable<BatchCandidateRow> = { rows: [], total: 0, page: 1, page_size: 50, loading: false, error: "" };
@@ -10,11 +12,17 @@ type BatchPageResponse = PagedResponse<CaptureBatchRow> & { today_summary?: { re
 type BatchStatusFilter = "" | "completed" | "partial" | "failed";
 
 export function BatchesPage({
+  active = true,
   initialBatchId = null,
+  initialReturnView = null,
   onInitialBatchConsumed,
+  onReturnFromInitialBatch,
 }: {
+  active?: boolean;
   initialBatchId?: number | null;
+  initialReturnView?: "home" | "candidates" | "batches" | "settings" | null;
   onInitialBatchConsumed?: () => void;
+  onReturnFromInitialBatch?: () => void;
 }) {
   const [page, setPage] = useState(1);
   const [platform, setPlatform] = useState("");
@@ -29,6 +37,7 @@ export function BatchesPage({
   const [notice, setNotice] = useState("");
   const [todaySummary, setTodaySummary] = useState({ received: 0, added: 0 });
   const [exportingBatchId, setExportingBatchId] = useState<number | null>(null);
+  const [openedFromInitialBatch, setOpenedFromInitialBatch] = useState(false);
   const latest = useRef(0);
   const directRequest = useRef(0);
   const knownLatest = useRef(0);
@@ -45,7 +54,7 @@ export function BatchesPage({
     }, 4000);
   }, []);
 
-  const openBatchById = useCallback((batchId: number) => {
+  const openBatchById = useCallback((batchId: number, fromInitialBatch = false) => {
     if (!Number.isInteger(batchId) || batchId <= 0) {
       showNotice("请输入有效的批次 ID。");
       return;
@@ -54,7 +63,10 @@ export function BatchesPage({
     setLookupLoading(true);
     void requestJson<CaptureBatchRow>(`/api/capture-batches/${batchId}`)
       .then((batch) => {
-        if (directRequest.current === requestId) setSelected(batch);
+        if (directRequest.current === requestId) {
+          setOpenedFromInitialBatch(fromInitialBatch);
+          setSelected(batch);
+        }
       })
       .catch(() => {
         if (directRequest.current === requestId) showNotice(`批次 #${batchId} 不存在或已不可用。`);
@@ -84,6 +96,7 @@ export function BatchesPage({
   useEffect(() => setPage(1), [platform, statusFilter, failedOnly, todayOnly]);
 
   useEffect(() => {
+    if (!active) return;
     const requestId = ++latest.current;
     setData((current) => ({ ...current, loading: current.rows.length === 0, error: "" }));
     const params = new URLSearchParams({ page: String(page), page_size: "20" });
@@ -111,16 +124,16 @@ export function BatchesPage({
           }));
         }
       });
-  }, [page, platform, statusFilter, failedOnly, todayOnly, refresh, showNotice]);
+  }, [active, page, platform, statusFilter, failedOnly, todayOnly, refresh, showNotice]);
 
   useEffect(() => {
-    if (!initialBatchId) return;
-    openBatchById(initialBatchId);
+    if (!active || !initialBatchId) return;
+    openBatchById(initialBatchId, Boolean(initialReturnView));
     onInitialBatchConsumed?.();
-  }, [initialBatchId, onInitialBatchConsumed, openBatchById]);
+  }, [active, initialBatchId, initialReturnView, onInitialBatchConsumed, openBatchById]);
 
   useEffect(() => {
-    if (selected) return;
+    if (!active || selected) return;
     const timer = window.setInterval(load, 10000);
     const onFocus = () => load();
     const onVisibility = () => {
@@ -133,7 +146,18 @@ export function BatchesPage({
       window.removeEventListener("focus", onFocus);
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [load, selected]);
+  }, [active, load, selected]);
+
+  const closeSelected = () => {
+    if (openedFromInitialBatch && onReturnFromInitialBatch) {
+      setOpenedFromInitialBatch(false);
+      setSelected(null);
+      onReturnFromInitialBatch();
+      return;
+    }
+    setOpenedFromInitialBatch(false);
+    setSelected(null);
+  };
 
   if (selected) {
     return (
@@ -141,7 +165,7 @@ export function BatchesPage({
         {notice && <div className="toast" role="status">{notice}</div>}
         <BatchDetail
           batch={selected}
-          onBack={() => setSelected(null)}
+          onBack={closeSelected}
           onExportError={showNotice}
         />
       </>
@@ -213,7 +237,7 @@ export function BatchesPage({
         />
         {!data.loading && !data.error && data.rows.length > 0 && (
           <div className="table-scroll">
-            <table className="workbench-table batch-table">
+            <table className="workbench-table batch-table batch-table-readability">
               <thead>
                 <tr>
                   <th>批次</th>
@@ -231,7 +255,7 @@ export function BatchesPage({
               <tbody>
                 {data.rows.map((row) => (
                   <tr key={row.id} className={row.id === knownLatest.current ? "latest-row" : ""}>
-                    <td><strong>#{row.id}</strong></td>
+                    <td className="numeric"><strong>#{row.id}</strong></td>
                     <td className="numeric">{formatDate(row.start_time)}</td>
                     <td><StatusBadge>{row.source_platform || "unknown"}</StatusBadge></td>
                     <td><StatusBadge tone={row.status === "completed" ? "success" : row.status === "partial" ? "warning" : "muted"}>{renderBatchStatus(row.status)}</StatusBadge></td>
@@ -242,7 +266,7 @@ export function BatchesPage({
                     <td>{row.total_failed}</td>
                     <td>
                       <div className="row-actions">
-                        <button className="secondary-button" onClick={() => setSelected(row)}>查看候选人</button>
+                        <button className="secondary-button" onClick={() => { setOpenedFromInitialBatch(false); setSelected(row); }}>查看候选人</button>
                         <button
                           className="secondary-button"
                           onClick={() => void exportBatchMarkdown(row.id)}
@@ -283,9 +307,13 @@ function BatchDetail({
   const [page, setPage] = useState(1);
   const [refresh, setRefresh] = useState(0);
   const [data, setData] = useState(emptyCandidates);
-  const [snapshot, setSnapshot] = useState<BatchCandidateRow | null>(null);
+  const [snapshotIndex, setSnapshotIndex] = useState<number | null>(null);
   const [exporting, setExporting] = useState(false);
   const latest = useRef(0);
+
+  useEffect(() => {
+    setSnapshotIndex(null);
+  }, [batch.id, page]);
 
   useEffect(() => {
     const id = ++latest.current;
@@ -305,7 +333,7 @@ function BatchDetail({
       });
   }, [batch.id, page, refresh]);
 
-  const exportBatchMarkdown = useCallback(async () => {
+  const exportBatch = useCallback(async () => {
     if (exporting) return;
     setExporting(true);
     try {
@@ -316,6 +344,8 @@ function BatchDetail({
       setExporting(false);
     }
   }, [batch.id, exporting, onExportError]);
+
+  const snapshot = snapshotIndex !== null ? data.rows[snapshotIndex] ?? null : null;
 
   return (
     <div className="page-content page-enter">
@@ -328,7 +358,7 @@ function BatchDetail({
         </div>
         <div className="detail-actions">
           <RefreshButton onClick={() => setRefresh((value) => value + 1)} label="刷新批次候选人" />
-          <button className="primary-button" onClick={() => void exportBatchMarkdown()} disabled={exporting}>
+          <button className="primary-button" onClick={() => void exportBatch()} disabled={exporting}>
             <Download size={15} />
             {exporting ? "导出中…" : "导出 Markdown"}
           </button>
@@ -345,7 +375,7 @@ function BatchDetail({
         <TableState loading={data.loading} error={data.error} empty={!data.rows.length} />
         {!data.loading && !data.error && data.rows.length > 0 && (
           <div className="table-scroll">
-            <table className="workbench-table">
+            <table className="workbench-table batch-candidate-table">
               <thead>
                 <tr>
                   <th>候选人</th>
@@ -357,14 +387,20 @@ function BatchDetail({
                 </tr>
               </thead>
               <tbody>
-                {data.rows.map((row) => (
+                {data.rows.map((row, index) => (
                   <tr key={row.id}>
-                    <td><strong className="primary-cell">{row.name || `候选人 #${row.candidate_id}`}</strong></td>
-                    <td className="text-cell">{row.job_title || "未提供"}</td>
+                    <td>
+                      <strong className="primary-cell">{row.name || `候选人 #${row.candidate_id}`}</strong>
+                    </td>
+                    <td className="text-cell">
+                      <span className="line-clamp-2" title={row.job_title || "未提供"}>
+                        {row.job_title || "未提供"}
+                      </span>
+                    </td>
                     <td><StatusBadge tone={row.ingest_status === "updated" ? "info" : "success"}>{row.ingest_status === "updated" ? "更新" : "新增"}</StatusBadge></td>
                     <td><StatusBadge tone={batch.role_id !== null ? "success" : "muted"}>{batch.role_id !== null ? `岗位档案 #${batch.role_id}` : "未提供正式岗位"}</StatusBadge></td>
                     <td className="numeric">{formatDate(row.capture_time)}</td>
-                    <td><button className="secondary-button" onClick={() => setSnapshot(row)}>查看原始快照</button></td>
+                    <td><button className="secondary-button" onClick={() => setSnapshotIndex(index)}>查看原始快照</button></td>
                   </tr>
                 ))}
               </tbody>
@@ -380,18 +416,34 @@ function BatchDetail({
         onNext={() => setPage((value) => value + 1)}
       />
       {snapshot && (
-        <div className="drawer-backdrop" onClick={() => setSnapshot(null)}>
-          <aside className="snapshot-drawer" aria-label="原始快照" onClick={(event) => event.stopPropagation()}>
-            <header>
-              <div>
-                <p className="eyebrow">不可变批次快照</p>
-                <h2>{snapshot.name || `候选人 #${snapshot.candidate_id}`}</h2>
-              </div>
-              <button className="icon-button" onClick={() => setSnapshot(null)} aria-label="关闭原始快照"><X size={17} /></button>
-            </header>
-            <pre>{snapshot.raw_card_text || "未保存原始快照"}</pre>
-          </aside>
-        </div>
+        <Drawer label="原始快照" className="drawer-panel snapshot-reader-drawer" onClose={() => setSnapshotIndex(null)}>
+          <header className="drawer-header">
+            <div>
+              <p className="eyebrow">不可变批次快照</p>
+              <h2>{snapshot.name || `候选人 #${snapshot.candidate_id}`}</h2>
+              <p>
+                <span className="numeric">{snapshotIndex! + 1} / {data.rows.length}</span>
+                {" · "}
+                {snapshot.job_title || "未提供"}
+                {" · "}
+                {formatDate(snapshot.capture_time)}
+              </p>
+            </div>
+            <button className="icon-button" onClick={() => setSnapshotIndex(null)} aria-label="关闭原始快照"><X size={17} /></button>
+          </header>
+          <div className="detail-chip-row">
+            <StatusBadge tone={snapshot.ingest_status === "updated" ? "info" : "success"}>{snapshot.ingest_status === "updated" ? "更新" : "新增"}</StatusBadge>
+          </div>
+          <SnapshotTextBlock text={snapshot.raw_card_text || ""} />
+          <div className="snapshot-pagination">
+            <button className="secondary-button" onClick={() => setSnapshotIndex((value) => value === null ? value : Math.max(0, value - 1))} disabled={snapshotIndex === 0}>
+              上一个
+            </button>
+            <button className="secondary-button" onClick={() => setSnapshotIndex((value) => value === null ? value : Math.min(data.rows.length - 1, value + 1))} disabled={snapshotIndex === data.rows.length - 1}>
+              下一个
+            </button>
+          </div>
+        </Drawer>
       )}
     </div>
   );
