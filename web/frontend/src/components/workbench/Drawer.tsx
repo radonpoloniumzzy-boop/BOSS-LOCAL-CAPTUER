@@ -4,6 +4,8 @@ let drawerIdSeed = 0;
 type DrawerEntry = {
   id: number;
   getPanel: () => HTMLElement | null;
+  getLastFocused: () => HTMLElement | null;
+  focusInside: (preferredTarget?: HTMLElement | null) => boolean;
   close: () => void;
 };
 
@@ -11,6 +13,8 @@ let drawerStack: DrawerEntry[] = [];
 let scrollLockCount = 0;
 let previousBodyOverflow = "";
 let listenerAttached = false;
+let isRestoringFocus = false;
+let queuedFocusRestore = 0;
 
 const FOCUSABLE_SELECTOR = [
   "a[href]",
@@ -44,6 +48,79 @@ function getFocusableElements(container: HTMLElement) {
     if (element.getAttribute("aria-hidden") === "true") return false;
     if (element.tabIndex < 0) return false;
     return true;
+  });
+}
+
+function focusWithinEntry(entry: DrawerEntry, preferredTarget?: HTMLElement | null) {
+  const panel = entry.getPanel();
+  if (!panel) return false;
+
+  const focusable = getFocusableElements(panel);
+  const lastFocused = entry.getLastFocused();
+  const target =
+    (preferredTarget && preferredTarget.isConnected && panel.contains(preferredTarget) ? preferredTarget : null) ||
+    (lastFocused && lastFocused.isConnected && panel.contains(lastFocused) ? lastFocused : null) ||
+    focusable[0] ||
+    panel;
+
+  if (document.activeElement === target) return true;
+  isRestoringFocus = true;
+  try {
+    target.focus();
+  } finally {
+    isRestoringFocus = false;
+  }
+  return document.activeElement === target;
+}
+
+function focusWithinTopDrawer(preferredTarget?: HTMLElement | null) {
+  const topEntry = topDrawerEntry();
+  if (!topEntry) return false;
+  return topEntry.focusInside(preferredTarget);
+}
+
+function focusExternalTarget(target: HTMLElement | null) {
+  if (!target || !target.isConnected) return false;
+  isRestoringFocus = true;
+  try {
+    target.focus();
+  } finally {
+    isRestoringFocus = false;
+  }
+  return document.activeElement === target;
+}
+
+function scheduleFocusRestore(preferredTarget?: HTMLElement | null) {
+  const topEntry = topDrawerEntry();
+  if (!topEntry) {
+    if (queuedFocusRestore) {
+      window.cancelAnimationFrame(queuedFocusRestore);
+      queuedFocusRestore = 0;
+    }
+    focusExternalTarget(preferredTarget ?? null);
+    return;
+  }
+
+  if (queuedFocusRestore) {
+    window.cancelAnimationFrame(queuedFocusRestore);
+  }
+  queuedFocusRestore = window.requestAnimationFrame(() => {
+    queuedFocusRestore = 0;
+    const currentTopEntry = topDrawerEntry();
+    if (!currentTopEntry) {
+      focusExternalTarget(preferredTarget ?? null);
+      return;
+    }
+
+    const panel = currentTopEntry.getPanel();
+    if (!panel) return;
+
+    if (preferredTarget && preferredTarget.isConnected && panel.contains(preferredTarget)) {
+      currentTopEntry.focusInside(preferredTarget);
+      return;
+    }
+
+    currentTopEntry.focusInside();
   });
 }
 
@@ -101,15 +178,28 @@ function handleDocumentKeyDown(event: KeyboardEvent) {
   }
 }
 
+function handleDocumentFocusIn(event: FocusEvent) {
+  if (isRestoringFocus) return;
+  const topEntry = topDrawerEntry();
+  const panel = topEntry?.getPanel() ?? null;
+  const target = event.target instanceof HTMLElement ? event.target : null;
+  if (!topEntry || !panel || !target) return;
+  if (panel.contains(target)) return;
+
+  focusWithinTopDrawer();
+}
+
 function ensureGlobalListener() {
   if (listenerAttached) return;
   document.addEventListener("keydown", handleDocumentKeyDown);
+  document.addEventListener("focusin", handleDocumentFocusIn);
   listenerAttached = true;
 }
 
 function cleanupGlobalListener() {
   if (!listenerAttached || drawerStack.length > 0) return;
   document.removeEventListener("keydown", handleDocumentKeyDown);
+  document.removeEventListener("focusin", handleDocumentFocusIn);
   listenerAttached = false;
 }
 
@@ -123,11 +213,15 @@ export function Drawer({
   className?: string;
   onClose: () => void;
 }>) {
-  const drawerId = useRef(++drawerIdSeed);
+  const drawerId = useRef<number | null>(null);
   const panelRef = useRef<HTMLElement | null>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
   const lastFocusedWithinRef = useRef<HTMLElement | null>(null);
   const onCloseRef = useRef(onClose);
+
+  if (drawerId.current === null) {
+    drawerId.current = ++drawerIdSeed;
+  }
 
   onCloseRef.current = onClose;
 
@@ -161,30 +255,29 @@ export function Drawer({
 
   useEffect(() => {
     returnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const currentDrawerId = drawerId.current!;
     pushDrawer({
-      id: drawerId.current,
+      id: currentDrawerId,
       getPanel: () => panelRef.current,
+      getLastFocused: () => lastFocusedWithinRef.current,
+      focusInside: (preferredTarget?: HTMLElement | null) => focusWithinEntry({
+        id: currentDrawerId,
+        getPanel: () => panelRef.current,
+        getLastFocused: () => lastFocusedWithinRef.current,
+        focusInside: () => false,
+        close: () => onCloseRef.current(),
+      }, preferredTarget),
       close: () => onCloseRef.current(),
     });
     lockBodyScroll();
     const focusFrame = window.requestAnimationFrame(() => {
-      const panel = panelRef.current;
-      if (!panel) return;
-      const [firstFocusable] = getFocusableElements(panel);
-      (firstFocusable || panel).focus();
+      focusWithinTopDrawer();
     });
     return () => {
       window.cancelAnimationFrame(focusFrame);
-      removeDrawer(drawerId.current);
+      removeDrawer(currentDrawerId);
       unlockBodyScroll();
-      const target = returnFocusRef.current;
-      if (target && target.isConnected) {
-        window.requestAnimationFrame(() => {
-          if (target.isConnected) {
-            target.focus();
-          }
-        });
-      }
+      scheduleFocusRestore(returnFocusRef.current);
     };
   }, []);
 

@@ -164,6 +164,158 @@ describe("drawer accessibility behavior", () => {
     expect(document.body.style.overflow).toBe("");
     stackView.unmount();
   });
+
+  it("returns focus to the lower drawer when a nested top drawer closes", async () => {
+    const user = userEvent.setup();
+    render(<DrawerHarness />);
+
+    await user.click(screen.getByRole("button", { name: "触发按钮" }));
+    const lowerTrigger = await screen.findByRole("button", { name: "第二个操作" });
+    await user.click(lowerTrigger);
+    expect(await screen.findByRole("dialog", { name: "次级抽屉" })).toBeInTheDocument();
+
+    await user.keyboard("{Escape}");
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "次级抽屉" })).not.toBeInTheDocument();
+    });
+
+    const lowerDialog = screen.getByRole("dialog", { name: "主抽屉" });
+    expect(document.body.style.overflow).toBe("hidden");
+    await waitFor(() => {
+      expect(lowerDialog.contains(document.activeElement)).toBe(true);
+    });
+    expect(lowerTrigger).toHaveFocus();
+
+    await user.tab();
+    expect(screen.getByRole("button", { name: "第一个操作" })).toHaveFocus();
+  });
+
+  it("keeps focus inside the top drawer when background code calls focus", async () => {
+    const user = userEvent.setup();
+    render(<DrawerHarness />);
+
+    await user.click(screen.getByRole("button", { name: "触发按钮" }));
+    await user.click(await screen.findByRole("button", { name: "第二个操作" }));
+    const topDialog = await screen.findByRole("dialog", { name: "次级抽屉" });
+    const backgroundButton = screen.getByRole("button", { name: "底层导航" });
+
+    act(() => {
+      backgroundButton.focus();
+    });
+
+    await waitFor(() => {
+      expect(topDialog.contains(document.activeElement)).toBe(true);
+    });
+    expect(backgroundButton).not.toHaveFocus();
+  });
+
+  it("does not let a closed drawer steal focus back from a newly opened drawer", async () => {
+    const user = userEvent.setup();
+    render(<DrawerHarness />);
+
+    const rootTrigger = screen.getByRole("button", { name: "触发按钮" });
+    await user.click(rootTrigger);
+    const nestedTrigger = await screen.findByRole("button", { name: "第二个操作" });
+    await user.click(nestedTrigger);
+
+    await user.keyboard("{Escape}");
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "次级抽屉" })).not.toBeInTheDocument();
+    });
+
+    await user.click(nestedTrigger);
+    const reopenedTopDialog = await screen.findByRole("dialog", { name: "次级抽屉" });
+    await waitFor(() => {
+      expect(reopenedTopDialog.contains(document.activeElement)).toBe(true);
+    });
+    expect(rootTrigger).not.toHaveFocus();
+  });
+
+  it("does not restore focus to a background trigger when a lower drawer is still open", async () => {
+    const user = userEvent.setup();
+    function BackgroundTriggerHarness() {
+      const [primaryOpen, setPrimaryOpen] = useState(false);
+      const [secondaryOpen, setSecondaryOpen] = useState(false);
+
+      return (
+        <div>
+          <button type="button" onClick={() => setPrimaryOpen(true)}>打开主抽屉</button>
+          <button type="button" onClick={() => setSecondaryOpen(true)}>从背景打开次级抽屉</button>
+          {primaryOpen && (
+            <Drawer label="主抽屉" className="drawer-panel detail-drawer-panel" onClose={() => setPrimaryOpen(false)}>
+              <button type="button">主抽屉按钮</button>
+            </Drawer>
+          )}
+          {secondaryOpen && (
+            <Drawer label="次级抽屉" className="drawer-panel snapshot-reader-drawer" onClose={() => setSecondaryOpen(false)}>
+              <button type="button">次级抽屉按钮</button>
+            </Drawer>
+          )}
+        </div>
+      );
+    }
+
+    render(<BackgroundTriggerHarness />);
+    await user.click(screen.getByRole("button", { name: "打开主抽屉" }));
+    const backgroundTrigger = screen.getByRole("button", { name: "从背景打开次级抽屉" });
+    await user.click(backgroundTrigger);
+    await screen.findByRole("dialog", { name: "次级抽屉" });
+
+    await user.keyboard("{Escape}");
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "次级抽屉" })).not.toBeInTheDocument();
+    });
+
+    const lowerDialog = screen.getByRole("dialog", { name: "主抽屉" });
+    await waitFor(() => {
+      expect(lowerDialog.contains(document.activeElement)).toBe(true);
+    });
+    expect(backgroundTrigger).not.toHaveFocus();
+  });
+
+  it("registers global listeners once and keeps them stable across rerenders", async () => {
+    const user = userEvent.setup();
+    const addListenerSpy = vi.spyOn(document, "addEventListener");
+    const removeListenerSpy = vi.spyOn(document, "removeEventListener");
+
+    let bumpTick: (() => void) | null = null;
+    function StableHarness() {
+      const [open, setOpen] = useState(false);
+      const [tick, setTick] = useState(0);
+      bumpTick = () => setTick((current) => current + 1);
+
+      return (
+        <div>
+          <button type="button" onClick={() => setOpen(true)}>触发按钮</button>
+          <span data-testid={`stable-tick-${tick}`}>{tick}</span>
+          {open && (
+            <Drawer label="稳定抽屉" className="drawer-panel detail-drawer-panel" onClose={() => setOpen(false)}>
+              <button type="button">抽屉按钮</button>
+            </Drawer>
+          )}
+        </div>
+      );
+    }
+
+    render(<StableHarness />);
+    await user.click(screen.getByRole("button", { name: "触发按钮" }));
+    await screen.findByRole("dialog", { name: "稳定抽屉" });
+    const keydownAddsAfterMount = addListenerSpy.mock.calls.filter(([type]) => type === "keydown").length;
+    const focusinAddsAfterMount = addListenerSpy.mock.calls.filter(([type]) => type === "focusin").length;
+
+    act(() => bumpTick?.());
+    act(() => bumpTick?.());
+    expect(screen.getByTestId("stable-tick-2")).toBeInTheDocument();
+    expect(addListenerSpy.mock.calls.filter(([type]) => type === "keydown")).toHaveLength(keydownAddsAfterMount);
+    expect(addListenerSpy.mock.calls.filter(([type]) => type === "focusin")).toHaveLength(focusinAddsAfterMount);
+
+    await user.keyboard("{Escape}");
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "稳定抽屉" })).not.toBeInTheDocument();
+    });
+    expect(removeListenerSpy.mock.calls.some(([type]) => type === "keydown")).toBe(true);
+    expect(removeListenerSpy.mock.calls.some(([type]) => type === "focusin")).toBe(true);
+  });
 });
 
 describe("workbench candidate intake views", () => {

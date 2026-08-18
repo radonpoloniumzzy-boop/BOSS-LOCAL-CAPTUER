@@ -279,7 +279,9 @@ describe("local workbench shell", () => {
       json: () => Promise.resolve(readyStatus),
     } as Response);
 
-    expect(await screen.findByRole("button", { name: "进入工作台" })).toBeEnabled();
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "进入工作台" })).toBeEnabled();
+    });
   });
 
   it("keeps entry disabled when the service name is wrong", async () => {
