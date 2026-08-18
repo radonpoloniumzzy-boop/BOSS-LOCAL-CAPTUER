@@ -502,6 +502,63 @@ class CandidateIntakeWebApiTest(unittest.TestCase):
         self.assertEqual(missing.status_code, 404)
         self.assertEqual(missing.json()["error"]["code"], "candidate_not_found")
 
+    def test_candidate_appearance_history_uses_lightweight_candidate_existence_check(self) -> None:
+        repo = self._repository()
+        created = self.client.post(
+            "/api/intake/candidates",
+            json={
+                "source_platform": "boss",
+                "source_job_title": "轻量历史",
+                "idempotency_key": "lightweight-appearance-check",
+                "candidates": [
+                    {
+                        "name": "Lightweight Candidate",
+                        "source_candidate_id": "boss-lightweight-1",
+                        "raw_card_text": "lightweight snapshot",
+                        "capture_time": "2026-08-18T10:00:00",
+                    }
+                ],
+            },
+            headers=self._headers(),
+        )
+        self.assertEqual(created.status_code, 200, created.text)
+
+        candidate_id = self.client.get("/api/candidates?page=1&page_size=20&keyword=Lightweight Candidate").json()["rows"][0]["id"]
+        with patch.object(repo, "get_candidate_detail", side_effect=AssertionError("history API should not use detail chain")):
+            appearances = self.client.get(f"/api/candidates/{candidate_id}/appearances")
+        self.assertEqual(appearances.status_code, 200, appearances.text)
+        self.assertEqual(len(appearances.json()["rows"]), 1)
+
+    def test_candidate_appearance_history_returns_empty_rows_for_existing_candidate_without_history(self) -> None:
+        repo = self._repository()
+        created = self.client.post(
+            "/api/intake/candidates",
+            json={
+                "source_platform": "boss",
+                "source_job_title": "空历史岗位",
+                "idempotency_key": "appearance-empty-history",
+                "candidates": [
+                    {
+                        "name": "No History Candidate",
+                        "source_candidate_id": "boss-no-history-1",
+                        "raw_card_text": "empty history snapshot",
+                        "capture_time": "2026-08-18T11:00:00",
+                    }
+                ],
+            },
+            headers=self._headers(),
+        )
+        self.assertEqual(created.status_code, 200, created.text)
+
+        candidate_id = self.client.get("/api/candidates?page=1&page_size=20&keyword=No History Candidate").json()["rows"][0]["id"]
+        repo.db.get_connection().execute("DELETE FROM capture_batch_items WHERE candidate_id = ?", (candidate_id,))
+        repo.db.get_connection().commit()
+
+        with patch.object(repo, "get_candidate_detail", side_effect=AssertionError("history API should not use detail chain")):
+            appearances = self.client.get(f"/api/candidates/{candidate_id}/appearances")
+        self.assertEqual(appearances.status_code, 200, appearances.text)
+        self.assertEqual(appearances.json()["rows"], [])
+
     def test_capture_batch_filters_support_status_failed_today_and_export_snapshot(self) -> None:
         repo = self._repository()
         with patch("storage.repository.now_iso", return_value="2026-08-18T09:30:00"):
@@ -602,6 +659,14 @@ class CandidateIntakeWebApiTest(unittest.TestCase):
         self.assertEqual(paged.json()["total"], 2)
         self.assertEqual(len(paged.json()["rows"]), 1)
 
+        with patch("storage.repository.now_iso", return_value="2026-08-18T09:30:00"):
+            bounded_combo = self.client.get(
+                "/api/capture-batches?page=1&page_size=1&today_only=true&source_platform=liepin&status=partial&failed_only=true"
+            )
+        self.assertEqual(bounded_combo.status_code, 200)
+        self.assertEqual(bounded_combo.json()["total"], 1)
+        self.assertEqual(len(bounded_combo.json()["rows"]), 1)
+
         export_target = batch_by_job["证券交易员"]
         repo.db.get_connection().execute(
             "UPDATE candidates SET name = 'Changed Later' WHERE candidate_key = ?",
@@ -616,6 +681,78 @@ class CandidateIntakeWebApiTest(unittest.TestCase):
         missing_batch = self.client.get("/api/capture-batches/999999")
         self.assertEqual(missing_batch.status_code, 404)
         self.assertEqual(missing_batch.json()["error"]["code"], "batch_not_found")
+
+    def test_capture_batch_today_filter_uses_local_day_range_boundaries_and_index_friendly_sql(self) -> None:
+        repo = self._repository()
+        created_ids: dict[str, int] = {}
+        candidates = [
+            ("day-start", "2026-08-18T00:00:00", "day-start"),
+            ("day-end", "2026-08-18T23:59:59", "day-end"),
+            ("next-day", "2026-08-19T00:00:00", "next-day"),
+            ("prev-day", "2026-08-17T23:59:59", "prev-day"),
+        ]
+        for suffix, capture_time, name in candidates:
+            response = self.client.post(
+                "/api/intake/candidates",
+                json={
+                    "source_platform": "boss",
+                    "source_job_title": name,
+                    "idempotency_key": f"today-boundary-{suffix}",
+                    "candidates": [
+                        {
+                            "name": name,
+                            "source_candidate_id": f"boss-today-{suffix}",
+                            "raw_card_text": f"{name} snapshot",
+                            "capture_time": capture_time,
+                        }
+                    ],
+                },
+                headers=self._headers(),
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            created_ids[name] = response.json()["batch_id"]
+        for _, capture_time, name in candidates:
+            repo.db.get_connection().execute(
+                "UPDATE capture_batches SET start_time = ? WHERE id = ?",
+                (capture_time, created_ids[name]),
+            )
+        repo.db.get_connection().commit()
+
+        trace_sql: list[str] = []
+        connection = repo.db.get_connection()
+        connection.set_trace_callback(trace_sql.append)
+        try:
+            with patch("storage.repository.now_iso", return_value="2026-08-18T00:30:00"):
+                today_only = self.client.get("/api/capture-batches?page=1&page_size=20&today_only=true")
+            with patch("storage.repository.now_iso", return_value="2026-08-18T00:30:00"):
+                repo.page_capture_batches(today_only=True, page=1, page_size=20)
+        finally:
+            connection.set_trace_callback(None)
+        self.assertEqual(today_only.status_code, 200, today_only.text)
+        self.assertEqual(
+            {row["job_title"] for row in today_only.json()["rows"]},
+            {"day-start", "day-end"},
+        )
+        self.assertEqual(today_only.json()["today_summary"]["batch_count"], 2)
+        self.assertTrue(any("start_time >=" in sql and "start_time <" in sql for sql in trace_sql))
+        self.assertFalse(any("substr(start_time" in sql.lower() for sql in trace_sql))
+
+        day_start = "2026-08-18T00:00:00"
+        next_day_start = "2026-08-19T00:00:00"
+        plan_rows = connection.execute(
+            """
+            EXPLAIN QUERY PLAN
+            SELECT *
+            FROM capture_batches
+            WHERE source_platform = ? AND status = ? AND total_failed > 0 AND start_time >= ? AND start_time < ?
+            ORDER BY start_time DESC, id DESC
+            LIMIT ? OFFSET ?
+            """,
+            ("boss", "failed", day_start, next_day_start, 20, 0),
+        ).fetchall()
+        plan_details = " | ".join(str(row[3]) for row in plan_rows)
+        self.assertNotIn("substr", plan_details.lower())
+        self.assertRegex(plan_details, r"idx_capture_batches_(platform_start|start_time)")
 
 
 if __name__ == "__main__":

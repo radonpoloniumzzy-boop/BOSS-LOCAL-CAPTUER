@@ -382,8 +382,7 @@ def create_web_app(
     def list_candidate_appearances(candidate_id: int) -> dict[str, object]:
         if runtime.repository is None:
             raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。")
-        detail = runtime.repository.get_candidate_detail(candidate_id)
-        if detail is None:
+        if not runtime.repository.candidate_exists(candidate_id):
             raise ApiError(404, "candidate_not_found", "候选人不存在。")
         rows = runtime.repository.list_candidate_appearances(candidate_id)
         return {"rows": [_project_candidate_appearance(row) for row in rows]}

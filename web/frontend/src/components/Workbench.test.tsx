@@ -2,6 +2,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import * as apiModule from "../api";
 import { Workbench } from "./Workbench";
 
 type Deferred = {
@@ -1024,5 +1025,62 @@ describe("workbench candidate intake views", () => {
     expect(await screen.findByRole("heading", { name: "批次 #91" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "导出 Markdown" }));
     expect(await screen.findByRole("status")).toHaveTextContent("采集批次不存在。");
+  });
+
+  it("uses the shared markdown downloader from both batch list and batch detail", async () => {
+    const fetchMock = vi.fn((input: string | URL) => {
+      const url = String(input);
+      if (url.includes("/api/capture-batches?")) {
+        return response({
+          rows: [{
+            id: 120,
+            start_time: "2026-08-18T10:20:00",
+            source_platform: "boss",
+            total_collected: 1,
+            total_new: 1,
+            total_updated: 0,
+            total_skipped: 0,
+            total_failed: 0,
+            status: "completed",
+            role_id: null,
+          }],
+          total: 1,
+          page: 1,
+          page_size: 20,
+          today_summary: { received: 1, added: 1 },
+        });
+      }
+      if (url === "/api/capture-batches/121") {
+        return response({
+          id: 121,
+          start_time: "2026-08-18T10:40:00",
+          source_platform: "liepin",
+          total_collected: 1,
+          total_new: 1,
+          total_updated: 0,
+          total_skipped: 0,
+          total_failed: 0,
+          status: "completed",
+          role_id: null,
+        });
+      }
+      if (url.includes("/api/capture-batches/121/candidates")) {
+        return response({ rows: [], total: 0, page: 1, page_size: 50 });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const downloader = vi.spyOn(apiModule, "downloadBatchMarkdown").mockResolvedValue();
+    const user = userEvent.setup();
+
+    render(<Workbench status={status} />);
+    await user.click(screen.getByRole("button", { name: "最近批次" }));
+    await user.click(await screen.findByRole("button", { name: "导出 Markdown" }));
+    expect(downloader).toHaveBeenCalledWith(120);
+
+    await user.type(screen.getByLabelText("批次 ID 搜索"), "121");
+    await user.click(screen.getByRole("button", { name: "打开批次" }));
+    await user.click(await screen.findByRole("button", { name: "导出 Markdown" }));
+    expect(downloader).toHaveBeenCalledWith(121);
   });
 });

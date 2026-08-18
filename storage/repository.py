@@ -1519,6 +1519,13 @@ class CandidateRepository:
         ).fetchone()
         return dict(row) if row is not None else None
 
+    def candidate_exists(self, candidate_id: int) -> bool:
+        row = self.db.get_connection().execute(
+            "SELECT 1 FROM candidates WHERE id = ?",
+            (candidate_id,),
+        ).fetchone()
+        return row is not None
+
     def page_capture_batches(
         self,
         *,
@@ -1540,10 +1547,12 @@ class CandidateRepository:
             params.append(source_platform.strip())
         if failed_only:
             filters.append("total_failed > 0")
-        today = now_iso()[:10]
         if today_only:
-            filters.append("substr(start_time, 1, 10) = ?")
-            params.append(today)
+            day_start, next_day_start = self._current_local_day_bounds()
+            filters.append("start_time >= ?")
+            params.append(day_start)
+            filters.append("start_time < ?")
+            params.append(next_day_start)
         where_sql = f"WHERE {' AND '.join(filters)}" if filters else ""
         total = int(
             self.db.get_connection().execute(
@@ -1561,6 +1570,7 @@ class CandidateRepository:
             """,
             [*params, page_size, offset],
         ).fetchall()
+        today_start, tomorrow_start = self._current_local_day_bounds()
         summary_row = self.db.get_connection().execute(
             f"""
             SELECT
@@ -1568,9 +1578,9 @@ class CandidateRepository:
                 COALESCE(SUM(total_collected), 0) AS received,
                 COALESCE(SUM(total_new), 0) AS added
             FROM capture_batches
-            {where_sql}{' AND' if where_sql else ' WHERE'} substr(start_time, 1, 10) = ?
+            {where_sql}{' AND' if where_sql else ' WHERE'} start_time >= ? AND start_time < ?
             """,
-            [*params, today],
+            [*params, today_start, tomorrow_start],
         ).fetchone()
         return {
             "rows": [dict(row) for row in rows],
@@ -1596,6 +1606,15 @@ class CandidateRepository:
             (candidate_id,),
         ).fetchall()
         return [dict(row) for row in rows]
+
+    def _current_local_day_bounds(self) -> tuple[str, str]:
+        current = datetime.fromisoformat(now_iso())
+        day_start = current.replace(hour=0, minute=0, second=0, microsecond=0)
+        next_day_start = day_start + timedelta(days=1)
+        return (
+            day_start.isoformat(timespec="seconds"),
+            next_day_start.isoformat(timespec="seconds"),
+        )
 
     def page_capture_batch_candidates(
         self,

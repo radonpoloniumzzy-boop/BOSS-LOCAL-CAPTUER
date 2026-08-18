@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowLeft, Download, X } from "lucide-react";
-import { ApiRequestError, BatchCandidateRow, CaptureBatchRow, PagedResponse, requestJson } from "../../api";
+import { ApiRequestError, BatchCandidateRow, CaptureBatchRow, downloadBatchMarkdown, PagedResponse, requestJson } from "../../api";
 import { formatDate, Loadable, Pager, RefreshButton, StatusBadge, TableState } from "./common";
 
 const emptyBatches: Loadable<CaptureBatchRow> = { rows: [], total: 0, page: 1, page_size: 20, loading: false, error: "" };
@@ -68,25 +68,7 @@ export function BatchesPage({
     if (exportingBatchId !== null) return;
     setExportingBatchId(batchId);
     try {
-      const response = await fetch(`/api/capture-batches/${batchId}/export.md`);
-      if (!response.ok) {
-        let payload: { error?: { code?: string; message?: string } } = {};
-        try { payload = await response.json(); } catch { payload = {}; }
-        throw new ApiRequestError(payload.error?.code || "export_failed", payload.error?.message || "Markdown 导出失败，请稍后重试。");
-      }
-      const blob = await response.blob();
-      const objectUrl = URL.createObjectURL(blob);
-      try {
-        const disposition = response.headers.get("Content-Disposition") || "";
-        const match = disposition.match(/filename\*=UTF-8''([^;]+)/i);
-        const filename = match ? decodeURIComponent(match[1]) : `batch-${batchId}.md`;
-        const link = document.createElement("a");
-        link.href = objectUrl;
-        link.download = filename;
-        link.click();
-      } finally {
-        URL.revokeObjectURL(objectUrl);
-      }
+      await downloadBatchMarkdown(batchId);
     } catch (error: unknown) {
       const message = error instanceof ApiRequestError ? error.message : "Markdown 导出失败，请稍后重试。";
       showNotice(message);
@@ -327,25 +309,7 @@ function BatchDetail({
     if (exporting) return;
     setExporting(true);
     try {
-      const response = await fetch(`/api/capture-batches/${batch.id}/export.md`);
-      if (!response.ok) {
-        let payload: { error?: { code?: string; message?: string } } = {};
-        try { payload = await response.json(); } catch { payload = {}; }
-        throw new ApiRequestError(payload.error?.code || "export_failed", payload.error?.message || "Markdown 导出失败，请稍后重试。");
-      }
-      const blob = await response.blob();
-      const objectUrl = URL.createObjectURL(blob);
-      try {
-        const disposition = response.headers.get("Content-Disposition") || "";
-        const match = disposition.match(/filename\*=UTF-8''([^;]+)/i);
-        const filename = match ? decodeURIComponent(match[1]) : `batch-${batch.id}.md`;
-        const link = document.createElement("a");
-        link.href = objectUrl;
-        link.download = filename;
-        link.click();
-      } finally {
-        URL.revokeObjectURL(objectUrl);
-      }
+      await downloadBatchMarkdown(batch.id);
     } catch (error: unknown) {
       onExportError(error instanceof ApiRequestError ? error.message : "Markdown 导出失败，请稍后重试。");
     } finally {
