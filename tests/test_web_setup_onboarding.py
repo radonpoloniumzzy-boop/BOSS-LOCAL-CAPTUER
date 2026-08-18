@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -8,7 +11,14 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
-from setup_web_workbench import SetupFailure, build_context, is_supported_python_version, run_setup
+from setup_web_workbench import (
+    SetupFailure,
+    build_context,
+    default_runner,
+    is_supported_python_version,
+    run_checked,
+    run_setup,
+)
 
 
 class SetupWorkbenchTest(unittest.TestCase):
@@ -49,19 +59,22 @@ class SetupWorkbenchTest(unittest.TestCase):
         fail_command: tuple[str, ...] | None = None,
         create_venv: bool = True,
         version_output: str = "cpython|3|12",
-        rename_on_create_failure: bool = False,
         fail_with_partial_venv: bool = False,
+        create_pythonw: bool = True,
+        pythonw_returncode: int = 0,
     ):
         calls: list[dict[str, object]] = []
         context = build_context(self.root)
 
-        def run(command, cwd, capture_output):
+        def run(command, *, cwd, capture_output):
             command = list(command)
             calls.append({"command": command, "cwd": cwd, "capture_output": capture_output})
             if fail_command and tuple(command[: len(fail_command)]) == fail_command:
                 if fail_with_partial_venv and command[:4] == ["py", "-3.12", "-m", "venv"]:
                     context.venv_python.parent.mkdir(parents=True, exist_ok=True)
                     context.venv_python.write_text("", encoding="utf-8")
+                    if create_pythonw:
+                        context.venv_pythonw.write_text("", encoding="utf-8")
                 class Result:
                     returncode = 1
                     stdout = ""
@@ -71,10 +84,11 @@ class SetupWorkbenchTest(unittest.TestCase):
             if command[:4] == ["py", "-3.12", "-m", "venv"] and create_venv:
                 context.venv_python.parent.mkdir(parents=True, exist_ok=True)
                 context.venv_python.write_text("", encoding="utf-8")
-                context.venv_pythonw.write_text("", encoding="utf-8")
+                if create_pythonw:
+                    context.venv_pythonw.write_text("", encoding="utf-8")
             class Result:
-                returncode = 0
-                stdout = version_output if "-c" in command else ""
+                returncode = pythonw_returncode if command and command[0] == str(context.venv_pythonw) else 0
+                stdout = version_output if command and command[0] == str(context.venv_python) and "-c" in command else ""
                 stderr = ""
 
             return Result()
@@ -87,8 +101,32 @@ class SetupWorkbenchTest(unittest.TestCase):
 
     def test_run_setup_rejects_non_python_312_runtime(self) -> None:
         with self.assertRaises(SetupFailure) as caught:
-            run_setup(self.root, version_info=(3, 11, 9), runner=lambda _command: None)
+            run_setup(
+                self.root,
+                version_info=(3, 11, 9),
+                runner=lambda _command, *, cwd, capture_output: None,
+            )
         self.assertEqual(caught.exception.code, "python_312_required")
+
+    def test_default_runner_executes_real_command_with_captured_output(self) -> None:
+        completed = default_runner(
+            [sys.executable, "-c", "print('runner-ok')"],
+            cwd=self.root,
+            capture_output=True,
+        )
+        self.assertEqual(completed.returncode, 0)
+        self.assertEqual((completed.stdout or "").strip(), "runner-ok")
+
+    def test_run_checked_uses_real_runner_contract_without_override(self) -> None:
+        completed = run_checked(
+            [sys.executable, "-c", "print('checked-ok')"],
+            cwd=self.root,
+            code="unexpected",
+            message="should not fail",
+            capture_output=True,
+        )
+        self.assertEqual(completed.returncode, 0)
+        self.assertEqual((completed.stdout or "").strip(), "checked-ok")
 
     def test_creates_missing_venv_with_py312_command(self) -> None:
         calls, runner = self._runner()
@@ -130,6 +168,7 @@ class SetupWorkbenchTest(unittest.TestCase):
         self.assertEqual(caught.exception.code, "venv_invalid")
         self.assertTrue(context.venv_dir.exists())
         self.assertFalse(any(entry["command"][:4] == ["py", "-3.12", "-m", "venv"] for entry in calls))
+        self.assertFalse(any(entry["command"][0:3] == [str(context.venv_python), "-m", "pip"] for entry in calls))
 
     def test_dependency_install_failure_returns_stable_error(self) -> None:
         calls, runner = self._runner(
@@ -160,6 +199,26 @@ class SetupWorkbenchTest(unittest.TestCase):
         run_setup(self.root, version_info=(3, 12, 0), runner=retry_runner)
         self.assertTrue((self.root / ".venv").exists())
 
+    def test_new_venv_missing_pythonw_is_preserved_as_backup_and_skips_pip(self) -> None:
+        calls, runner = self._runner(create_pythonw=False)
+        with self.assertRaises(SetupFailure) as caught:
+            run_setup(self.root, version_info=(3, 12, 0), runner=runner)
+        self.assertEqual(caught.exception.code, "venv_create_failed")
+        self.assertFalse((self.root / ".venv").exists())
+        backups = list(self.root.glob(".venv.incomplete-*"))
+        self.assertEqual(len(backups), 1)
+        self.assertFalse(any(entry["command"][0:3] == [str((self.root / ".venv" / "Scripts" / "python.exe").resolve()), "-m", "pip"] for entry in calls))
+
+    def test_new_venv_invalid_python_version_is_preserved_as_backup_and_skips_pip(self) -> None:
+        calls, runner = self._runner(version_output="cpython|3|11")
+        with self.assertRaises(SetupFailure) as caught:
+            run_setup(self.root, version_info=(3, 12, 0), runner=runner)
+        self.assertEqual(caught.exception.code, "venv_create_failed")
+        self.assertFalse((self.root / ".venv").exists())
+        backups = list(self.root.glob(".venv.incomplete-*"))
+        self.assertEqual(len(backups), 1)
+        self.assertFalse(any(entry["command"][0:3] == [str((self.root / ".venv" / "Scripts" / "python.exe").resolve()), "-m", "pip"] for entry in calls))
+
     def test_existing_incomplete_venv_is_not_recreated(self) -> None:
         context = build_context(self.root)
         context.venv_dir.mkdir(parents=True, exist_ok=True)
@@ -169,6 +228,20 @@ class SetupWorkbenchTest(unittest.TestCase):
         self.assertEqual(caught.exception.code, "venv_incomplete")
         self.assertFalse(any(entry["command"][:4] == ["py", "-3.12", "-m", "venv"] for entry in calls))
         self.assertIn("仅将当前项目目录里的 .venv 重命名为备份目录", str(caught.exception))
+
+    def test_pythonw_validation_nonzero_fails_without_install(self) -> None:
+        calls, runner = self._runner(create_venv=False, pythonw_returncode=1)
+        context = build_context(self.root)
+        context.venv_python.parent.mkdir(parents=True, exist_ok=True)
+        context.venv_python.write_text("", encoding="utf-8")
+        context.venv_pythonw.write_text("", encoding="utf-8")
+        with self.assertRaises(SetupFailure) as caught:
+            run_setup(self.root, version_info=(3, 12, 0), runner=runner)
+        self.assertEqual(caught.exception.code, "venv_invalid")
+        pythonw_calls = [entry for entry in calls if entry["command"] and entry["command"][0] == str(context.venv_pythonw)]
+        self.assertEqual(len(pythonw_calls), 1)
+        self.assertFalse(pythonw_calls[0]["capture_output"])
+        self.assertFalse(any(entry["command"][0:3] == [str(context.venv_python), "-m", "pip"] for entry in calls))
 
     def test_run_setup_prints_visible_progress_and_keeps_success_paths_clean(self) -> None:
         calls, runner = self._runner()
@@ -182,6 +255,24 @@ class SetupWorkbenchTest(unittest.TestCase):
         self.assertIn("正在检查网页资源和插件文件", output)
         venv_call = next(entry for entry in calls if entry["command"][:4] == ["py", "-3.12", "-m", "venv"])
         self.assertFalse(venv_call["capture_output"])
+
+    def test_requirements_missing_real_run_setup_failure_does_not_create_bootstrap_or_db(self) -> None:
+        context = build_context(self.root)
+        context.venv_python.parent.mkdir(parents=True, exist_ok=True)
+        context.venv_python.write_text("", encoding="utf-8")
+        context.venv_pythonw.write_text("", encoding="utf-8")
+        (self.root / "requirements.txt").unlink()
+        local_app_data = self.root / "localappdata"
+        local_app_data.mkdir()
+        calls, runner = self._runner(create_venv=False)
+        with patch.dict(os.environ, {"LOCALAPPDATA": str(local_app_data)}):
+            with self.assertRaises(SetupFailure) as caught:
+                run_setup(self.root, version_info=(3, 12, 0), runner=runner)
+        self.assertEqual(caught.exception.code, "requirements_missing")
+        self.assertFalse((local_app_data / "RecruitingTalentWorkbench" / "bootstrap.json").exists())
+        self.assertFalse((self.root / "boss_local_tool.db").exists())
+        self.assertFalse((self.root / "data" / "boss_local_tool.db").exists())
+        self.assertFalse(any(entry["command"][0:3] == [str(context.venv_python), "-m", "pip"] for entry in calls))
 
     def test_main_reports_stable_failure_code_without_creating_database_files(self) -> None:
         import setup_web_workbench
@@ -197,6 +288,17 @@ class SetupWorkbenchTest(unittest.TestCase):
         self.assertEqual(exit_code, 1)
         self.assertIn("requirements_missing", stderr.getvalue())
         self.assertFalse((self.root / "bootstrap.json").exists())
+        self.assertFalse((self.root / "data" / "boss_local_tool.db").exists())
+
+    def test_setup_success_does_not_create_bootstrap_or_db_under_temp_localappdata(self) -> None:
+        local_app_data = self.root / "localappdata-success"
+        local_app_data.mkdir()
+        calls, runner = self._runner()
+        with patch.dict(os.environ, {"LOCALAPPDATA": str(local_app_data)}):
+            message = run_setup(self.root, version_info=(3, 12, 0), runner=runner)
+        self.assertIn("初始化完成", message)
+        self.assertFalse((local_app_data / "RecruitingTalentWorkbench" / "bootstrap.json").exists())
+        self.assertFalse((self.root / "boss_local_tool.db").exists())
         self.assertFalse((self.root / "data" / "boss_local_tool.db").exists())
 
     def test_frontend_resource_missing_fails(self) -> None:

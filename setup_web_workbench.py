@@ -58,10 +58,13 @@ def default_runner(
     cwd: Path,
     capture_output: bool,
 ) -> subprocess.CompletedProcess[str]:
+    stdout = subprocess.PIPE if capture_output else None
+    stderr = subprocess.PIPE if capture_output else None
     return subprocess.run(
         list(command),
         cwd=str(cwd),
-        capture_output=capture_output,
+        stdout=stdout,
+        stderr=stderr,
         text=capture_output,
         check=False,
     )
@@ -78,7 +81,11 @@ def run_checked(
 ) -> subprocess.CompletedProcess[str]:
     invoke = runner or default_runner
     try:
-        completed = invoke(command, cwd, capture_output)
+        completed = invoke(
+            command,
+            cwd=cwd,
+            capture_output=capture_output,
+        )
     except OSError as exc:
         raise SetupFailure(code, message) from exc
     if completed.returncode != 0:
@@ -152,6 +159,29 @@ def _verify_cpython_312(
         )
 
 
+def _verify_pythonw_312(
+    context: SetupContext,
+    *,
+    runner: Callable[[Sequence[str], Path, bool], subprocess.CompletedProcess[str]] | None = None,
+) -> None:
+    run_checked(
+        [
+            str(context.venv_pythonw),
+            "-c",
+            (
+                "import sys; "
+                "raise SystemExit(0 if sys.implementation.name == 'cpython' and "
+                "sys.version_info[:2] == (3, 12) else 1)"
+            ),
+        ],
+        cwd=context.project_root,
+        runner=runner,
+        code="venv_invalid",
+        message=_existing_venv_recovery_message("pythonw.exe 无法作为官方 CPython 3.12 运行"),
+        capture_output=False,
+    )
+
+
 def validate_existing_venv(
     context: SetupContext,
     *,
@@ -168,6 +198,7 @@ def validate_existing_venv(
             _existing_venv_recovery_message("缺少 pythonw.exe"),
         )
     _verify_cpython_312(context, runner=runner)
+    _verify_pythonw_312(context, runner=runner)
 
 
 def ensure_venv(
@@ -176,23 +207,25 @@ def ensure_venv(
     runner: Callable[[Sequence[str], Path, bool], subprocess.CompletedProcess[str]] | None = None,
 ) -> None:
     venv_preexisting = context.venv_dir.exists()
-    if not venv_preexisting:
-        try:
-            run_checked(
-                ["py", "-3.12", "-m", "venv", str(context.venv_dir)],
-                cwd=context.project_root,
-                runner=runner,
-                code="venv_create_failed",
-                message="无法创建网页工作台运行环境，请确认官方 CPython 3.12 可用后重试。",
-                capture_output=False,
-            )
-        except SetupFailure as exc:
-            backup_dir = _preserve_incomplete_venv(context)
-            raise SetupFailure(
-                "venv_create_failed",
-                _created_venv_failure_message(str(exc), backup_dir),
-            ) from exc
-    validate_existing_venv(context, runner=runner)
+    if venv_preexisting:
+        validate_existing_venv(context, runner=runner)
+        return
+    try:
+        run_checked(
+            ["py", "-3.12", "-m", "venv", str(context.venv_dir)],
+            cwd=context.project_root,
+            runner=runner,
+            code="venv_create_failed",
+            message="无法创建网页工作台运行环境，请确认官方 CPython 3.12 可用后重试。",
+            capture_output=False,
+        )
+        validate_existing_venv(context, runner=runner)
+    except SetupFailure as exc:
+        backup_dir = _preserve_incomplete_venv(context)
+        raise SetupFailure(
+            "venv_create_failed",
+            _created_venv_failure_message(str(exc), backup_dir),
+        ) from exc
 
 
 def install_requirements(
