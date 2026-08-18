@@ -243,6 +243,67 @@ class SetupWorkbenchTest(unittest.TestCase):
         self.assertFalse(pythonw_calls[0]["capture_output"])
         self.assertFalse(any(entry["command"][0:3] == [str(context.venv_python), "-m", "pip"] for entry in calls))
 
+    def test_existing_venv_pythonw_oserror_fails_with_stable_protocol(self) -> None:
+        context = build_context(self.root)
+        context.venv_python.parent.mkdir(parents=True, exist_ok=True)
+        context.venv_python.write_text("", encoding="utf-8")
+        context.venv_pythonw.write_text("", encoding="utf-8")
+        local_app_data = self.root / "localappdata-pythonw-oserror"
+        local_app_data.mkdir()
+        calls: list[dict[str, object]] = []
+
+        def runner(command, *, cwd, capture_output):
+            command = list(command)
+            calls.append({"command": command, "cwd": cwd, "capture_output": capture_output})
+            if command and command[0] == str(context.venv_pythonw):
+                raise PermissionError("pythonw blocked")
+
+            class Result:
+                returncode = 0
+                stdout = "cpython|3|12" if command and command[0] == str(context.venv_python) and "-c" in command else ""
+                stderr = ""
+
+            return Result()
+
+        with patch.dict(os.environ, {"LOCALAPPDATA": str(local_app_data)}):
+            with self.assertRaises(SetupFailure) as caught:
+                run_setup(self.root, version_info=(3, 12, 0), runner=runner)
+        self.assertEqual(caught.exception.code, "venv_invalid")
+        self.assertTrue(context.venv_dir.exists())
+        self.assertTrue(context.venv_python.exists())
+        self.assertTrue(context.venv_pythonw.exists())
+        self.assertEqual(list(self.root.glob(".venv.incomplete-*")), [])
+        self.assertFalse(any(entry["command"][0:3] == [str(context.venv_python), "-m", "pip"] for entry in calls))
+        self.assertFalse((local_app_data / "RecruitingTalentWorkbench" / "bootstrap.json").exists())
+        self.assertFalse((self.root / "boss_local_tool.db").exists())
+        self.assertFalse((self.root / "data" / "boss_local_tool.db").exists())
+
+    def test_new_venv_failed_preserve_rename_keeps_original_directory_and_skips_pip(self) -> None:
+        calls, runner = self._runner(create_pythonw=False)
+        context = build_context(self.root)
+        local_app_data = self.root / "localappdata-rename-failure"
+        local_app_data.mkdir()
+        original_rename = Path.rename
+
+        def guarded_rename(path_self: Path, target):
+            if path_self == context.venv_dir:
+                raise OSError("rename denied")
+            return original_rename(path_self, target)
+
+        with patch.object(Path, "rename", autospec=True, side_effect=guarded_rename):
+            with patch.dict(os.environ, {"LOCALAPPDATA": str(local_app_data)}):
+                with self.assertRaises(SetupFailure) as caught:
+                    run_setup(self.root, version_info=(3, 12, 0), runner=runner)
+        self.assertEqual(caught.exception.code, "venv_create_failed")
+        self.assertTrue(context.venv_dir.exists())
+        self.assertTrue(context.venv_python.exists())
+        self.assertEqual(list(self.root.glob(".venv.incomplete-*")), [])
+        self.assertIn("手工将当前项目目录里的 .venv 重命名为备份目录后", str(caught.exception))
+        self.assertFalse(any(entry["command"][0:3] == [str(context.venv_python), "-m", "pip"] for entry in calls))
+        self.assertFalse((local_app_data / "RecruitingTalentWorkbench" / "bootstrap.json").exists())
+        self.assertFalse((self.root / "boss_local_tool.db").exists())
+        self.assertFalse((self.root / "data" / "boss_local_tool.db").exists())
+
     def test_run_setup_prints_visible_progress_and_keeps_success_paths_clean(self) -> None:
         calls, runner = self._runner()
         stdout = StringIO()
