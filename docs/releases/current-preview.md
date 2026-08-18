@@ -62,6 +62,7 @@
 - `today_only` 批次筛选在单次请求内共用同一本机业务日期边界。
 - Markdown 导出读取 `capture_batch_items` 不可变快照，后续主档变化不会污染旧批次导出。
 - 网页和插件 Web 模式共用 `/api/capture-batches/{batch_id}/export.md`。
+- Token、连接码和内部鉴权头不会作为用户可见信息暴露；候选人原始快照只在详情、批次阅读和导出场景按用户操作展示。
 - Drawer 使用真实模态语义，支持焦点陷阱、Escape 顶层关闭、focusin 守卫、背景滚动锁和隐藏页面清理。
 - `npm.cmd run qa:readability` 使用真实浏览器覆盖 `1920x1080`、`1440x900`、`1280x720`、`760x720`，并验证 reduced-motion 与 focus-visible。
 
