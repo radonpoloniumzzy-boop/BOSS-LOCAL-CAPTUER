@@ -754,6 +754,59 @@ class CandidateIntakeWebApiTest(unittest.TestCase):
         self.assertNotIn("substr", plan_details.lower())
         self.assertRegex(plan_details, r"idx_capture_batches_(platform_start|start_time)")
 
+    def test_capture_batch_today_filter_reuses_one_local_day_boundary_across_midnight(self) -> None:
+        repo = self._repository()
+        created_ids: dict[str, int] = {}
+        candidates = [
+            ("before-midnight", "2026-08-18T23:59:59", "before-midnight"),
+            ("midnight-next-day", "2026-08-19T00:00:00", "midnight-next-day"),
+        ]
+        for suffix, capture_time, name in candidates:
+            response = self.client.post(
+                "/api/intake/candidates",
+                json={
+                    "source_platform": "boss",
+                    "source_job_title": name,
+                    "idempotency_key": f"midnight-boundary-{suffix}",
+                    "candidates": [
+                        {
+                            "name": name,
+                            "source_candidate_id": f"boss-midnight-{suffix}",
+                            "raw_card_text": f"{name} snapshot",
+                            "capture_time": capture_time,
+                        }
+                    ],
+                },
+                headers=self._headers(),
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            created_ids[name] = response.json()["batch_id"]
+        for _, capture_time, name in candidates:
+            repo.db.get_connection().execute(
+                "UPDATE capture_batches SET start_time = ? WHERE id = ?",
+                (capture_time, created_ids[name]),
+            )
+        repo.db.get_connection().commit()
+
+        trace_sql: list[str] = []
+        connection = repo.db.get_connection()
+        connection.set_trace_callback(trace_sql.append)
+        try:
+            with patch("storage.repository.now_iso", side_effect=["2026-08-18T23:59:59", "2026-08-19T00:00:00"]) as mocked_now:
+                payload = repo.page_capture_batches(today_only=True, page=1, page_size=20)
+        finally:
+            connection.set_trace_callback(None)
+
+        self.assertEqual(mocked_now.call_count, 1)
+        self.assertEqual([row["job_title"] for row in payload["rows"]], ["before-midnight"])
+        self.assertEqual(payload["today_summary"]["batch_count"], 1)
+        self.assertEqual(payload["today_summary"]["received"], 1)
+        self.assertEqual(payload["today_summary"]["added"], 1)
+        self.assertTrue(any("2026-08-18T00:00:00" in sql and "2026-08-19T00:00:00" in sql for sql in trace_sql))
+        self.assertFalse(any("2026-08-20T00:00:00" in sql for sql in trace_sql))
+        self.assertTrue(any("start_time >=" in sql and "start_time <" in sql for sql in trace_sql))
+        self.assertFalse(any("substr(start_time" in sql.lower() for sql in trace_sql))
+
 
 if __name__ == "__main__":
     unittest.main()

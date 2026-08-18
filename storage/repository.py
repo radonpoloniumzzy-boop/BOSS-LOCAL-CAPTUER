@@ -1537,6 +1537,7 @@ class CandidateRepository:
         page_size: int = 20,
     ) -> dict[str, object]:
         page, page_size, offset = self._normalize_page(page, page_size)
+        day_start, next_day_start = self._current_local_day_bounds()
         filters: list[str] = []
         params: list[object] = []
         if status.strip():
@@ -1548,7 +1549,6 @@ class CandidateRepository:
         if failed_only:
             filters.append("total_failed > 0")
         if today_only:
-            day_start, next_day_start = self._current_local_day_bounds()
             filters.append("start_time >= ?")
             params.append(day_start)
             filters.append("start_time < ?")
@@ -1570,7 +1570,6 @@ class CandidateRepository:
             """,
             [*params, page_size, offset],
         ).fetchall()
-        today_start, tomorrow_start = self._current_local_day_bounds()
         summary_row = self.db.get_connection().execute(
             f"""
             SELECT
@@ -1580,7 +1579,7 @@ class CandidateRepository:
             FROM capture_batches
             {where_sql}{' AND' if where_sql else ' WHERE'} start_time >= ? AND start_time < ?
             """,
-            [*params, today_start, tomorrow_start],
+            [*params, day_start, next_day_start],
         ).fetchone()
         return {
             "rows": [dict(row) for row in rows],
