@@ -1,9 +1,16 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { Search, X } from "lucide-react";
-import { ApiRequestError, CandidateDetail, CandidateRow, PagedResponse, requestJson } from "../../api";
+import { ApiRequestError, CandidateAppearanceRow, CandidateDetail, CandidateRow, PagedResponse, requestJson } from "../../api";
 import { formatDate, Loadable, Pager, RefreshButton, StatusBadge, TableState } from "./common";
 
 const empty: Loadable<CandidateRow> = { rows: [], total: 0, page: 1, page_size: 100, loading: false, error: "" };
+const emptyAppearances: AppearanceLoadable = { rows: [], loading: false, error: "" };
+
+type AppearanceLoadable = {
+  rows: CandidateAppearanceRow[];
+  loading: boolean;
+  error: string;
+};
 
 export function CandidatesPage({ onOpenBatch }: { onOpenBatch: (batchId: number) => void }) {
   const [keywordInput, setKeywordInput] = useState("");
@@ -18,8 +25,11 @@ export function CandidatesPage({ onOpenBatch }: { onOpenBatch: (batchId: number)
   const [detail, setDetail] = useState<CandidateDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState("");
+  const [appearances, setAppearances] = useState<AppearanceLoadable>(emptyAppearances);
+  const [appearanceRefresh, setAppearanceRefresh] = useState(0);
   const latest = useRef(0);
   const latestDetail = useRef(0);
+  const latestAppearances = useRef(0);
 
   useEffect(() => setPage(1), [keyword, platform, sort, unbound]);
 
@@ -49,6 +59,8 @@ export function CandidatesPage({ onOpenBatch }: { onOpenBatch: (batchId: number)
       setDetail(null);
       setDetailError("");
       setDetailLoading(false);
+      setAppearances(emptyAppearances);
+      setAppearanceRefresh(0);
       return;
     }
     const requestId = ++latestDetail.current;
@@ -68,6 +80,27 @@ export function CandidatesPage({ onOpenBatch }: { onOpenBatch: (batchId: number)
       }
     });
   }, [selectedId]);
+
+  useEffect(() => {
+    if (selectedId === null) return;
+    const requestId = ++latestAppearances.current;
+    setAppearances((current) => ({ ...current, loading: true, error: "" }));
+    void requestJson<{ rows: CandidateAppearanceRow[] }>(`/api/candidates/${selectedId}/appearances`)
+      .then((payload) => {
+        if (latestAppearances.current === requestId) {
+          setAppearances({ rows: payload.rows, loading: false, error: "" });
+        }
+      })
+      .catch((error: unknown) => {
+        if (latestAppearances.current === requestId) {
+          setAppearances({
+            rows: [],
+            loading: false,
+            error: error instanceof ApiRequestError ? error.message : "来源出现历史加载失败。",
+          });
+        }
+      });
+  }, [selectedId, appearanceRefresh]);
 
   const openDetail = (candidateId: number) => setSelectedId(candidateId);
 
@@ -172,7 +205,9 @@ export function CandidatesPage({ onOpenBatch }: { onOpenBatch: (batchId: number)
           detail={detail}
           loading={detailLoading}
           error={detailError}
+          appearances={appearances}
           onClose={() => setSelectedId(null)}
+          onRetryAppearances={() => setAppearanceRefresh((value) => value + 1)}
           onOpenBatch={(batchId) => {
             setSelectedId(null);
             onOpenBatch(batchId);
@@ -187,13 +222,17 @@ function CandidateDetailDrawer({
   detail,
   loading,
   error,
+  appearances,
   onClose,
+  onRetryAppearances,
   onOpenBatch,
 }: {
   detail: CandidateDetail | null;
   loading: boolean;
   error: string;
+  appearances: AppearanceLoadable;
   onClose: () => void;
+  onRetryAppearances: () => void;
   onOpenBatch: (batchId: number) => void;
 }) {
   return (
@@ -237,6 +276,50 @@ function CandidateDetailDrawer({
             <section className="detail-section">
               <h3>原始卡片快照</h3>
               <pre>{detail.latest_raw_card_text || detail.raw_card_text || "未保存原始快照"}</pre>
+            </section>
+            <section className="detail-section">
+              <div className="detail-section-header">
+                <h3>来源出现历史</h3>
+                <RefreshButton onClick={onRetryAppearances} label="重新读取来源历史" />
+              </div>
+              {appearances.loading && <div className="table-state skeleton-state"><span />正在读取来源出现历史…</div>}
+              {!appearances.loading && appearances.error && (
+                <div className="table-state error-table-state">
+                  <p>{appearances.error}</p>
+                  <button className="secondary-button" onClick={onRetryAppearances}>重试</button>
+                </div>
+              )}
+              {!appearances.loading && !appearances.error && appearances.rows.length === 0 && (
+                <div className="table-state">还没有来源出现历史。</div>
+              )}
+              {!appearances.loading && !appearances.error && appearances.rows.length > 0 && (
+                <div className="table-scroll">
+                  <table className="workbench-table compact-table">
+                    <thead>
+                      <tr>
+                        <th>批次</th>
+                        <th>平台</th>
+                        <th>来源岗位</th>
+                        <th>采集时间</th>
+                        <th>结果</th>
+                        <th>操作</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {appearances.rows.map((row) => (
+                        <tr key={`${row.batch_id}-${row.capture_time}-${row.source_platform}`}>
+                          <td>#{row.batch_id}</td>
+                          <td><StatusBadge>{row.source_platform || "unknown"}</StatusBadge></td>
+                          <td className="text-cell">{row.source_job_title || "未提供"}</td>
+                          <td className="numeric">{formatDate(row.capture_time)}</td>
+                          <td><StatusBadge tone={row.ingest_status === "updated" ? "info" : "success"}>{row.ingest_status === "updated" ? "更新" : "新增"}</StatusBadge></td>
+                          <td><button className="secondary-button" onClick={() => onOpenBatch(row.batch_id)}>查看批次</button></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </section>
           </>
         )}

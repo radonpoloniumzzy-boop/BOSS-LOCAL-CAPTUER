@@ -1523,15 +1523,27 @@ class CandidateRepository:
         self,
         *,
         source_platform: str = "",
+        status: str = "",
+        failed_only: bool = False,
+        today_only: bool = False,
         page: int = 1,
         page_size: int = 20,
     ) -> dict[str, object]:
         page, page_size, offset = self._normalize_page(page, page_size)
         filters: list[str] = []
         params: list[object] = []
+        if status.strip():
+            filters.append("status = ?")
+            params.append(status.strip())
         if source_platform.strip():
             filters.append("source_platform = ?")
             params.append(source_platform.strip())
+        if failed_only:
+            filters.append("total_failed > 0")
+        today = now_iso()[:10]
+        if today_only:
+            filters.append("substr(start_time, 1, 10) = ?")
+            params.append(today)
         where_sql = f"WHERE {' AND '.join(filters)}" if filters else ""
         total = int(
             self.db.get_connection().execute(
@@ -1549,7 +1561,6 @@ class CandidateRepository:
             """,
             [*params, page_size, offset],
         ).fetchall()
-        today = now_iso()[:10]
         summary_row = self.db.get_connection().execute(
             f"""
             SELECT
@@ -1568,6 +1579,23 @@ class CandidateRepository:
             "page_size": page_size,
             "today_summary": dict(summary_row),
         }
+
+    def list_candidate_appearances(self, candidate_id: int) -> list[dict[str, object]]:
+        rows = self.db.get_connection().execute(
+            """
+            SELECT
+                bi.batch_id,
+                bi.source_platform,
+                bi.job_title AS source_job_title,
+                bi.capture_time,
+                bi.ingest_status
+            FROM capture_batch_items bi
+            WHERE bi.candidate_id = ?
+            ORDER BY bi.capture_time DESC, bi.batch_id DESC
+            """,
+            (candidate_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     def page_capture_batch_candidates(
         self,

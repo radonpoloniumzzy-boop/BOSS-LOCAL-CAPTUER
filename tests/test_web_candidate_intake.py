@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -44,6 +45,11 @@ class CandidateIntakeWebApiTest(unittest.TestCase):
             "Origin": origin,
             "X-Boss-Local-Token": self.token,
         }
+
+    def _repository(self) -> CandidateRepository:
+        runtime = self.app.state.runtime
+        assert runtime.repository is not None
+        return runtime.repository
 
     def test_candidate_intake_requires_token(self) -> None:
         response = self.client.post(
@@ -424,6 +430,192 @@ class CandidateIntakeWebApiTest(unittest.TestCase):
         response = self.client.get("/api/candidates/999999")
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.json()["error"]["code"], "candidate_not_found")
+
+    def test_candidate_appearance_history_uses_batch_snapshots_and_limited_fields(self) -> None:
+        first = self.client.post(
+            "/api/intake/candidates",
+            json={
+                "source_platform": "boss",
+                "source_job_title": "证券交易员",
+                "idempotency_key": "appearance-history-1",
+                "candidates": [
+                    {
+                        "name": "History Candidate",
+                        "source_candidate_id": "boss-history-1",
+                        "raw_card_text": "first snapshot",
+                        "capture_time": "2026-08-10T09:00:00",
+                    }
+                ],
+            },
+            headers=self._headers(),
+        )
+        second = self.client.post(
+            "/api/intake/candidates",
+            json={
+                "source_platform": "boss",
+                "source_job_title": "量化研究员",
+                "idempotency_key": "appearance-history-2",
+                "candidates": [
+                    {
+                        "name": "History Candidate Updated",
+                        "source_candidate_id": "boss-history-1",
+                        "raw_card_text": "second snapshot",
+                        "capture_time": "2026-08-11T10:30:00",
+                    }
+                ],
+            },
+            headers=self._headers(),
+        )
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(second.status_code, 200, second.text)
+
+        candidates = self.client.get("/api/candidates?page=1&page_size=100&keyword=History Candidate")
+        self.assertEqual(candidates.status_code, 200)
+        candidate_id = candidates.json()["rows"][0]["id"]
+
+        appearances = self.client.get(f"/api/candidates/{candidate_id}/appearances")
+        self.assertEqual(appearances.status_code, 200)
+        rows = appearances.json()["rows"]
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["source_job_title"], "量化研究员")
+        self.assertEqual(rows[1]["source_job_title"], "证券交易员")
+        self.assertEqual(
+            set(rows[0].keys()),
+            {"batch_id", "source_platform", "source_job_title", "capture_time", "ingest_status"},
+        )
+        for forbidden in (
+            "raw_card_text",
+            "name",
+            "source_url",
+            "detail_url",
+            "role_matches",
+            "status_events",
+            "evidence_json",
+            "gap_json",
+            "risk_json",
+            "recommended_action",
+            "human_decision",
+        ):
+            self.assertNotIn(forbidden, rows[0])
+
+        missing = self.client.get("/api/candidates/999999/appearances")
+        self.assertEqual(missing.status_code, 404)
+        self.assertEqual(missing.json()["error"]["code"], "candidate_not_found")
+
+    def test_capture_batch_filters_support_status_failed_today_and_export_snapshot(self) -> None:
+        repo = self._repository()
+        with patch("storage.repository.now_iso", return_value="2026-08-18T09:30:00"):
+            first = self.client.post(
+                "/api/intake/candidates",
+                json={
+                    "source_platform": "boss",
+                    "source_job_title": "证券交易员",
+                    "idempotency_key": "batch-filter-1",
+                    "candidates": [
+                        {
+                            "name": "Today Success",
+                            "source_candidate_id": "boss-batch-1",
+                            "raw_card_text": "today success snapshot",
+                            "capture_time": "2026-08-18T00:15:00",
+                        }
+                    ],
+                },
+                headers=self._headers(),
+            )
+            second = self.client.post(
+                "/api/intake/candidates",
+                json={
+                    "source_platform": "liepin",
+                    "source_job_title": "量化研究员",
+                    "idempotency_key": "batch-filter-2",
+                    "candidates": [
+                        {
+                            "name": "Today Partial",
+                            "source_candidate_id": "liepin-batch-2",
+                            "raw_card_text": "today partial snapshot",
+                            "capture_time": "2026-08-18T12:00:00",
+                        },
+                        {
+                            "name": "Broken",
+                            "source_candidate_id": "liepin-batch-3",
+                        },
+                    ],
+                },
+                headers=self._headers(),
+            )
+            third = self.client.post(
+                "/api/intake/candidates",
+                json={
+                    "source_platform": "boss",
+                    "source_job_title": "昨日批次",
+                    "idempotency_key": "batch-filter-3",
+                    "candidates": [
+                        {
+                            "name": "Yesterday Failed",
+                            "source_candidate_id": "boss-batch-4",
+                            "raw_card_text": "yesterday failed snapshot",
+                            "capture_time": "2026-08-17T23:50:00",
+                        }
+                    ],
+                },
+                headers=self._headers(),
+            )
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(second.status_code, 200, second.text)
+        self.assertEqual(third.status_code, 200, third.text)
+
+        batch_by_job = {
+            "证券交易员": first.json()["batch_id"],
+            "量化研究员": second.json()["batch_id"],
+            "昨日批次": third.json()["batch_id"],
+        }
+        repo.db.get_connection().execute(
+            "UPDATE capture_batches SET status = 'failed', total_failed = 1 WHERE id = ?",
+            (batch_by_job["昨日批次"],),
+        )
+        repo.db.get_connection().execute(
+            "UPDATE capture_batches SET start_time = '2026-08-17T23:50:00' WHERE id = ?",
+            (batch_by_job["昨日批次"],),
+        )
+        repo.db.get_connection().commit()
+
+        completed = self.client.get("/api/capture-batches?page=1&page_size=20&status=completed")
+        self.assertEqual(completed.status_code, 200)
+        self.assertEqual([row["job_title"] for row in completed.json()["rows"]], ["证券交易员"])
+
+        failed_only = self.client.get("/api/capture-batches?page=1&page_size=20&failed_only=true")
+        self.assertEqual(failed_only.status_code, 200)
+        self.assertEqual({row["job_title"] for row in failed_only.json()["rows"]}, {"量化研究员", "昨日批次"})
+
+        with patch("storage.repository.now_iso", return_value="2026-08-18T09:30:00"):
+            today_only = self.client.get("/api/capture-batches?page=1&page_size=20&today_only=true")
+        self.assertEqual(today_only.status_code, 200)
+        self.assertEqual({row["job_title"] for row in today_only.json()["rows"]}, {"证券交易员", "量化研究员"})
+
+        combo = self.client.get("/api/capture-batches?page=1&page_size=20&source_platform=liepin&status=partial")
+        self.assertEqual(combo.status_code, 200)
+        self.assertEqual(combo.json()["total"], 1)
+        self.assertEqual(combo.json()["rows"][0]["job_title"], "量化研究员")
+
+        paged = self.client.get("/api/capture-batches?page=1&page_size=1&failed_only=true")
+        self.assertEqual(paged.status_code, 200)
+        self.assertEqual(paged.json()["total"], 2)
+        self.assertEqual(len(paged.json()["rows"]), 1)
+
+        export_target = batch_by_job["证券交易员"]
+        repo.db.get_connection().execute(
+            "UPDATE candidates SET name = 'Changed Later' WHERE candidate_key = ?",
+            ("boss:boss-batch-1",),
+        )
+        repo.db.get_connection().commit()
+        exported = self.client.get(f"/api/capture-batches/{export_target}/export.md")
+        self.assertEqual(exported.status_code, 200, exported.text)
+        self.assertIn("Today Success", exported.text)
+        self.assertIn("today success snapshot", exported.text)
+
+        missing_batch = self.client.get("/api/capture-batches/999999")
+        self.assertEqual(missing_batch.status_code, 404)
+        self.assertEqual(missing_batch.json()["error"]["code"], "batch_not_found")
 
 
 if __name__ == "__main__":

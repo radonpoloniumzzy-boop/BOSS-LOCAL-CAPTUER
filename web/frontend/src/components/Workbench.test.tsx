@@ -48,7 +48,7 @@ describe("workbench candidate intake views", () => {
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
     const writeText = vi.spyOn(navigator.clipboard, "writeText");
-    render(<Workbench status={status} />);
+    const view = render(<Workbench status={status} />);
 
     await user.click(screen.getByRole("button", { name: "设置" }));
     await screen.findByText("等待插件配对");
@@ -97,8 +97,7 @@ describe("workbench candidate intake views", () => {
     window.dispatchEvent(new Event("focus"));
     expect(await screen.findByText("#161")).toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent("已接收新批次 #161");
-    const exportLink = screen.getByRole("link", { name: "导出 Markdown" });
-    expect(exportLink).toHaveAttribute("href", "/api/capture-batches/161/export.md");
+    expect(screen.getByRole("button", { name: "导出 Markdown" })).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledTimes(2);
     view.unmount();
     expect(clearTimeoutSpy).toHaveBeenCalled();
@@ -135,7 +134,7 @@ describe("workbench candidate intake views", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
-    render(<Workbench status={status} />);
+    const view = render(<Workbench status={status} />);
 
     await user.click(screen.getByRole("button", { name: "最近批次" }));
     await user.click(await screen.findByRole("button", { name: "查看候选人" }));
@@ -196,7 +195,7 @@ describe("workbench candidate intake views", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
-    render(<Workbench status={status} />);
+    const view = render(<Workbench status={status} />);
 
     await user.click(screen.getByRole("button", { name: "候选人" }));
     await user.click(await screen.findByRole("button", { name: "#7" }));
@@ -252,7 +251,7 @@ describe("workbench candidate intake views", () => {
       }),
     );
     const user = userEvent.setup();
-    render(<Workbench status={status} />);
+    const view = render(<Workbench status={status} />);
 
     await user.click(screen.getByRole("button", { name: "候选人" }));
     expect(await screen.findByText("Alice")).toBeInTheDocument();
@@ -522,6 +521,17 @@ describe("workbench candidate intake views", () => {
           batch_count: 2,
         });
       }
+      if (url === "/api/candidates/7/appearances") {
+        return response({
+          rows: [{
+            batch_id: 11,
+            source_platform: "liepin",
+            source_job_title: "量化研究员",
+            capture_time: "2026-08-11T10:30:00",
+            ingest_status: "updated",
+          }],
+        });
+      }
       if (url === "/api/capture-batches/11") {
         return response({
           id: 11,
@@ -555,7 +565,7 @@ describe("workbench candidate intake views", () => {
 
     await user.click(screen.getByRole("button", { name: "查看详情" }));
     const detailDrawer = await screen.findByRole("complementary", { name: "候选人详情" });
-    expect(within(detailDrawer).getByText("量化研究员")).toBeInTheDocument();
+    expect(within(detailDrawer).getAllByText("量化研究员").length).toBeGreaterThan(0);
     expect(screen.getByText("原始卡片关键词与快照")).toBeInTheDocument();
 
     await user.click(within(detailDrawer).getByRole("button", { name: "#11" }));
@@ -612,7 +622,407 @@ describe("workbench candidate intake views", () => {
     await user.type(screen.getByLabelText("批次 ID 搜索"), "24");
     await user.click(screen.getByRole("button", { name: "打开批次" }));
     expect(await screen.findByRole("heading", { name: "批次 #24" })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "导出 Markdown" })).toHaveAttribute("href", "/api/capture-batches/24/export.md");
+    expect(screen.getByRole("button", { name: "导出 Markdown" })).toBeInTheDocument();
     expect(screen.getByText("Archived Batch Candidate")).toBeInTheDocument();
+  });
+
+  it("shows candidate appearance history, handles retries, and ignores stale appearance responses", async () => {
+    const appearanceQueue: Record<number, Deferred> = {};
+    const fetchMock = vi.fn((input: string | URL) => {
+      const url = String(input);
+      if (url.includes("/api/candidates?")) {
+        return response({
+          rows: [
+            {
+              id: 1,
+              name: "Alice",
+              source_platform: "boss",
+              latest_source_platform: "boss",
+              latest_source_job_title: "证券交易员",
+              latest_batch_id: 41,
+              latest_capture_time: "2026-08-12T09:00:00",
+              latest_ingest_status: "new",
+              latest_batch_role_id: null,
+              has_role_binding: 0,
+              batch_count: 2,
+            },
+            {
+              id: 2,
+              name: "Bob",
+              source_platform: "liepin",
+              latest_source_platform: "liepin",
+              latest_source_job_title: "量化研究员",
+              latest_batch_id: 42,
+              latest_capture_time: "2026-08-12T10:00:00",
+              latest_ingest_status: "updated",
+              latest_batch_role_id: null,
+              has_role_binding: 0,
+              batch_count: 1,
+            },
+          ],
+          total: 2,
+          page: 1,
+          page_size: 100,
+        });
+      }
+      if (url === "/api/candidates/1") {
+        return response({
+          id: 1,
+          name: "Alice",
+          source_platform: "boss",
+          latest_source_platform: "boss",
+          latest_source_job_title: "证券交易员",
+          latest_batch_id: 41,
+          latest_capture_time: "2026-08-12T09:00:00",
+          latest_ingest_status: "new",
+          latest_batch_role_id: null,
+          has_role_binding: 0,
+          batch_count: 2,
+          job_title: "证券交易员",
+          source_url: "",
+          capture_time: "2026-08-12T09:00:00",
+          raw_card_text: "alice snapshot",
+          active_status: "",
+          expected_salary: "",
+          work_experience_text: "",
+          education_text: "",
+          tags_text: "",
+          summary_text: "",
+          detail_url: "",
+          latest_raw_card_text: "alice snapshot",
+          latest_source_url: "",
+          latest_detail_url: "",
+          city: "",
+          years_experience: null,
+          job_family: "",
+          job_track: "",
+        });
+      }
+      if (url === "/api/candidates/2") {
+        return response({
+          id: 2,
+          name: "Bob",
+          source_platform: "liepin",
+          latest_source_platform: "liepin",
+          latest_source_job_title: "量化研究员",
+          latest_batch_id: 42,
+          latest_capture_time: "2026-08-12T10:00:00",
+          latest_ingest_status: "updated",
+          latest_batch_role_id: null,
+          has_role_binding: 0,
+          batch_count: 1,
+          job_title: "量化研究员",
+          source_url: "",
+          capture_time: "2026-08-12T10:00:00",
+          raw_card_text: "bob snapshot",
+          active_status: "",
+          expected_salary: "",
+          work_experience_text: "",
+          education_text: "",
+          tags_text: "",
+          summary_text: "",
+          detail_url: "",
+          latest_raw_card_text: "bob snapshot",
+          latest_source_url: "",
+          latest_detail_url: "",
+          city: "",
+          years_experience: null,
+          job_family: "",
+          job_track: "",
+        });
+      }
+      if (url === "/api/candidates/1/appearances") {
+        return new Promise<Response>((resolve) => {
+          appearanceQueue[1] = { resolve };
+        });
+      }
+      if (url === "/api/candidates/2/appearances") {
+        return response({ rows: [] });
+      }
+      if (url === "/api/capture-batches/41") {
+        return response({
+          id: 41,
+          start_time: "2026-08-12T09:00:00",
+          source_platform: "boss",
+          total_collected: 1,
+          total_new: 1,
+          total_updated: 0,
+          total_skipped: 0,
+          total_failed: 0,
+          status: "completed",
+          role_id: null,
+        });
+      }
+      if (url.includes("/api/capture-batches/41/candidates")) {
+        return response({ rows: [], total: 0, page: 1, page_size: 50 });
+      }
+      if (url.includes("/api/capture-batches?")) {
+        return response({ rows: [], total: 0, page: 1, page_size: 20, today_summary: { received: 0, added: 0 } });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    const view = render(<Workbench status={status} />);
+
+    await user.click(screen.getByRole("button", { name: "候选人" }));
+    expect(await screen.findByText("Alice")).toBeInTheDocument();
+    const detailButtons = await screen.findAllByRole("button", { name: "查看详情" });
+    await user.click(detailButtons[0]);
+    const aliceDrawer = await screen.findByRole("complementary", { name: "候选人详情" });
+    expect(within(aliceDrawer).getByText("正在读取来源出现历史…")).toBeInTheDocument();
+
+    await user.click(detailButtons[1]);
+    const bobDrawer = await screen.findByRole("complementary", { name: "候选人详情" });
+    expect(within(bobDrawer).getByText("还没有来源出现历史。")).toBeInTheDocument();
+
+    appearanceQueue[1].resolve({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({
+        rows: [{
+          batch_id: 41,
+          source_platform: "boss",
+          source_job_title: "证券交易员",
+          capture_time: "2026-08-12T09:00:00",
+          ingest_status: "new",
+        }],
+      }),
+    } as Response);
+
+    await waitFor(() => {
+      expect(within(bobDrawer).queryByText("查看批次")).not.toBeInTheDocument();
+      expect(within(bobDrawer).getByText("还没有来源出现历史。")).toBeInTheDocument();
+    });
+
+    const retryMock = vi.fn((input: string | URL) => {
+      const url = String(input);
+      if (url.includes("/api/candidates?")) {
+        return response({
+          rows: [{
+            id: 3,
+            name: "Retry Candidate",
+            source_platform: "boss",
+            latest_source_platform: "boss",
+            latest_source_job_title: "重试岗位",
+            latest_batch_id: 50,
+            latest_capture_time: "2026-08-12T11:00:00",
+            latest_ingest_status: "new",
+            latest_batch_role_id: null,
+            has_role_binding: 0,
+            batch_count: 1,
+          }],
+          total: 1,
+          page: 1,
+          page_size: 100,
+        });
+      }
+      if (url === "/api/candidates/3") {
+        return response({
+          id: 3,
+          name: "Retry Candidate",
+          source_platform: "boss",
+          latest_source_platform: "boss",
+          latest_source_job_title: "重试岗位",
+          latest_batch_id: 50,
+          latest_capture_time: "2026-08-12T11:00:00",
+          latest_ingest_status: "new",
+          latest_batch_role_id: null,
+          has_role_binding: 0,
+          batch_count: 1,
+          job_title: "重试岗位",
+          source_url: "",
+          capture_time: "2026-08-12T11:00:00",
+          raw_card_text: "retry snapshot",
+          active_status: "",
+          expected_salary: "",
+          work_experience_text: "",
+          education_text: "",
+          tags_text: "",
+          summary_text: "",
+          detail_url: "",
+          latest_raw_card_text: "retry snapshot",
+          latest_source_url: "",
+          latest_detail_url: "",
+          city: "",
+          years_experience: null,
+          job_family: "",
+          job_track: "",
+        });
+      }
+      if (url === "/api/candidates/3/appearances") {
+        const count = retryMock.mock.calls.filter(([request]) => String(request) === "/api/candidates/3/appearances").length;
+        if (count === 1) {
+          return Promise.resolve({
+            ok: false,
+            status: 500,
+            json: () => Promise.resolve({ error: { code: "request_failed", message: "来源出现历史加载失败。" } }),
+          } as Response);
+        }
+        return response({ rows: [] });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    });
+    view.unmount();
+    vi.stubGlobal("fetch", retryMock);
+    render(<Workbench status={status} />);
+    await user.click(screen.getByRole("button", { name: "候选人" }));
+    await user.click(await screen.findByRole("button", { name: "查看详情" }));
+    const retryDrawer = await screen.findByRole("complementary", { name: "候选人详情" });
+    expect(await within(retryDrawer).findByText("来源出现历史加载失败。")).toBeInTheDocument();
+    await user.click(within(retryDrawer).getByRole("button", { name: "重试" }));
+    expect(await within(retryDrawer).findByText("还没有来源出现历史。")).toBeInTheDocument();
+  });
+
+  it("applies batch filters on the server and keeps them during refresh", async () => {
+    const batchUrls: string[] = [];
+    const fetchMock = vi.fn((input: string | URL) => {
+      const url = String(input);
+      if (url.includes("/api/capture-batches?")) {
+        batchUrls.push(url);
+        return response({
+          rows: [{
+            id: 88,
+            start_time: "2026-08-18T09:20:00",
+            source_platform: "boss",
+            total_collected: 2,
+            total_new: 1,
+            total_updated: 1,
+            total_skipped: 0,
+            total_failed: 1,
+            status: "failed",
+            role_id: null,
+            job_title: "失败批次",
+          }],
+          total: 25,
+          page: url.includes("page=2") ? 2 : 1,
+          page_size: 20,
+          today_summary: { received: 2, added: 1 },
+        });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    render(<Workbench status={status} />);
+
+    await user.click(screen.getByRole("button", { name: "最近批次" }));
+    await screen.findByText("#88");
+    await user.selectOptions(screen.getByLabelText("批次来源平台"), "boss");
+    await user.selectOptions(screen.getByLabelText("批次状态"), "failed");
+    await user.click(screen.getByLabelText("只看失败批次"));
+    await user.click(screen.getByLabelText("只看今天"));
+    await waitFor(() => {
+      const last = batchUrls.at(-1) || "";
+      expect(last).toContain("source_platform=boss");
+      expect(last).toContain("status=failed");
+      expect(last).toContain("failed_only=true");
+      expect(last).toContain("today_only=true");
+      expect(last).toContain("page=1");
+    });
+
+    await user.click(screen.getByRole("button", { name: "下一页" }));
+    await waitFor(() => expect(batchUrls.at(-1)).toContain("page=2"));
+
+    const callsBeforeRefresh = batchUrls.length;
+    await user.click(screen.getByRole("button", { name: "刷新" }));
+    await waitFor(() => expect(batchUrls.length).toBeGreaterThan(callsBeforeRefresh));
+    expect(batchUrls.at(-1)).toContain("page=2");
+    expect(batchUrls.at(-1)).toContain("status=failed");
+
+    const callsBeforeFocus = batchUrls.length;
+    window.dispatchEvent(new Event("focus"));
+    await waitFor(() => expect(batchUrls.length).toBeGreaterThan(callsBeforeFocus));
+    expect(batchUrls.at(-1)).toContain("page=2");
+    expect(batchUrls.at(-1)).toContain("today_only=true");
+  });
+
+  it("downloads markdown once per click, blocks duplicate export, and reports failures", async () => {
+    let resolveExport: ((value: Response) => void) | null = null;
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    const createObjectURL = vi.fn(() => "blob:markdown");
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal("URL", { ...URL, createObjectURL, revokeObjectURL });
+    const fetchMock = vi.fn((input: string | URL) => {
+      const url = String(input);
+      if (url.includes("/api/capture-batches?")) {
+        return response({
+          rows: [{
+            id: 90,
+            start_time: "2026-08-18T09:20:00",
+            source_platform: "boss",
+            total_collected: 1,
+            total_new: 1,
+            total_updated: 0,
+            total_skipped: 0,
+            total_failed: 0,
+            status: "completed",
+            role_id: null,
+          }],
+          total: 1,
+          page: 1,
+          page_size: 20,
+          today_summary: { received: 1, added: 1 },
+        });
+      }
+      if (url === "/api/capture-batches/90/export.md") {
+        return new Promise<Response>((resolve) => {
+          resolveExport = resolve;
+        });
+      }
+      if (url === "/api/capture-batches/91") {
+        return response({
+          id: 91,
+          start_time: "2026-08-18T09:30:00",
+          source_platform: "boss",
+          total_collected: 1,
+          total_new: 1,
+          total_updated: 0,
+          total_skipped: 0,
+          total_failed: 0,
+          status: "completed",
+          role_id: null,
+        });
+      }
+      if (url.includes("/api/capture-batches/91/candidates")) {
+        return response({ rows: [], total: 0, page: 1, page_size: 50 });
+      }
+      if (url === "/api/capture-batches/91/export.md") {
+        return Promise.resolve({
+          ok: false,
+          status: 404,
+          json: () => Promise.resolve({ error: { code: "batch_not_found", message: "采集批次不存在。" } }),
+        } as Response);
+      }
+      throw new Error(`unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    render(<Workbench status={status} />);
+
+    await user.click(screen.getByRole("button", { name: "最近批次" }));
+    const exportButton = await screen.findByRole("button", { name: "导出 Markdown" });
+    await user.click(exportButton);
+    await user.click(exportButton);
+    expect(fetchMock.mock.calls.filter(([url]) => String(url) === "/api/capture-batches/90/export.md")).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "导出中…" })).toBeDisabled();
+
+    expect(resolveExport).not.toBeNull();
+    resolveExport!({
+      ok: true,
+      status: 200,
+      blob: () => Promise.resolve(new Blob(["# markdown"])),
+      headers: new Headers({ "Content-Disposition": "attachment; filename*=UTF-8''batch-90.md" }),
+    } as Response);
+
+    await waitFor(() => expect(clickSpy).toHaveBeenCalled());
+    expect(createObjectURL).toHaveBeenCalled();
+    expect(revokeObjectURL).toHaveBeenCalled();
+
+    await user.type(screen.getByLabelText("批次 ID 搜索"), "91");
+    await user.click(screen.getByRole("button", { name: "打开批次" }));
+    expect(await screen.findByRole("heading", { name: "批次 #91" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "导出 Markdown" }));
+    expect(await screen.findByRole("status")).toHaveTextContent("采集批次不存在。");
   });
 });

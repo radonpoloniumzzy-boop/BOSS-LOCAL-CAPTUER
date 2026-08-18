@@ -95,6 +95,14 @@ _CANDIDATE_DETAIL_FIELDS = (
     "job_track",
 )
 
+_CANDIDATE_APPEARANCE_FIELDS = (
+    "batch_id",
+    "source_platform",
+    "source_job_title",
+    "capture_time",
+    "ingest_status",
+)
+
 
 def _project_candidate_list_row(row: dict[str, object]) -> dict[str, object]:
     return {field: row.get(field) for field in _CANDIDATE_LIST_FIELDS}
@@ -113,6 +121,10 @@ def _project_candidate_detail(detail: dict[str, object]) -> dict[str, object]:
             }
         )
     return {field: candidate.get(field) for field in _CANDIDATE_DETAIL_FIELDS}
+
+
+def _project_candidate_appearance(row: dict[str, object]) -> dict[str, object]:
+    return {field: row.get(field) for field in _CANDIDATE_APPEARANCE_FIELDS}
 
 
 def error_response(status_code: int, code: str, message: str) -> JSONResponse:
@@ -366,16 +378,32 @@ def create_web_app(
             raise ApiError(404, "candidate_not_found", "候选人不存在。")
         return _project_candidate_detail(detail)
 
+    @app.get("/api/candidates/{candidate_id}/appearances")
+    def list_candidate_appearances(candidate_id: int) -> dict[str, object]:
+        if runtime.repository is None:
+            raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。")
+        detail = runtime.repository.get_candidate_detail(candidate_id)
+        if detail is None:
+            raise ApiError(404, "candidate_not_found", "候选人不存在。")
+        rows = runtime.repository.list_candidate_appearances(candidate_id)
+        return {"rows": [_project_candidate_appearance(row) for row in rows]}
+
     @app.get("/api/capture-batches")
     def list_capture_batches(
         page: int = Query(default=1, ge=1),
         page_size: int = Query(default=20, ge=1, le=200),
         source_platform: str = "",
+        status: str = "",
+        failed_only: bool = False,
+        today_only: bool = False,
     ) -> dict[str, object]:
         if runtime.repository is None:
             raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。")
         return runtime.repository.page_capture_batches(
             source_platform=source_platform,
+            status=status,
+            failed_only=failed_only,
+            today_only=today_only,
             page=page,
             page_size=page_size,
         )

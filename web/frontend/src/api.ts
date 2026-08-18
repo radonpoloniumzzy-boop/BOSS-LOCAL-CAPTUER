@@ -59,6 +59,14 @@ export type CandidateDetail = CandidateRow & {
   batch_count: number;
 };
 
+export type CandidateAppearanceRow = {
+  batch_id: number;
+  source_platform: string;
+  source_job_title: string;
+  capture_time: string;
+  ingest_status: string;
+};
+
 export type CaptureBatchRow = {
   id: number;
   start_time: string;
