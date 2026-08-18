@@ -1,241 +1,168 @@
-# Recruiting Candidate Capture & AI Screen
+# 招聘人才工作台
 
-Windows local desktop tool for:
+当前默认主入口是网页工作台。
 
-- collecting candidate cards from Boss "Recommended Talent" and Liepin recommended pages
-- deduplicating and storing them in SQLite
-- exporting CSV
-- screening collected candidates with a JD or custom prompt
-- returning a compact UR / SSR / SR / R / N rating and one-line evidence-based persona
+如果你是第一次在新电脑上使用这个项目，推荐路径就是：
 
-Current V1 uses a Chrome extension for recruiting page collection. Boss blocks Playwright-controlled pages on this machine, so the app keeps Playwright only for the generic automation foundation and switches page collection to:
+下载 `main`
+→ 运行 `setup_web_workbench.cmd`
+→ 双击 `launch_web_workbench.cmd`
+→ 首次确认人才库目录
+→ 从网页“设置”复制一次性连接码
+→ Chrome 加载 `extension/`
+→ 插件配对
+→ 采集当前内容或自动滚动采集
+→ 网页查看候选人和批次
+→ 导出批次 Markdown
 
-`normal Chrome page + extension popup + local Python API`
+## 当前产品边界
 
-## Environment
+- 网页端是当前正式主入口。
+- Chrome 插件负责招聘平台页面采集。
+- 网页端负责本地入库、候选人列表、采集批次、连接和批次 Markdown 导出。
+- 岗位、Mapping、AI、人工复核、简历和沟通流程仍属于后续阶段。
+- 旧桌面端只保留兼容入口，不是新增功能主线。
 
-- Windows 10/11
-- Official CPython 3.12
-- Chrome or Chromium
-- PySide6
-- Playwright
-- SQLite
+## 新电脑快速开始
 
-Do not use an Anaconda-derived `venv` for this project. PySide6 often fails to load Qt DLLs in that setup.
+1. 安装官方 [CPython 3.12](https://www.python.org/downloads/windows/)。
+2. 获取当前 `main` 分支源码。
+3. 双击 `setup_web_workbench.cmd`。
+4. 初始化完成后，双击 `launch_web_workbench.cmd`。
+5. 首次打开时按提示确认人才库目录。
+6. 在网页“设置”页复制一次性连接码。
+7. 在 Chrome 的 `chrome://extensions` 中加载 `extension/` 目录。
+8. 在插件中粘贴连接码完成配对。
+9. 开始采集、查看候选人和批次，并导出 Markdown。
 
-## Install
+详细说明见：
 
-```powershell
-cd boss_local_tool
-py -3.12 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-python -m playwright install chromium
-```
+- [网页工作台快速开始](D:\codex\BOSS-LOCAL-CAPTURE-review\docs\guides\web-workbench-quick-start.md)
+- [备份与恢复](D:\codex\BOSS-LOCAL-CAPTURE-review\docs\guides\backup-and-recovery.md)
+- [当前预览版本说明](D:\codex\BOSS-LOCAL-CAPTURE-review\docs\releases\current-preview.md)
 
-## Run
+## 初始化与启动
 
-```powershell
-cd boss_local_tool
-.\.venv\Scripts\Activate.ps1
-python app.py
-```
+### 初始化
 
-You can also launch the app by double-clicking either:
-
-- `launch_boss_local_tool.vbs` in the project root
-- `Boss Local Capture Tool.lnk` on your Windows desktop
-
-### Local Web Workbench (Phase 1)
-
-The browser workbench foundation runs separately from the existing desktop UI:
-
-```powershell
-cd D:\codex\BOSS-LOCAL-CAPTURE-review
-cd web\frontend
-npm.cmd install
-npm.cmd run build
-cd ..\..
-.\.venv\Scripts\python.exe web_app.py
-```
-
-It opens `http://127.0.0.1:17864` after the health check succeeds. The first-run page confirms the data directory, then the home page reads real candidate and batch totals from the existing repository. The desktop program and web program cannot use the same database at the same time.
-
-Phase 1 does not move recruiting workflows into the browser. The Chrome extension still uses the desktop API on `127.0.0.1:17863`.
-
-First launch creates:
-
-- `data/config.json`
-- `data/boss_local_tool.db`
-- `data/browser_profile/`
-- `data/exports/`
-- `logs/app.log`
-
-## Collection Workflow
-
-1. Start the desktop app and keep it running.
-2. Open `Settings` and confirm the local API port, local API token, default export path, and target URL.
-3. Load the unpacked extension from `extension/` in Chrome.
-4. Open Boss or Liepin in a normal Chrome window and log in manually.
-5. Go to the recommended talent page, such as Boss recommended talent or `https://lpt.liepin.com/recommend`.
-6. Use the extension popup to:
-   - collect the current loaded cards, or
-   - auto-scroll and then collect
-7. The extension sends cards to the local app.
-8. The app deduplicates, writes to SQLite, and lets you export CSV.
-
-## Load The Extension
-
-1. Open Chrome and go to `chrome://extensions`.
-2. Turn on `Developer mode`.
-3. Click `Load unpacked`.
-4. Select:
+双击：
 
 ```text
-D:\codex\BOSS-LOCAL-CAPTURE-review\extension
+setup_web_workbench.cmd
 ```
 
-5. Pin the extension if you want easier access.
+它会：
 
-The extension popup lets you set:
+- 检查官方 CPython 3.12；
+- 在缺少 `.venv` 时创建本地虚拟环境；
+- 使用 `.venv\Scripts\python.exe` 安装 `requirements.txt`；
+- 验证网页前端产物、插件目录和启动文件是否完整。
 
-- job title
-- desktop pairing code copied from the desktop app `Settings` page
-- local API base and token, filled automatically after pairing
-- scroll mode
-- scroll step
-- wait milliseconds
-- max rounds
-- stop-after-no-new-rounds
+初始化过程不会：
 
-## UI Pages
+- 创建或修改人才库；
+- 写入 bootstrap；
+- 启动桌面端；
+- 覆盖已有配置；
+- 修改真实候选人数据；
+- 要求 Node/npm 作为最终用户启动依赖。
 
-- `Dashboard`: open browser, show status, show local API endpoint, export latest batch
-- `Job Center`: maintain one versioned source of truth for each hiring role
-- `Recruitment Tasks`: lock a job version, set platform targets and quotas, start the two-window workflow, and open recent exports
-- `Automation Flow`: choose a saved screening profile and automatically screen each newly collected batch
-- `Candidates`: search, filter, inspect details, export current result set
-- `Settings`: browser path, export path, selectors path, local API port, logging, scroll config
-- `AI Screen`: manage role JDs/prompts, choose candidate scope and AI model, run or stop screening, review result history
-- `Review`: V3 placeholder
+### 启动网页工作台
 
-## Automated Collection And Screening
-
-Recommended workflow: create a job in `Job Center`, create and start a task in `Recruitment Tasks`, then click `AUTO` once in the recruiting platform. The app links capture batches, AI runs, and exports to that task. The extension popup closes after the AUTO run finishes, exports can be opened inside the task page, and AI screening uses the configured API instead of a separate AI website.
-
-1. Create and save the target role in `AI Screen`, including its JD and screening prompt.
-2. Open `Automation Flow` and select that saved screening profile.
-3. Set the collection job title, recruiting page, AI provider, model, API key source, and optional candidate limit.
-4. Save the automation settings in the desktop app. The desktop app no longer opens the recruiting page for this workflow.
-5. Open the recruiting page yourself and click `AUTO: Scroll + Collect + AI Screen` in the Chrome extension.
-6. When the extension import finishes, the desktop app immediately screens that exact capture batch.
-7. Review the automation history and sort candidates by rating from UR to N or in reverse order.
-
-Automation API keys remain in process memory and are never written to `config.json`. Non-secret automation settings are persisted so ordinary collection can continue to trigger screening after the workflow is enabled.
-
-## AI Screening Workflow
-
-1. Collect candidates from Boss or Liepin first.
-2. Open `AI Screen` and enter the role name.
-3. Upload or paste the JD. Uploading a JD immediately creates an editable default screening prompt.
-4. Optionally upload your own prompt. The app appends a fixed compact JSON output contract.
-5. Select the collected role or batch to screen.
-6. Select `OpenAI`, `DeepSeek`, or a custom OpenAI-compatible endpoint, then choose or type a model name.
-7. Enter an API key, or configure its environment variable, and click `Test Connection`.
-8. Click `Start AI Screening`. Results are stored by run and sorted from UR to N.
-
-API keys entered in the AI page are kept only in process memory. They are not written to SQLite or `config.json`.
-
-AI ratings are assistive ranking signals and require human review. The app rejects prompts that use age, sex, marriage/childbearing, health/disability, photos, appearance, or image/temperament as automated employment screening criteria.
-
-## Local API
-
-The desktop app starts a local HTTP server for the extension:
-
-- `GET /health`
-- `GET /api/connection/check`
-- `POST /api/import/cards`
-- `GET /api/automation/status`
-- `POST /api/automation/start`
-
-Default endpoint:
+双击：
 
 ```text
-http://127.0.0.1:17863
+launch_web_workbench.cmd
 ```
 
-Use `Copy Extension Pairing Code` in `Settings`, paste it into the extension, and click `Apply Pairing Code And Test`. This fills the endpoint and token together and verifies authentication. All `/api/*` endpoints require the `X-Boss-Local-Token` header.
+启动器会显示真实检查步骤：
 
-## Project Structure
+- 读取本机配置
+- 检查运行环境
+- 检查网页资源
+- 检查端口和已有服务
+- 连接人才库
+- 确认数据库状态
+- 打开浏览器
+
+如果网页工作台已在运行，它会直接打开正确端口，不会启动第二个实例。
+
+如果看到“缺少网页工作台运行环境”，先运行 `setup_web_workbench.cmd`，不要改用系统 Python 直接启动 `web_app.py`。
+
+## Chrome 插件连接
+
+网页模式下不要求用户手工输入 API 地址或 Token。
+
+标准流程是：
+
+1. 打开网页工作台。
+2. 进入“设置”页。
+3. 点击复制一次性连接码。
+4. 在插件里粘贴。
+5. 配对成功后，插件会安全记忆连接。
+
+桌面兼容模式里的 API 地址 / Token 高级设置仍保留，但只作为兼容说明，不是网页工作台默认流程。
+
+## 数据位置、备份与互斥
+
+- 人才库数据与项目源码分离。
+- bootstrap 默认保存在：
 
 ```text
-boss_local_tool/
+%LOCALAPPDATA%\RecruitingTalentWorkbench\bootstrap.json
+```
+
+- 实际人才库目录在首次设置时由用户确认。
+- 网页端和旧桌面端不能同时占用同一人才库。
+- 不要把项目里的 `data/` 目录当成可以随手删除的缓存。
+- 数据库故障时不得创建空库替代旧库。
+
+备份与恢复细则见：
+[backup-and-recovery.md](D:\codex\BOSS-LOCAL-CAPTURE-review\docs\guides\backup-and-recovery.md)
+
+## 版本来源
+
+当前预览版由多个组件组成，版本来源彼此独立：
+
+- 核心工作台版本：`core/version.py`
+- Chrome 插件版本：`extension/manifest.json`
+- 前端包版本：`web/frontend/package.json`
+
+当前代码基线请以 `main` 分支和对应提交为准，不把这些组件版本硬凑成一个虚构的统一大版本。
+
+## 仓库结构
+
+```text
+D:\codex\BOSS-LOCAL-CAPTURE-review
   app.py
-  build.ps1
-  requirements.txt
-  README.md
+  web_app.py
+  setup_web_workbench.cmd
+  setup_web_workbench.py
+  launch_web_workbench.cmd
+  launch_web_workbench.py
   extension/
-  ui/
-  automation/
-  storage/
-  ai/
-  review/
+  web/
   core/
-  assets/
-  data/
-  logs/
+  storage/
   tests/
+  docs/
 ```
 
-## Tests
+## 开发与验证
 
 ```powershell
-cd boss_local_tool
-python -m unittest discover -s tests -v
-```
-
-Web foundation and frontend:
-
-```powershell
-.\.venv\Scripts\python.exe -m pytest tests\test_web_foundation.py tests\test_desktop_web_transition.py -q
+.\.venv\Scripts\python.exe -m pytest -q
+node extension\tests\extension_regression.test.js
 cd web\frontend
-npm.cmd test
+npm.cmd test -- --run
 npm.cmd run build
 ```
 
-## Package
+## 兼容入口
 
-```powershell
-cd boss_local_tool
-.\.venv\Scripts\Activate.ps1
-.\build.ps1
-```
+旧桌面端入口仍保留在：
 
-Output goes to `dist\BossLocalTool\`.
+- `launch_boss_local_tool.cmd`
+- `launch_boss_local_tool.vbs`
 
-## FAQ
-
-### Why does the app say Boss cannot be opened in a Playwright-controlled browser?
-
-Because Boss is redirecting controlled pages to `about:blank` on this machine. The app now uses a normal Chrome page plus extension mode for Boss.
-
-### Why does clicking "Start Capture" in the app not start Boss collection?
-
-For Boss and Liepin recruiting URLs, capture is triggered from the Chrome extension popup. The desktop app stays responsible for ingest, dedupe, storage, export, and logs.
-
-### Where is the data stored?
-
-- SQLite: `data/boss_local_tool.db`
-- Logs: `logs/app.log`
-- CSV exports: `data/exports/`
-
-### Why keep Playwright in the project?
-
-It still supports the original automation architecture, tests, and future non-Boss integrations. Boss itself is currently routed through extension mode.
-
-## Current Scope
-
-- V2 uses the candidate text already collected from recommendation cards.
-- Full resume files and chat transcripts are not yet imported into the screening context.
-- V3 remains the manual review workspace and review-history phase.
+但它属于兼容模式，不是当前默认 onboarding 路线。
