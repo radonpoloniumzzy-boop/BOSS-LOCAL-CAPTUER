@@ -47,7 +47,7 @@
 后端与生产前端：
 
 ```powershell
-cd D:\codex\BOSS-LOCAL-CAPTURE-review
+cd <项目目录>
 .\.venv\Scripts\python.exe web_app.py
 ```
 

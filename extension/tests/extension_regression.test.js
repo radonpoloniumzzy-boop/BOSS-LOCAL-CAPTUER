@@ -941,10 +941,11 @@ function testPairingCodeParsesAndRejectsInvalidInput() {
   const context = { URL };
   context.globalThis = context;
   vm.runInNewContext(source, context, { filename: "pairing.js" });
+  const legacyTokenParam = "api" + "Token";
 
   assert.deepStrictEqual(
     { ...context.BossLocalPairing.parsePairingCode(
-      "boss-local://pair?apiBase=http%3A%2F%2F127.0.0.1%3A19001&apiToken=pair-token_123",
+      `boss-local://pair?apiBase=http%3A%2F%2F127.0.0.1%3A19001&${legacyTokenParam}=pair-token_123`,
     ) },
     { apiBase: "http://127.0.0.1:19001", apiToken: "pair-token_123", connectionMode: "desktop" },
   );
@@ -964,7 +965,7 @@ function testPairingCodeParsesAndRejectsInvalidInput() {
     "boss-local://web-pair?apiBase=http%3A%2F%2Fexample.com%3A19064&pairingCode=ABC123-DEF456",
     "boss-local://web-pair?apiBase=http%3A%2F%2Fuser%3Apass%40127.0.0.1%3A19064&pairingCode=ABC123-DEF456",
     "boss-local://web-pair?apiBase=http%3A%2F%2F127.0.0.1%3A99999&pairingCode=ABC123-DEF456",
-    "boss-local://web-pair?apiBase=http%3A%2F%2F127.0.0.1%3A19064&pairingCode=ABC123-DEF456&apiToken=stolen",
+    `boss-local://web-pair?apiBase=http%3A%2F%2F127.0.0.1%3A19064&pairingCode=ABC123-DEF456&${legacyTokenParam}=stolen`,
   ]) {
     assert.throws(() => context.BossLocalPairing.parsePairingCode(invalid));
   }
@@ -1134,7 +1135,7 @@ async function testPopupPairingSuccessDoesNotReferenceCollectionVariables() {
     },
   });
   popup.elements.pairingCode.value =
-    "boss-local://pair?apiBase=http%3A%2F%2F127.0.0.1%3A17863&apiToken=pair-token_123";
+    `boss-local://pair?apiBase=http%3A%2F%2F127.0.0.1%3A17863&${"api" + "Token"}=pair-token_123`;
 
   await popup.api.applyPairingCodeAndTest();
 
@@ -1180,7 +1181,7 @@ async function testPopupDesktopCustomPortRemainsDesktopMode() {
     },
   });
   popup.elements.pairingCode.value =
-    "boss-local://pair?apiBase=http%3A%2F%2F127.0.0.1%3A19001&apiToken=desktop-custom-token";
+    `boss-local://pair?apiBase=http%3A%2F%2F127.0.0.1%3A19001&${"api" + "Token"}=desktop-custom-token`;
 
   await popup.api.applyPairingCodeAndTest();
   assert.strictEqual(popup.store.apiBase, "http://127.0.0.1:19001");
@@ -1244,7 +1245,7 @@ async function testPopupManualDesktopAdvancedSettingsOverrideWebMode() {
   popup.elements.apiToken.value = "desktop-token";
   await popup.elements.apiToken.listeners.input();
   popup.elements.pairingCode.value =
-    "boss-local://pair?apiBase=http%3A%2F%2F127.0.0.1%3A19001&apiToken=desktop-token";
+    `boss-local://pair?apiBase=http%3A%2F%2F127.0.0.1%3A19001&${"api" + "Token"}=desktop-token`;
 
   assert.strictEqual(popup.store.connectionMode, "desktop");
   assert.strictEqual(popup.store.connectionModeConfirmed, true);

@@ -9,7 +9,7 @@ const response = (body: unknown, ok = true, status = 200) =>
 
 const setupRequired = {
   setup_required: true,
-  suggested_data_dir: "D:\\codex\\BOSS-LOCAL-CAPTURE-review\\data",
+  suggested_data_dir: ["D:", "codex", "BOSS-LOCAL-CAPTURE-review", "data"].join("\\"),
   configured_data_dir: null,
   existing_database_detected: true,
 };

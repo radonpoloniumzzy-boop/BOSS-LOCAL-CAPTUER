@@ -118,7 +118,7 @@ textarea:focus-visible,
 .error-notice { color: #991b1b; background: var(--color-danger-soft); border: 1px solid #fecaca; }
 
 .app-shell { min-height: 100vh; background: var(--color-canvas); position: relative; isolation: isolate; }
-.ambient-grid { position: fixed; inset: 0; z-index: -1; pointer-events: none; opacity: .055; background-image: linear-gradient(var(--color-action) 1px, transparent 1px), linear-gradient(90deg, var(--color-action) 1px, transparent 1px); background-size: 48px 48px; mask-image: linear-gradient(to bottom, black, transparent 70%); }
+.ambient-grid { position: fixed; inset: 0; z-index: -1; pointer-events: none; opacity: .055; background-image: linear-gradient(var(--color-action) 1px, transparent 1px), linear-gradient(90deg, var(--color-action) 1px, transparent 1px); background-size: 48px 48px; mask: linear-gradient(to bottom, black, transparent 70%); }
 .shell-chrome {
   position: sticky;
   top: 0;

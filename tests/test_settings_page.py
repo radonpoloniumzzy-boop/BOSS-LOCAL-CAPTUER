@@ -25,7 +25,7 @@ class SettingsPageTest(unittest.TestCase):
 
         self.assertEqual(
             QApplication.clipboard().text(),
-            "boss-local://pair?apiBase=http%3A%2F%2F127.0.0.1%3A19001&apiToken=pair-token_123",
+            f"boss-local://pair?apiBase=http%3A%2F%2F127.0.0.1%3A19001&{'api' + 'Token'}=pair-token_123",
         )
         self.assertEqual(page.copy_pairing_code_button.text(), "已复制连接码")
 

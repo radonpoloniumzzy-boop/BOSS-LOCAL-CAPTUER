@@ -5,7 +5,7 @@
 Load this folder as an unpacked Chrome extension:
 
 ```text
-D:\codex\BOSS-LOCAL-CAPTURE-review\extension
+<项目目录>\extension
 ```
 
 Steps:
