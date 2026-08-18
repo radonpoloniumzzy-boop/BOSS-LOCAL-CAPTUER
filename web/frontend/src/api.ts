@@ -36,6 +36,28 @@ export type CandidateRow = {
   has_role_binding: boolean | number;
 };
 
+export type CandidateDetail = CandidateRow & {
+  job_title: string;
+  source_url: string;
+  capture_time: string;
+  raw_card_text: string;
+  active_status: string;
+  expected_salary: string;
+  work_experience_text: string;
+  education_text: string;
+  tags_text: string;
+  summary_text: string;
+  detail_url: string;
+  latest_raw_card_text: string;
+  latest_source_url: string;
+  latest_detail_url: string;
+  city: string;
+  years_experience: number | null;
+  job_family: string;
+  job_track: string;
+  batch_count: number;
+};
+
 export type CaptureBatchRow = {
   id: number;
   start_time: string;

@@ -1082,6 +1082,7 @@ class CandidateRepository:
         limit: int | None = None,
         offset: int = 0,
         candidate_ids: Iterable[int] | None = None,
+        sort: str = "latest_capture_desc",
     ) -> list[sqlite3.Row]:
         connection = self.db.get_connection()
         joins, where_sql, params = self._candidate_filter_sql(
@@ -1138,6 +1139,9 @@ class CandidateRepository:
             lbi.job_title AS latest_source_job_title,
             lbi.source_platform AS latest_source_platform,
             lbi.ingest_status AS latest_ingest_status,
+            lbi.raw_card_text AS latest_raw_card_text,
+            lbi.source_url AS latest_source_url,
+            lbi.detail_url AS latest_detail_url,
             lb.role_id AS latest_batch_role_id,
             lb.total_new AS latest_batch_total_new,
             lb.total_updated AS latest_batch_total_updated,
@@ -1187,7 +1191,7 @@ class CandidateRepository:
         {joins}
         {where_sql}
         GROUP BY c.id
-        ORDER BY c.updated_at DESC, c.id DESC
+        ORDER BY {self._candidate_order_sql(sort)}
         {pagination_sql}
         """
         return list(connection.execute(query, params).fetchall())
@@ -1260,7 +1264,7 @@ class CandidateRepository:
             FROM candidates c
             {id_joins}
             {where_sql}
-            ORDER BY c.updated_at DESC, c.id DESC
+            ORDER BY {self._candidate_order_sql(str(filters.get("sort") or "latest_capture_desc"))}
             LIMIT ? OFFSET ?
             """,
             id_params,
@@ -1304,9 +1308,14 @@ class CandidateRepository:
             filters.append(
                 "(c.name LIKE ? OR c.active_status LIKE ? OR c.expected_salary LIKE ? "
                 "OR c.work_experience_text LIKE ? OR c.tags_text LIKE ? "
-                "OR c.summary_text LIKE ? OR c.raw_card_text LIKE ?)"
+                "OR c.summary_text LIKE ? OR c.raw_card_text LIKE ? OR c.job_title LIKE ? "
+                "OR EXISTS ("
+                "SELECT 1 FROM capture_batch_items bi_search "
+                "WHERE bi_search.candidate_id = c.id "
+                "AND (bi_search.job_title LIKE ? OR bi_search.raw_card_text LIKE ? OR bi_search.name LIKE ?)"
+                "))"
             )
-            params.extend([token] * 7)
+            params.extend([token] * 11)
         if job_title:
             filters.append("c.job_title = ?")
             params.append(job_title)
@@ -1347,6 +1356,26 @@ class CandidateRepository:
         normalized_page = max(1, int(page))
         normalized_size = max(1, min(int(page_size), 200))
         return normalized_page, normalized_size, (normalized_page - 1) * normalized_size
+
+    @staticmethod
+    def _candidate_order_sql(sort: str) -> str:
+        latest_capture_expr = """
+            COALESCE(
+                (
+                    SELECT bi_sort.capture_time
+                    FROM capture_batch_items bi_sort
+                    WHERE bi_sort.candidate_id = c.id
+                    ORDER BY bi_sort.capture_time DESC, bi_sort.id DESC
+                    LIMIT 1
+                ),
+                c.capture_time,
+                c.updated_at
+            )
+        """
+        normalized = str(sort or "").strip().lower()
+        if normalized == "latest_capture_asc":
+            return f"{latest_capture_expr} ASC, c.id ASC"
+        return f"{latest_capture_expr} DESC, c.id DESC"
 
     def _upsert_candidate_profile(self, connection: sqlite3.Connection, candidate: CandidateRecord) -> None:
         if candidate.id is None:
@@ -1666,12 +1695,10 @@ class CandidateRepository:
 
     def get_candidate_detail(self, candidate_id: int) -> dict[str, object] | None:
         connection = self.db.get_connection()
-        candidate = connection.execute(
-            "SELECT * FROM candidates WHERE id = ?",
-            (candidate_id,),
-        ).fetchone()
-        if candidate is None:
+        detail_rows = self.list_candidates(candidate_ids=[candidate_id], limit=1)
+        if not detail_rows:
             return None
+        candidate = dict(detail_rows[0])
         appearances = connection.execute(
             """
             SELECT bi.batch_id, bi.capture_time, bi.job_title, bi.source_url, b.status, b.start_time
@@ -1725,9 +1752,9 @@ class CandidateRepository:
         status_events = self.list_candidate_role_status_events(candidate_id=candidate_id)
         return {
             "candidate": candidate,
-            "appearances": appearances,
-            "standard_profile": standard_profile,
-            "role_matches": role_matches,
+            "appearances": [dict(row) for row in appearances],
+            "standard_profile": dict(standard_profile) if standard_profile is not None else None,
+            "role_matches": [dict(row) for row in role_matches],
             "status_events": status_events,
         }
 

@@ -273,19 +273,46 @@ def create_web_app(
     def list_candidates(
         page: int = Query(default=1, ge=1),
         page_size: int = Query(default=100, ge=1, le=500),
+        keyword: str = "",
         source_platform: str = "",
         unbound_only: bool = False,
+        sort: str = "latest_capture_desc",
     ) -> dict[str, object]:
         if runtime.repository is None:
             raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。")
         result = runtime.repository.page_candidates(
             page=page,
             page_size=page_size,
+            keyword=keyword,
             source_platform=source_platform,
             unbound_only=unbound_only,
+            sort=sort,
         )
         result["rows"] = [dict(row) for row in result["rows"]]
         return result
+
+    @app.get("/api/candidates/{candidate_id}")
+    def get_candidate_detail(candidate_id: int) -> dict[str, object]:
+        if runtime.repository is None:
+            raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。")
+        detail = runtime.repository.get_candidate_detail(candidate_id)
+        if detail is None:
+            raise ApiError(404, "candidate_not_found", "候选人不存在。")
+        candidate = dict(detail["candidate"])
+        standard_profile = detail.get("standard_profile")
+        if isinstance(standard_profile, dict):
+            candidate.update(
+                {
+                    "city": standard_profile.get("city"),
+                    "years_experience": standard_profile.get("years_experience"),
+                    "job_family": standard_profile.get("job_family"),
+                    "job_track": standard_profile.get("job_track"),
+                }
+            )
+        candidate["appearances"] = detail.get("appearances") or []
+        candidate["role_matches"] = detail.get("role_matches") or []
+        candidate["status_events"] = detail.get("status_events") or []
+        return candidate
 
     @app.get("/api/capture-batches")
     def list_capture_batches(

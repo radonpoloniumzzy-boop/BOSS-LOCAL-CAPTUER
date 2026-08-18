@@ -194,7 +194,7 @@ describe("local workbench shell", () => {
 
     await user.click(await screen.findByRole("button", { name: "进入工作台" }));
     await user.click(screen.getByRole("button", { name: "候选人" }));
-    await screen.findByText("当前筛选条件下还没有候选人。");
+    await screen.findByText("当前还没有候选人。");
     expect(screen.queryByRole("heading", { name: "准备进入招聘人才工作台" })).not.toBeInTheDocument();
   });
 

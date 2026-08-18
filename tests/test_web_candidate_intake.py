@@ -271,6 +271,84 @@ class CandidateIntakeWebApiTest(unittest.TestCase):
         self.assertNotIn("Bob card", second.text)
         self.assertNotIn(self.token, second.text)
 
+    def test_candidate_search_sort_detail_and_batch_lookup(self) -> None:
+        first = self.client.post(
+            "/api/intake/candidates",
+            json={
+                "source_platform": "boss",
+                "source_job_title": "证券交易员",
+                "idempotency_key": "candidate-search-1",
+                "candidates": [
+                    {
+                        "name": "Alice Zhang",
+                        "source_candidate_id": "boss-101",
+                        "raw_card_text": "Alice raw card with 高频交易 经验",
+                        "capture_time": "2026-08-10T09:00:00",
+                    }
+                ],
+            },
+            headers=self._headers(),
+        )
+        second = self.client.post(
+            "/api/intake/candidates",
+            json={
+                "source_platform": "liepin",
+                "source_job_title": "量化研究员",
+                "idempotency_key": "candidate-search-2",
+                "candidates": [
+                    {
+                        "name": "Bob Li",
+                        "source_candidate_id": "liepin-202",
+                        "raw_card_text": "Bob raw card with 因子研究 与 原始卡片关键词",
+                        "capture_time": "2026-08-11T10:30:00",
+                    }
+                ],
+            },
+            headers=self._headers(),
+        )
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(second.status_code, 200, second.text)
+
+        by_name = self.client.get("/api/candidates?page=1&page_size=100&keyword=Alice")
+        self.assertEqual(by_name.status_code, 200)
+        self.assertEqual(len(by_name.json()["rows"]), 1)
+        self.assertEqual(by_name.json()["rows"][0]["name"], "Alice Zhang")
+
+        by_job_title = self.client.get("/api/candidates?page=1&page_size=100&keyword=量化研究员")
+        self.assertEqual(by_job_title.status_code, 200)
+        self.assertEqual(len(by_job_title.json()["rows"]), 1)
+        self.assertEqual(by_job_title.json()["rows"][0]["name"], "Bob Li")
+
+        by_raw_keyword = self.client.get("/api/candidates?page=1&page_size=100&keyword=原始卡片关键词")
+        self.assertEqual(by_raw_keyword.status_code, 200)
+        self.assertEqual(len(by_raw_keyword.json()["rows"]), 1)
+        self.assertEqual(by_raw_keyword.json()["rows"][0]["name"], "Bob Li")
+
+        newest_first = self.client.get("/api/candidates?page=1&page_size=100&sort=latest_capture_desc")
+        oldest_first = self.client.get("/api/candidates?page=1&page_size=100&sort=latest_capture_asc")
+        self.assertEqual(newest_first.status_code, 200)
+        self.assertEqual(oldest_first.status_code, 200)
+        self.assertEqual(newest_first.json()["rows"][0]["name"], "Bob Li")
+        self.assertEqual(oldest_first.json()["rows"][0]["name"], "Alice Zhang")
+
+        candidate_id = newest_first.json()["rows"][0]["id"]
+        detail = self.client.get(f"/api/candidates/{candidate_id}")
+        self.assertEqual(detail.status_code, 200)
+        detail_payload = detail.json()
+        self.assertEqual(detail_payload["name"], "Bob Li")
+        self.assertEqual(detail_payload["latest_source_job_title"], "量化研究员")
+        self.assertIn("原始卡片关键词", detail_payload["latest_raw_card_text"])
+
+        batch_id = newest_first.json()["rows"][0]["latest_batch_id"]
+        batch = self.client.get(f"/api/capture-batches/{batch_id}")
+        self.assertEqual(batch.status_code, 200)
+        self.assertEqual(batch.json()["id"], batch_id)
+
+    def test_candidate_detail_returns_not_found_for_missing_candidate(self) -> None:
+        response = self.client.get("/api/candidates/999999")
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["error"]["code"], "candidate_not_found")
+
 
 if __name__ == "__main__":
     unittest.main()

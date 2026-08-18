@@ -13,6 +13,8 @@ export function BatchesPage({ initialBatchId = null, onInitialBatchConsumed }: {
   const [refresh, setRefresh] = useState(0);
   const [data, setData] = useState(emptyBatches);
   const [selected, setSelected] = useState<CaptureBatchRow | null>(null);
+  const [batchLookup, setBatchLookup] = useState("");
+  const [lookupLoading, setLookupLoading] = useState(false);
   const [notice, setNotice] = useState("");
   const [todaySummary, setTodaySummary] = useState({ received: 0, added: 0 });
   const latest = useRef(0);
@@ -28,6 +30,24 @@ export function BatchesPage({ initialBatchId = null, onInitialBatchConsumed }: {
       setNotice("");
     }, 4000);
   }, []);
+  const openBatchById = useCallback((batchId: number) => {
+    if (!Number.isInteger(batchId) || batchId <= 0) {
+      showNotice("请输入有效的批次 ID。");
+      return;
+    }
+    const requestId = ++directRequest.current;
+    setLookupLoading(true);
+    void requestJson<CaptureBatchRow>(`/api/capture-batches/${batchId}`)
+      .then((batch) => {
+        if (directRequest.current === requestId) setSelected(batch);
+      })
+      .catch(() => {
+        if (directRequest.current === requestId) showNotice(`批次 #${batchId} 不存在或已不可用。`);
+      })
+      .finally(() => {
+        if (directRequest.current === requestId) setLookupLoading(false);
+      });
+  }, [showNotice]);
   useEffect(() => () => {
     if (noticeTimer.current !== null) window.clearTimeout(noticeTimer.current);
   }, []);
@@ -52,18 +72,9 @@ export function BatchesPage({ initialBatchId = null, onInitialBatchConsumed }: {
   }, [page, platform, refresh, showNotice]);
   useEffect(() => {
     if (!initialBatchId) return;
-    const requestId = ++directRequest.current;
-    void requestJson<CaptureBatchRow>(`/api/capture-batches/${initialBatchId}`)
-      .then((batch) => {
-        if (directRequest.current === requestId) setSelected(batch);
-      })
-      .catch(() => {
-        if (directRequest.current === requestId) showNotice(`批次 #${initialBatchId} 不存在或已不可用。`);
-      })
-      .finally(() => {
-        if (directRequest.current === requestId) onInitialBatchConsumed?.();
-      });
-  }, [initialBatchId, onInitialBatchConsumed, showNotice]);
+    openBatchById(initialBatchId);
+    onInitialBatchConsumed?.();
+  }, [initialBatchId, onInitialBatchConsumed, openBatchById]);
   useEffect(() => {
     if (selected) return;
     const timer = window.setInterval(load, 10000);
@@ -77,7 +88,7 @@ export function BatchesPage({ initialBatchId = null, onInitialBatchConsumed }: {
   if (selected) return <BatchDetail batch={selected} onBack={() => setSelected(null)} />;
   return <div className="page-content page-enter">
     {notice && <div className="toast" role="status">{notice}</div>}
-    <div className="page-heading"><div><p className="eyebrow">采集流水</p><h1>最近批次</h1><p className="page-description">每 10 秒轻量刷新，最新批次始终在顶部。</p></div><div className="toolbar"><select aria-label="批次来源平台" value={platform} onChange={(event) => setPlatform(event.target.value)}><option value="">全部平台</option><option value="boss">Boss</option><option value="liepin">猎聘</option></select><RefreshButton onClick={load} /></div></div>
+    <div className="page-heading"><div><p className="eyebrow">采集流水</p><h1>最近批次</h1><p className="page-description">每 10 秒轻量刷新，支持直接按批次 ID 定位旧批次。</p></div><div className="toolbar workbench-toolbar-stack"><form className="search-form" onSubmit={(event) => { event.preventDefault(); openBatchById(Number(batchLookup)); }}><label className="search-input"><span>#</span><input aria-label="批次 ID 搜索" inputMode="numeric" placeholder="输入批次 ID 直接打开" value={batchLookup} onChange={(event) => setBatchLookup(event.target.value.replace(/[^\d]/g, ""))} /></label><button className="secondary-button" type="submit" disabled={lookupLoading}>{lookupLoading ? "打开中…" : "打开批次"}</button></form><div className="toolbar"><select aria-label="批次来源平台" value={platform} onChange={(event) => setPlatform(event.target.value)}><option value="">全部平台</option><option value="boss">Boss</option><option value="liepin">猎聘</option></select><RefreshButton onClick={load} /></div></div></div>
     <section className="summary-strip"><div><span>总批次数</span><strong>{data.total}</strong></div><div><span>今日接收</span><strong>{todaySummary.received}</strong></div><div><span>今日新增</span><strong>{todaySummary.added}</strong></div></section>
     <section className="data-panel"><TableState loading={data.loading} error={data.error} empty={!data.rows.length} />{!data.loading && !data.error && data.rows.length > 0 && <div className="table-scroll"><table className="workbench-table batch-table"><thead><tr><th>批次</th><th>时间</th><th>平台</th><th>状态</th><th>接收</th><th>新增</th><th>更新</th><th>跳过</th><th>失败</th><th className="actions-column">操作</th></tr></thead><tbody>
       {data.rows.map((row) => <tr key={row.id} className={row.id === knownLatest.current ? "latest-row" : ""}><td><strong>#{row.id}</strong></td><td className="numeric">{formatDate(row.start_time)}</td><td><StatusBadge>{row.source_platform || "unknown"}</StatusBadge></td><td><StatusBadge tone={row.status === "completed" ? "success" : row.status === "partial" ? "warning" : "muted"}>{row.status}</StatusBadge></td><td>{row.total_collected}</td><td>{row.total_new}</td><td>{row.total_updated}</td><td>{row.total_skipped}</td><td>{row.total_failed}</td><td><div className="row-actions"><button className="secondary-button" onClick={() => setSelected(row)}>查看候选人</button><a className="secondary-button" href={`/api/capture-batches/${row.id}/export.md`} download><Download size={14} />导出 Markdown</a></div></td></tr>)}
