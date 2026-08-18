@@ -1,9 +1,14 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+/// <reference types="node" />
+import { useState } from "react";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import * as apiModule from "../api";
 import { Workbench } from "./Workbench";
+import { Drawer } from "./workbench/Drawer";
 
 type Deferred = {
   resolve: (response: Response) => void;
@@ -24,6 +29,142 @@ const response = (body: unknown) =>
   Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) } as Response);
 
 afterEach(() => vi.restoreAllMocks());
+
+function DrawerHarness({
+  tick = 0,
+}: {
+  tick?: number;
+}) {
+  const [primaryOpen, setPrimaryOpen] = useState(false);
+  const [secondaryOpen, setSecondaryOpen] = useState(false);
+
+  return (
+    <div>
+      <button type="button" onClick={() => setPrimaryOpen(true)}>触发按钮</button>
+      <button type="button">底层导航</button>
+      {primaryOpen && (
+        <Drawer label="主抽屉" className="drawer-panel detail-drawer-panel" onClose={() => setPrimaryOpen(false)}>
+          <div data-testid={`tick-${tick}`} />
+          <button type="button">第一个操作</button>
+          <button type="button" onClick={() => setSecondaryOpen(true)}>第二个操作</button>
+          {secondaryOpen && (
+            <Drawer label="次级抽屉" className="drawer-panel snapshot-reader-drawer" onClose={() => setSecondaryOpen(false)}>
+              <button type="button">次级操作</button>
+            </Drawer>
+          )}
+        </Drawer>
+      )}
+    </div>
+  );
+}
+
+describe("drawer accessibility behavior", () => {
+  it("uses dialog semantics and traps focus in both directions", async () => {
+    const user = userEvent.setup();
+    render(<DrawerHarness />);
+    await user.click(screen.getByRole("button", { name: "触发按钮" }));
+
+    const dialog = screen.getByRole("dialog", { name: "主抽屉" });
+    expect(dialog).toHaveAttribute("aria-modal", "true");
+    await waitFor(() => expect(screen.getByRole("button", { name: "第一个操作" })).toHaveFocus());
+
+    await user.tab();
+    expect(screen.getByRole("button", { name: "第二个操作" })).toHaveFocus();
+    await user.tab();
+    expect(screen.getByRole("button", { name: "第一个操作" })).toHaveFocus();
+
+    await user.tab({ shift: true });
+    expect(screen.getByRole("button", { name: "第二个操作" })).toHaveFocus();
+    expect(screen.getByRole("button", { name: "底层导航" })).not.toHaveFocus();
+  });
+
+  it("keeps scroll lock and return-focus stable across parent rerenders", async () => {
+    const user = userEvent.setup();
+    let bumpTick: (() => void) | null = null;
+    function RerenderHarness() {
+      const [open, setOpen] = useState(false);
+      const [tick, setTick] = useState(0);
+      bumpTick = () => setTick((current) => current + 1);
+
+      return (
+        <div>
+          <button type="button" onClick={() => setOpen(true)}>触发按钮</button>
+          <span data-testid={`tick-${tick}`}>{tick}</span>
+          {open && (
+            <Drawer label="主抽屉" className="drawer-panel detail-drawer-panel" onClose={() => setOpen(false)}>
+              <button type="button">第一个操作</button>
+              <button type="button">第二个操作</button>
+            </Drawer>
+          )}
+        </div>
+      );
+    }
+
+    render(<RerenderHarness />);
+    const trigger = screen.getByRole("button", { name: "触发按钮" });
+    await user.click(trigger);
+    const secondButton = await screen.findByRole("button", { name: "第二个操作" });
+    secondButton.focus();
+
+    expect(document.body.style.overflow).toBe("hidden");
+    expect(secondButton).toHaveFocus();
+
+    act(() => bumpTick?.());
+    expect(screen.getByTestId("tick-1")).toBeInTheDocument();
+    expect(document.body.style.overflow).toBe("hidden");
+    expect(screen.getByRole("button", { name: "第二个操作" })).toHaveFocus();
+    expect(screen.getByRole("button", { name: "触发按钮" })).not.toHaveFocus();
+
+    await user.keyboard("{Escape}");
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "主抽屉" })).not.toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(trigger).toHaveFocus();
+    });
+  });
+
+  it("closes only the top drawer on Escape and preserves the lower drawer lock", async () => {
+    const user = userEvent.setup();
+    function StackHarness() {
+      const [primaryOpen, setPrimaryOpen] = useState(true);
+      const [secondaryOpen, setSecondaryOpen] = useState(true);
+
+      return (
+        <div>
+          {primaryOpen && (
+            <Drawer label="主抽屉" className="drawer-panel detail-drawer-panel" onClose={() => setPrimaryOpen(false)}>
+              <button type="button">主抽屉按钮</button>
+            </Drawer>
+          )}
+          {secondaryOpen && (
+            <Drawer label="次级抽屉" className="drawer-panel snapshot-reader-drawer" onClose={() => setSecondaryOpen(false)}>
+              <button type="button">次级抽屉按钮</button>
+            </Drawer>
+          )}
+        </div>
+      );
+    }
+
+    const stackView = render(<StackHarness />);
+    expect(await screen.findByRole("dialog", { name: "次级抽屉" })).toBeInTheDocument();
+    expect(document.body.style.overflow).toBe("hidden");
+
+    await user.keyboard("{Escape}");
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "次级抽屉" })).not.toBeInTheDocument();
+    });
+    expect(screen.getByRole("dialog", { name: "主抽屉" })).toBeInTheDocument();
+    expect(document.body.style.overflow).toBe("hidden");
+
+    await user.keyboard("{Escape}");
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "主抽屉" })).not.toBeInTheDocument();
+    });
+    expect(document.body.style.overflow).toBe("");
+    stackView.unmount();
+  });
+});
 
 describe("workbench candidate intake views", () => {
   it("generates and copies a one-time plugin pairing code without exposing a token", async () => {
@@ -347,7 +488,7 @@ describe("workbench candidate intake views", () => {
     expect(screen.getByText("Snapshot Alice")).toBeInTheDocument();
     expect(screen.queryByText("old snapshot text")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "查看原始快照" }));
-    expect(screen.getByRole("complementary", { name: "原始快照" })).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "原始快照" })).toBeInTheDocument();
     expect(screen.getByText("old snapshot text")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "关闭原始快照" }));
 
@@ -566,7 +707,7 @@ describe("workbench candidate intake views", () => {
     expect(await screen.findByText("Bob Li")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "查看详情" }));
-    const detailDrawer = await screen.findByRole("complementary", { name: "候选人详情" });
+    const detailDrawer = await screen.findByRole("dialog", { name: "候选人详情" });
     expect(within(detailDrawer).getAllByText("量化研究员").length).toBeGreaterThan(0);
     expect(screen.getByText("原始卡片关键词与快照")).toBeInTheDocument();
 
@@ -646,7 +787,7 @@ describe("workbench candidate intake views", () => {
 
     await user.click(screen.getByRole("button", { name: "候选人" }));
     await user.click(await screen.findByRole("button", { name: "查看详情" }));
-    const detailDrawer = await screen.findByRole("complementary", { name: "候选人详情" });
+    const detailDrawer = await screen.findByRole("dialog", { name: "候选人详情" });
 
     expect(within(detailDrawer).getByRole("heading", { name: "身份摘要" })).toBeInTheDocument();
     expect(within(detailDrawer).getByRole("heading", { name: "基础信息" })).toBeInTheDocument();
@@ -734,7 +875,7 @@ describe("workbench candidate intake views", () => {
 
     await user.click(screen.getByRole("button", { name: "候选人" }));
     await user.click(await screen.findByRole("button", { name: "查看详情" }));
-    const detailDrawer = await screen.findByRole("complementary", { name: "候选人详情" });
+    const detailDrawer = await screen.findByRole("dialog", { name: "候选人详情" });
 
     await user.click(within(detailDrawer).getByRole("button", { name: "展开完整快照" }));
     expect(within(detailDrawer).getByRole("button", { name: "收起" })).toBeInTheDocument();
@@ -838,7 +979,7 @@ describe("workbench candidate intake views", () => {
     const snapshotButtons = await screen.findAllByRole("button", { name: "查看原始快照" });
     await user.click(snapshotButtons[0]);
 
-    const snapshotDrawer = await screen.findByRole("complementary", { name: "原始快照" });
+    const snapshotDrawer = await screen.findByRole("dialog", { name: "原始快照" });
     expect(within(snapshotDrawer).getByText("第一页候选人甲")).toBeInTheDocument();
     expect(within(snapshotDrawer).getByText("1 / 2")).toBeInTheDocument();
     expect(within(snapshotDrawer).getByRole("button", { name: "上一个" })).toBeDisabled();
@@ -850,7 +991,7 @@ describe("workbench candidate intake views", () => {
 
     await user.click(screen.getByRole("button", { name: "下一页" }));
     await waitFor(() => {
-      expect(screen.queryByRole("complementary", { name: "原始快照" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("dialog", { name: "原始快照" })).not.toBeInTheDocument();
     });
     expect(await screen.findByText("第二页候选人")).toBeInTheDocument();
   });
@@ -928,15 +1069,168 @@ describe("workbench candidate intake views", () => {
     await user.click(screen.getByRole("button", { name: "候选人" }));
     const detailButton = await screen.findByRole("button", { name: "查看详情" });
     await user.click(detailButton);
-    expect(await screen.findByRole("complementary", { name: "候选人详情" })).toBeInTheDocument();
+    expect(await screen.findByRole("dialog", { name: "候选人详情" })).toBeInTheDocument();
     expect(document.body.style.overflow).toBe("hidden");
 
     await user.keyboard("{Escape}");
     await waitFor(() => {
-      expect(screen.queryByRole("complementary", { name: "候选人详情" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("dialog", { name: "候选人详情" })).not.toBeInTheDocument();
     });
     expect(document.body.style.overflow).toBe("");
     expect(detailButton).toHaveFocus();
+  });
+
+  it("closes candidate dialogs when switching away from the candidates page", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL) => {
+        const url = String(input);
+        if (url.includes("/api/candidates?")) {
+          return response({
+            rows: [{
+              id: 32,
+              name: "Switch Candidate",
+              source_platform: "boss",
+              latest_source_platform: "boss",
+              latest_source_job_title: "交易员",
+              latest_batch_id: 92,
+              latest_capture_time: "2026-08-12T11:40:00",
+              latest_ingest_status: "new",
+              latest_batch_role_id: null,
+              has_role_binding: 0,
+              batch_count: 1,
+            }],
+            total: 1,
+            page: 1,
+            page_size: 100,
+          });
+        }
+        if (url === "/api/candidates/32") {
+          return response({
+            id: 32,
+            name: "Switch Candidate",
+            source_platform: "boss",
+            latest_source_platform: "boss",
+            latest_source_job_title: "交易员",
+            latest_batch_id: 92,
+            latest_capture_time: "2026-08-12T11:40:00",
+            latest_ingest_status: "new",
+            latest_batch_role_id: null,
+            has_role_binding: 0,
+            job_title: "交易员",
+            source_url: "",
+            capture_time: "2026-08-12T11:40:00",
+            raw_card_text: "",
+            active_status: "",
+            expected_salary: "",
+            work_experience_text: "",
+            education_text: "",
+            tags_text: "",
+            summary_text: "",
+            detail_url: "",
+            latest_raw_card_text: "切页快照",
+            latest_source_url: "",
+            latest_detail_url: "",
+            city: "",
+            years_experience: null,
+            job_family: "",
+            job_track: "",
+            batch_count: 1,
+          });
+        }
+        if (url === "/api/candidates/32/appearances") {
+          return response({ rows: [] });
+        }
+        if (url.includes("/api/capture-batches?")) {
+          return response({ rows: [], total: 0, page: 1, page_size: 20 });
+        }
+        throw new Error(`unexpected request: ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+    render(<Workbench status={status} />);
+
+    await user.click(screen.getByRole("button", { name: "候选人" }));
+    await user.click(await screen.findByRole("button", { name: "查看详情" }));
+    expect(await screen.findByRole("dialog", { name: "候选人详情" })).toBeInTheDocument();
+    expect(document.body.style.overflow).toBe("hidden");
+
+    await user.click(screen.getByRole("button", { name: "最近批次" }));
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "候选人详情" })).not.toBeInTheDocument();
+    });
+    expect(document.body.style.overflow).toBe("");
+  });
+
+  it("closes batch snapshot dialogs when switching away from the batch page", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL) => {
+        const url = String(input);
+        if (url.includes("/api/capture-batches?")) {
+          return response({
+            rows: [{
+              id: 93,
+              start_time: "2026-08-12T12:10:00",
+              source_platform: "boss",
+              total_collected: 1,
+              total_new: 1,
+              total_updated: 0,
+              total_skipped: 0,
+              total_failed: 0,
+              status: "completed",
+              role_id: null,
+            }],
+            total: 1,
+            page: 1,
+            page_size: 20,
+            today_summary: { received: 1, added: 1 },
+          });
+        }
+        if (url.includes("/api/capture-batches/93/candidates")) {
+          return response({
+            rows: [{
+              id: 1,
+              batch_id: 93,
+              candidate_id: 800,
+              name: "Snapshot Candidate",
+              source_platform: "boss",
+              platform_uid: "boss:800",
+              job_title: "快照岗位",
+              capture_time: "2026-08-12T12:10:00",
+              raw_card_text: "批次快照内容",
+              ingest_status: "new",
+              has_role_binding: 0,
+            }],
+            total: 1,
+            page: 1,
+            page_size: 50,
+          });
+        }
+        throw new Error(`unexpected request: ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+    render(<Workbench status={status} />);
+
+    await user.click(screen.getByRole("button", { name: "最近批次" }));
+    await user.click(await screen.findByRole("button", { name: "查看候选人" }));
+    await user.click(await screen.findByRole("button", { name: "查看原始快照" }));
+    expect(await screen.findByRole("dialog", { name: "原始快照" })).toBeInTheDocument();
+    expect(document.body.style.overflow).toBe("hidden");
+
+    await user.click(screen.getByRole("button", { name: "设置" }));
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "原始快照" })).not.toBeInTheDocument();
+    });
+    expect(document.body.style.overflow).toBe("");
+  });
+
+  it("keeps a reduced-motion drawer rule available for accessibility", async () => {
+    const stylesPath = resolve(process.cwd(), "src/styles.css");
+    const stylesSource = readFileSync(stylesPath, "utf8");
+    expect(stylesSource).toMatch(/@media\s*\(prefers-reduced-motion:\s*reduce\)/);
+    expect(stylesSource).toMatch(/\.drawer-panel\s*\{[^}]*animation:\s*none\s*!important;[^}]*transform:\s*none\s*!important;/s);
   });
 
   it("opens a batch by ID from the batch page even when it is not on the first page", async () => {
@@ -1136,11 +1430,11 @@ describe("workbench candidate intake views", () => {
     expect(await screen.findByText("Alice")).toBeInTheDocument();
     const detailButtons = await screen.findAllByRole("button", { name: "查看详情" });
     await user.click(detailButtons[0]);
-    const aliceDrawer = await screen.findByRole("complementary", { name: "候选人详情" });
+    const aliceDrawer = await screen.findByRole("dialog", { name: "候选人详情" });
     expect(within(aliceDrawer).getByText("正在读取来源出现历史…")).toBeInTheDocument();
 
     await user.click(detailButtons[1]);
-    const bobDrawer = await screen.findByRole("complementary", { name: "候选人详情" });
+    const bobDrawer = await screen.findByRole("dialog", { name: "候选人详情" });
     expect(within(bobDrawer).getByText("还没有来源出现历史。")).toBeInTheDocument();
 
     appearanceQueue[1].resolve({
@@ -1235,7 +1529,7 @@ describe("workbench candidate intake views", () => {
     render(<Workbench status={status} />);
     await user.click(screen.getByRole("button", { name: "候选人" }));
     await user.click(await screen.findByRole("button", { name: "查看详情" }));
-    const retryDrawer = await screen.findByRole("complementary", { name: "候选人详情" });
+    const retryDrawer = await screen.findByRole("dialog", { name: "候选人详情" });
     expect(await within(retryDrawer).findByText("来源出现历史加载失败。")).toBeInTheDocument();
     await user.click(within(retryDrawer).getByRole("button", { name: "重试" }));
     expect(await within(retryDrawer).findByText("还没有来源出现历史。")).toBeInTheDocument();

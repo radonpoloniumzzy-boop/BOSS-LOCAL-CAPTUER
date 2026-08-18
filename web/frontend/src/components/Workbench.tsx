@@ -128,7 +128,7 @@ export function Workbench({ status }: { status: AppStatus }) {
         )}
         {visited.candidates && (
           <section hidden={view !== "candidates"} aria-hidden={view !== "candidates"}>
-            <CandidatesPage onOpenBatch={(batchId) => openBatch(batchId, "candidates")} />
+            <CandidatesPage active={view === "candidates"} onOpenBatch={(batchId) => openBatch(batchId, "candidates")} />
           </section>
         )}
         {visited.batches && (

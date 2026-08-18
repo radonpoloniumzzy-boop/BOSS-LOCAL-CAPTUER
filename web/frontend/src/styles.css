@@ -15,7 +15,15 @@ button, input, select { font: inherit; letter-spacing: 0; }
 a { color: inherit; text-decoration: none; }
 button { cursor: pointer; }
 button:disabled { cursor: not-allowed; }
-button:focus-visible, input:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+a:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
 
 .center-state {
   min-height: 100vh;
@@ -299,7 +307,7 @@ button:focus-visible, input:focus-visible { outline: none; box-shadow: var(--foc
 .toast { position: fixed; top: 112px; right: 24px; z-index: 40; border: 1px solid #bfdbfe; border-radius: var(--radius-md); background: #eff6ff; color: #1d4ed8; padding: 10px 14px; box-shadow: 0 10px 30px rgba(23, 32, 51, .12); font-size: var(--text-sm); animation: enter-section 180ms var(--ease-standard); }
 .detail-header { display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; align-items: start; gap: var(--space-3); margin-bottom: var(--space-5); }.detail-header h1 { margin: 2px 0; font-size: var(--text-2xl); }.detail-header p:not(.eyebrow) { margin: 4px 0 0; color: var(--color-text-muted); font-size: var(--text-xs); }.detail-header .eyebrow { margin: 0; }
 .drawer-backdrop { position: fixed; inset: 0; z-index: 60; background: rgba(23, 32, 51, .18); display: flex; justify-content: flex-end; }
-.drawer-panel { height: 100%; background: var(--color-surface); box-shadow: -18px 0 48px rgba(23, 32, 51, .12); padding: var(--space-6); animation: drawer-in 240ms var(--ease-standard); overflow-y: auto; outline: none; }
+.drawer-panel { height: 100%; background: var(--color-surface); box-shadow: -18px 0 48px rgba(23, 32, 51, .12); padding: var(--space-6); animation: drawer-in 240ms var(--ease-standard); overflow-y: auto; overflow-x: hidden; outline: none; }
 .detail-drawer-panel { width: min(760px, 94vw); }
 .snapshot-reader-drawer { width: min(680px, 94vw); }
 .drawer-header { display: flex; justify-content: space-between; gap: var(--space-4); align-items: flex-start; }

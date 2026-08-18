@@ -30,7 +30,13 @@ function safeHttpUrl(value: string) {
   }
 }
 
-export function CandidatesPage({ onOpenBatch }: { onOpenBatch: (batchId: number) => void }) {
+export function CandidatesPage({
+  active = true,
+  onOpenBatch,
+}: {
+  active?: boolean;
+  onOpenBatch: (batchId: number) => void;
+}) {
   const [keywordInput, setKeywordInput] = useState("");
   const [keyword, setKeyword] = useState("");
   const [platform, setPlatform] = useState("");
@@ -50,6 +56,11 @@ export function CandidatesPage({ onOpenBatch }: { onOpenBatch: (batchId: number)
   const latestAppearances = useRef(0);
 
   useEffect(() => setPage(1), [keyword, platform, sort, unbound]);
+
+  useEffect(() => {
+    if (active) return;
+    setSelectedId(null);
+  }, [active]);
 
   useEffect(() => {
     const requestId = ++latest.current;
@@ -226,7 +237,7 @@ export function CandidatesPage({ onOpenBatch }: { onOpenBatch: (batchId: number)
         onPrevious={() => setPage((value) => Math.max(1, value - 1))}
         onNext={() => setPage((value) => value + 1)}
       />
-      {selectedId !== null && (
+      {active && selectedId !== null && (
         <CandidateDetailDrawer
           detail={detail}
           loading={detailLoading}

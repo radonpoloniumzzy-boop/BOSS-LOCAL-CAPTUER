@@ -96,6 +96,12 @@ export function BatchesPage({
   useEffect(() => setPage(1), [platform, statusFilter, failedOnly, todayOnly]);
 
   useEffect(() => {
+    if (active) return;
+    setSelected(null);
+    setOpenedFromInitialBatch(false);
+  }, [active]);
+
+  useEffect(() => {
     if (!active) return;
     const requestId = ++latest.current;
     setData((current) => ({ ...current, loading: current.rows.length === 0, error: "" }));
@@ -164,6 +170,7 @@ export function BatchesPage({
       <>
         {notice && <div className="toast" role="status">{notice}</div>}
         <BatchDetail
+          active={active}
           batch={selected}
           onBack={closeSelected}
           onExportError={showNotice}
@@ -296,10 +303,12 @@ export function BatchesPage({
 }
 
 function BatchDetail({
+  active,
   batch,
   onBack,
   onExportError,
 }: {
+  active: boolean;
   batch: CaptureBatchRow;
   onBack: () => void;
   onExportError: (message: string) => void;
@@ -415,7 +424,7 @@ function BatchDetail({
         onPrevious={() => setPage((value) => Math.max(1, value - 1))}
         onNext={() => setPage((value) => value + 1)}
       />
-      {snapshot && (
+      {active && snapshot && (
         <Drawer label="原始快照" className="drawer-panel snapshot-reader-drawer" onClose={() => setSnapshotIndex(null)}>
           <header className="drawer-header">
             <div>
