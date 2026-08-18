@@ -8,7 +8,7 @@ const VIEWPORTS = [
   { label: "1920x1080", width: 1920, height: 1080 },
   { label: "1440x900", width: 1440, height: 900 },
   { label: "1280x720", width: 1280, height: 720 },
-  { label: "767x720", width: 767, height: 720 },
+  { label: "760x720", width: 760, height: 720 },
 ];
 
 const outputDir = process.env.READABILITY_QA_DIR || join(tmpdir(), "boss-local-readability-qa");
@@ -308,9 +308,26 @@ async function assertTableHasScrollContract(page, label) {
   });
   assert(result.hasScroller, `${label}: table scroller missing`);
   assert(result.minTextColumnWidth >= 80, `${label}: key table text columns are too compressed`);
-  if (page.viewportSize()?.width === 767) {
+  if ((page.viewportSize()?.width || 0) <= 760) {
     assert(result.scrollerScroll > result.scrollerClient, `${label}: narrow table should use horizontal scroll`);
   }
+}
+
+async function assertMobileBreakpointContract(page, label) {
+  if ((page.viewportSize()?.width || 0) > 760) return;
+  const result = await page.evaluate(() => {
+    const panel = Array.from(document.querySelectorAll(".drawer-panel")).find((element) => {
+      const rect = element.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    });
+    const header = document.querySelector(".detail-header");
+    return {
+      drawerPadding: panel ? window.getComputedStyle(panel).paddingTop : "",
+      detailHeaderColumns: header ? window.getComputedStyle(header).gridTemplateColumns : "",
+    };
+  });
+  assert(result.drawerPadding === "18px", `${label}: mobile drawer padding did not apply`);
+  assert(!result.detailHeaderColumns.includes("auto"), `${label}: mobile detail header layout did not apply`);
 }
 
 async function assertNoDrawerHorizontalOverflow(page, label) {
@@ -376,6 +393,7 @@ async function runViewport(browser, baseUrl, viewport) {
   await page.getByRole("dialog", { name: "候选人详情" }).waitFor();
   await assertVisibleHeadingAndClose(page, `${viewport.label} candidate detail`, "林知夏", "关闭候选人详情");
   await assertDrawerWithinViewport(page, `${viewport.label} candidate detail`, "候选人详情");
+  await assertMobileBreakpointContract(page, `${viewport.label} candidate detail`);
   await assertNoDrawerHorizontalOverflow(page, `${viewport.label} candidate detail`);
   await assertNoVerticalText(page, `${viewport.label} candidate detail`);
   await assertButtonsDoNotOverlap(page, `${viewport.label} candidate detail`);
@@ -393,6 +411,7 @@ async function runViewport(browser, baseUrl, viewport) {
   await page.getByRole("dialog", { name: "原始快照" }).waitFor();
   await assertVisibleHeadingAndClose(page, `${viewport.label} snapshot drawer`, "林知夏", "关闭原始快照");
   await assertDrawerWithinViewport(page, `${viewport.label} snapshot drawer`, "原始快照");
+  await assertMobileBreakpointContract(page, `${viewport.label} snapshot drawer`);
   await assertNoDrawerHorizontalOverflow(page, `${viewport.label} snapshot drawer`);
   await assertNoVerticalText(page, `${viewport.label} snapshot drawer`);
   await assertButtonsDoNotOverlap(page, `${viewport.label} snapshot drawer`);
@@ -499,30 +518,40 @@ async function runAccessibilityChecks(browser, baseUrl) {
 }
 
 async function main() {
-  const server = await createServer({
-    configFile: resolve("vite.config.ts"),
-    server: { host: "127.0.0.1", port: 0 },
-  });
-  await server.listen();
-  const address = server.httpServer.address();
-  const port = typeof address === "object" && address ? address.port : 5173;
-  const baseUrl = `http://127.0.0.1:${port}/`;
-
-  const browser = await chromium.launch({ headless: true });
-  const report = { baseUrl, outputDir, viewports: {}, accessibility: null };
+  let server = null;
+  let browser = null;
+  const report = { baseUrl: "", outputDir, viewports: {}, accessibility: null };
   try {
+    server = await createServer({
+      configFile: resolve("vite.config.ts"),
+      server: { host: "127.0.0.1", port: 0 },
+    });
+    await server.listen();
+    const address = server.httpServer.address();
+    const port = typeof address === "object" && address ? address.port : 5173;
+    const baseUrl = `http://127.0.0.1:${port}/`;
+    report.baseUrl = baseUrl;
+
+    browser = await chromium.launch({ headless: true });
     for (const viewport of VIEWPORTS) {
       report.viewports[viewport.label] = await runViewport(browser, baseUrl, viewport);
     }
     report.accessibility = await runAccessibilityChecks(browser, baseUrl);
-  } finally {
-    await browser.close();
-    await server.close();
-  }
 
-  const reportPath = join(outputDir, "readability-qa-report.json");
-  writeFileSync(reportPath, JSON.stringify(report, null, 2), "utf8");
-  console.log(`Readability QA passed. Report: ${reportPath}`);
+    const reportPath = join(outputDir, "readability-qa-report.json");
+    writeFileSync(reportPath, JSON.stringify(report, null, 2), "utf8");
+    console.log(`Readability QA passed. Report: ${reportPath}`);
+  } finally {
+    const cleanup = [];
+    if (browser) cleanup.push(browser.close());
+    if (server) cleanup.push(server.close());
+    const results = await Promise.allSettled(cleanup);
+    for (const result of results) {
+      if (result.status === "rejected") {
+        console.warn("Readability QA cleanup warning:", result.reason);
+      }
+    }
+  }
 }
 
 main().catch((error) => {
