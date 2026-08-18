@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
@@ -24,6 +25,7 @@ class SetupContext:
     project_root: Path
     venv_dir: Path
     venv_python: Path
+    venv_pythonw: Path
     requirements_file: Path
 
 
@@ -33,6 +35,7 @@ def build_context(project_root: Path) -> SetupContext:
         project_root=root,
         venv_dir=root / ".venv",
         venv_python=root / ".venv" / "Scripts" / "python.exe",
+        venv_pythonw=root / ".venv" / "Scripts" / "pythonw.exe",
         requirements_file=root / "requirements.txt",
     )
 
@@ -49,12 +52,17 @@ def is_supported_python_version(version_info: Sequence[int] | object) -> bool:
     return int(major) == EXPECTED_PYTHON_MAJOR and int(minor) == EXPECTED_PYTHON_MINOR
 
 
-def default_runner(command: Sequence[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
+def default_runner(
+    command: Sequence[str],
+    *,
+    cwd: Path,
+    capture_output: bool,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         list(command),
         cwd=str(cwd),
-        capture_output=True,
-        text=True,
+        capture_output=capture_output,
+        text=capture_output,
         check=False,
     )
 
@@ -63,13 +71,14 @@ def run_checked(
     command: Sequence[str],
     *,
     cwd: Path,
-    runner: Callable[[Sequence[str]], subprocess.CompletedProcess[str]] | None = None,
+    runner: Callable[[Sequence[str], Path, bool], subprocess.CompletedProcess[str]] | None = None,
     code: str,
     message: str,
+    capture_output: bool,
 ) -> subprocess.CompletedProcess[str]:
-    invoke = runner or (lambda current: default_runner(current, cwd=cwd))
+    invoke = runner or default_runner
     try:
-        completed = invoke(command)
+        completed = invoke(command, cwd, capture_output)
     except OSError as exc:
         raise SetupFailure(code, message) from exc
     if completed.returncode != 0:
@@ -77,51 +86,119 @@ def run_checked(
     return completed
 
 
-def validate_existing_venv(
+def _existing_venv_recovery_message(reason: str) -> str:
+    return (
+        f"当前项目内的 .venv 无法继续使用：{reason}。"
+        "请先关闭相关程序，仅将当前项目目录里的 .venv 重命名为备份目录后，再重新运行 setup_web_workbench.cmd。"
+    )
+
+
+def _created_venv_failure_message(base_message: str, backup_dir: Path | None = None) -> str:
+    if backup_dir is not None:
+        return (
+            f"{base_message} 已保留本次失败残留目录：{backup_dir.name}。"
+            "下次可直接重新运行 setup_web_workbench.cmd。"
+        )
+    if backup_dir is None:
+        return (
+            f"{base_message} 如果当前项目目录里已经出现残留 .venv，"
+            "请先关闭相关程序，手工将当前项目目录里的 .venv 重命名为备份目录后，再重新运行 setup_web_workbench.cmd。"
+        )
+
+
+def _incomplete_backup_path(context: SetupContext) -> Path:
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    candidate = context.project_root / f".venv.incomplete-{timestamp}"
+    suffix = 1
+    while candidate.exists():
+        suffix += 1
+        candidate = context.project_root / f".venv.incomplete-{timestamp}-{suffix}"
+    return candidate
+
+
+def _preserve_incomplete_venv(context: SetupContext) -> Path | None:
+    if not context.venv_dir.exists():
+        return None
+    backup_dir = _incomplete_backup_path(context)
+    try:
+        context.venv_dir.rename(backup_dir)
+    except OSError:
+        return None
+    return backup_dir
+
+
+def _verify_cpython_312(
     context: SetupContext,
     *,
-    runner: Callable[[Sequence[str]], subprocess.CompletedProcess[str]] | None = None,
+    runner: Callable[[Sequence[str], Path, bool], subprocess.CompletedProcess[str]] | None = None,
 ) -> None:
-    if not context.venv_python.is_file():
-        raise SetupFailure(
-            "venv_missing_python",
-            "现有 .venv 缺少 python.exe，请重新运行 setup_web_workbench.cmd 完成初始化。",
-        )
     completed = run_checked(
-        [str(context.venv_python), "-V"],
+        [
+            str(context.venv_python),
+            "-c",
+            "import sys; print(f'{sys.implementation.name}|{sys.version_info.major}|{sys.version_info.minor}')",
+        ],
         cwd=context.project_root,
         runner=runner,
         code="venv_invalid",
-        message="现有 .venv 不是可用的官方 CPython 3.12 运行环境，请修复后重新初始化。",
+        message=_existing_venv_recovery_message("它不是可用的官方 CPython 3.12 运行环境"),
+        capture_output=True,
     )
     version_text = (completed.stdout or completed.stderr or "").strip()
-    if not version_text.startswith("Python 3.12"):
+    if version_text != "cpython|3|12":
         raise SetupFailure(
             "venv_invalid",
-            "现有 .venv 不是可用的官方 CPython 3.12 运行环境，请修复后重新初始化。",
+            _existing_venv_recovery_message("它不是可用的官方 CPython 3.12 运行环境"),
         )
+
+
+def validate_existing_venv(
+    context: SetupContext,
+    *,
+    runner: Callable[[Sequence[str], Path, bool], subprocess.CompletedProcess[str]] | None = None,
+) -> None:
+    if not context.venv_python.is_file():
+        raise SetupFailure(
+            "venv_incomplete",
+            _existing_venv_recovery_message("缺少 python.exe"),
+        )
+    if not context.venv_pythonw.is_file():
+        raise SetupFailure(
+            "venv_incomplete",
+            _existing_venv_recovery_message("缺少 pythonw.exe"),
+        )
+    _verify_cpython_312(context, runner=runner)
 
 
 def ensure_venv(
     context: SetupContext,
     *,
-    runner: Callable[[Sequence[str]], subprocess.CompletedProcess[str]] | None = None,
+    runner: Callable[[Sequence[str], Path, bool], subprocess.CompletedProcess[str]] | None = None,
 ) -> None:
-    if not context.venv_dir.exists():
-        run_checked(
-            ["py", "-3.12", "-m", "venv", str(context.venv_dir)],
-            cwd=context.project_root,
-            runner=runner,
-            code="venv_create_failed",
-            message="无法创建网页工作台运行环境，请确认官方 CPython 3.12 可用后重试。",
-        )
+    venv_preexisting = context.venv_dir.exists()
+    if not venv_preexisting:
+        try:
+            run_checked(
+                ["py", "-3.12", "-m", "venv", str(context.venv_dir)],
+                cwd=context.project_root,
+                runner=runner,
+                code="venv_create_failed",
+                message="无法创建网页工作台运行环境，请确认官方 CPython 3.12 可用后重试。",
+                capture_output=False,
+            )
+        except SetupFailure as exc:
+            backup_dir = _preserve_incomplete_venv(context)
+            raise SetupFailure(
+                "venv_create_failed",
+                _created_venv_failure_message(str(exc), backup_dir),
+            ) from exc
     validate_existing_venv(context, runner=runner)
 
 
 def install_requirements(
     context: SetupContext,
     *,
-    runner: Callable[[Sequence[str]], subprocess.CompletedProcess[str]] | None = None,
+    runner: Callable[[Sequence[str], Path, bool], subprocess.CompletedProcess[str]] | None = None,
 ) -> None:
     if not context.requirements_file.is_file():
         raise SetupFailure("requirements_missing", "项目缺少 requirements.txt，无法完成初始化。")
@@ -131,6 +208,7 @@ def install_requirements(
         runner=runner,
         code="dependency_install_failed",
         message="网页工作台依赖安装失败，请检查网络或 Python 环境后重试。",
+        capture_output=False,
     )
 
 
@@ -154,7 +232,7 @@ def run_setup(
     project_root: Path,
     *,
     version_info: Sequence[int] | object | None = None,
-    runner: Callable[[Sequence[str]], subprocess.CompletedProcess[str]] | None = None,
+    runner: Callable[[Sequence[str], Path, bool], subprocess.CompletedProcess[str]] | None = None,
 ) -> str:
     if not is_supported_python_version(version_info or sys.version_info):
         raise SetupFailure(
@@ -162,8 +240,12 @@ def run_setup(
             "需要使用官方 CPython 3.12 运行 setup_web_workbench.py。",
         )
     context = build_context(project_root)
+    print("正在检查 CPython 3.12")
+    print("正在检查或创建项目运行环境")
     ensure_venv(context, runner=runner)
+    print("正在安装项目依赖")
     install_requirements(context, runner=runner)
+    print("正在检查网页资源和插件文件")
     validate_project_files(context)
     return "初始化完成，请双击 launch_web_workbench.cmd 启动网页工作台。"
 
@@ -172,6 +254,7 @@ def main() -> int:
     try:
         message = run_setup(Path(__file__).resolve().parent)
     except SetupFailure as exc:
+        print(f"初始化失败 [{exc.code}]", file=sys.stderr)
         print(str(exc), file=sys.stderr)
         return 1
     print(message)

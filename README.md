@@ -37,9 +37,9 @@
 
 详细说明见：
 
-- [网页工作台快速开始](D:\codex\BOSS-LOCAL-CAPTURE-review\docs\guides\web-workbench-quick-start.md)
-- [备份与恢复](D:\codex\BOSS-LOCAL-CAPTURE-review\docs\guides\backup-and-recovery.md)
-- [当前预览版本说明](D:\codex\BOSS-LOCAL-CAPTURE-review\docs\releases\current-preview.md)
+- [网页工作台快速开始](docs/guides/web-workbench-quick-start.md)
+- [备份与恢复](docs/guides/backup-and-recovery.md)
+- [当前预览版本说明](docs/releases/current-preview.md)
 
 ## 初始化与启动
 
@@ -118,7 +118,7 @@ launch_web_workbench.cmd
 - 数据库故障时不得创建空库替代旧库。
 
 备份与恢复细则见：
-[backup-and-recovery.md](D:\codex\BOSS-LOCAL-CAPTURE-review\docs\guides\backup-and-recovery.md)
+[backup-and-recovery.md](docs/guides/backup-and-recovery.md)
 
 ## 版本来源
 
@@ -133,7 +133,7 @@ launch_web_workbench.cmd
 ## 仓库结构
 
 ```text
-D:\codex\BOSS-LOCAL-CAPTURE-review
+<项目目录>\
   app.py
   web_app.py
   setup_web_workbench.cmd

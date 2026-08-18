@@ -3,7 +3,9 @@
 ## 对应代码基线
 
 - Git 分支：`main`
-- 当前确认基线提交：`d5cb9cadb9cf4e0f0167451b15a12c4f42a01652`
+- 正式下载基准：GitHub `main`
+- 具体提交：以当前 `main` HEAD 或正式 release/tag 为准
+- M0 开始时的审计基线：`d5cb9cadb9cf4e0f0167451b15a12c4f42a01652`
 
 ## 组件版本来源
 

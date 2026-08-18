@@ -3,7 +3,10 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
 from setup_web_workbench import SetupFailure, build_context, is_supported_python_version, run_setup
 
@@ -40,14 +43,25 @@ class SetupWorkbenchTest(unittest.TestCase):
             encoding="utf-8",
         )
 
-    def _runner(self, *, fail_command: tuple[str, ...] | None = None, create_venv: bool = True):
-        calls: list[list[str]] = []
+    def _runner(
+        self,
+        *,
+        fail_command: tuple[str, ...] | None = None,
+        create_venv: bool = True,
+        version_output: str = "cpython|3|12",
+        rename_on_create_failure: bool = False,
+        fail_with_partial_venv: bool = False,
+    ):
+        calls: list[dict[str, object]] = []
         context = build_context(self.root)
 
-        def run(command):
+        def run(command, cwd, capture_output):
             command = list(command)
-            calls.append(command)
+            calls.append({"command": command, "cwd": cwd, "capture_output": capture_output})
             if fail_command and tuple(command[: len(fail_command)]) == fail_command:
+                if fail_with_partial_venv and command[:4] == ["py", "-3.12", "-m", "venv"]:
+                    context.venv_python.parent.mkdir(parents=True, exist_ok=True)
+                    context.venv_python.write_text("", encoding="utf-8")
                 class Result:
                     returncode = 1
                     stdout = ""
@@ -57,9 +71,10 @@ class SetupWorkbenchTest(unittest.TestCase):
             if command[:4] == ["py", "-3.12", "-m", "venv"] and create_venv:
                 context.venv_python.parent.mkdir(parents=True, exist_ok=True)
                 context.venv_python.write_text("", encoding="utf-8")
+                context.venv_pythonw.write_text("", encoding="utf-8")
             class Result:
                 returncode = 0
-                stdout = "Python 3.12.9" if command[-1] == "-V" or command[1:] == ["-V"] else ""
+                stdout = version_output if "-c" in command else ""
                 stderr = ""
 
             return Result()
@@ -79,7 +94,7 @@ class SetupWorkbenchTest(unittest.TestCase):
         calls, runner = self._runner()
         message = run_setup(self.root, version_info=(3, 12, 0), runner=runner)
         self.assertEqual(message, "初始化完成，请双击 launch_web_workbench.cmd 启动网页工作台。")
-        create_call = next(command for command in calls if command[:4] == ["py", "-3.12", "-m", "venv"])
+        create_call = next(entry["command"] for entry in calls if entry["command"][:4] == ["py", "-3.12", "-m", "venv"])
         self.assertEqual(Path(create_call[4]), (self.root / ".venv").resolve())
         self.assertFalse((self.root / "bootstrap.json").exists())
         self.assertFalse((self.root / "data" / "boss_local_tool.db").exists())
@@ -88,9 +103,33 @@ class SetupWorkbenchTest(unittest.TestCase):
         context = build_context(self.root)
         context.venv_python.parent.mkdir(parents=True, exist_ok=True)
         context.venv_python.write_text("", encoding="utf-8")
+        context.venv_pythonw.write_text("", encoding="utf-8")
         calls, runner = self._runner(create_venv=False)
         run_setup(self.root, version_info=(3, 12, 0), runner=runner)
-        self.assertFalse(any(command[:4] == ["py", "-3.12", "-m", "venv"] for command in calls))
+        self.assertFalse(any(entry["command"][:4] == ["py", "-3.12", "-m", "venv"] for entry in calls))
+
+    def test_existing_venv_missing_pythonw_fails_without_install(self) -> None:
+        context = build_context(self.root)
+        context.venv_python.parent.mkdir(parents=True, exist_ok=True)
+        context.venv_python.write_text("", encoding="utf-8")
+        calls, runner = self._runner(create_venv=False)
+        with self.assertRaises(SetupFailure) as caught:
+            run_setup(self.root, version_info=(3, 12, 0), runner=runner)
+        self.assertEqual(caught.exception.code, "venv_incomplete")
+        self.assertIn("仅将当前项目目录里的 .venv 重命名为备份目录", str(caught.exception))
+        self.assertFalse(any(entry["command"][0:3] == [str(context.venv_python), "-m", "pip"] for entry in calls))
+
+    def test_existing_venv_wrong_python_version_fails_without_overwrite(self) -> None:
+        context = build_context(self.root)
+        context.venv_python.parent.mkdir(parents=True, exist_ok=True)
+        context.venv_python.write_text("", encoding="utf-8")
+        context.venv_pythonw.write_text("", encoding="utf-8")
+        calls, runner = self._runner(create_venv=False, version_output="cpython|3|11")
+        with self.assertRaises(SetupFailure) as caught:
+            run_setup(self.root, version_info=(3, 12, 0), runner=runner)
+        self.assertEqual(caught.exception.code, "venv_invalid")
+        self.assertTrue(context.venv_dir.exists())
+        self.assertFalse(any(entry["command"][:4] == ["py", "-3.12", "-m", "venv"] for entry in calls))
 
     def test_dependency_install_failure_returns_stable_error(self) -> None:
         calls, runner = self._runner(
@@ -101,6 +140,64 @@ class SetupWorkbenchTest(unittest.TestCase):
         self.assertEqual(caught.exception.code, "dependency_install_failed")
         self.assertIn("依赖安装失败", str(caught.exception))
         self.assertTrue(calls)
+        pip_call = next(entry for entry in calls if entry["command"][0:3] == [str((self.root / ".venv" / "Scripts" / "python.exe").resolve()), "-m", "pip"])
+        self.assertFalse(pip_call["capture_output"])
+
+    def test_new_venv_failure_preserves_half_created_environment_as_backup(self) -> None:
+        calls, runner = self._runner(
+            fail_command=("py", "-3.12", "-m", "venv"),
+            fail_with_partial_venv=True,
+        )
+        with self.assertRaises(SetupFailure) as caught:
+            run_setup(self.root, version_info=(3, 12, 0), runner=runner)
+        self.assertEqual(caught.exception.code, "venv_create_failed")
+        self.assertFalse((self.root / ".venv").exists())
+        backups = list(self.root.glob(".venv.incomplete-*"))
+        self.assertEqual(len(backups), 1)
+        self.assertIn(backups[0].name, str(caught.exception))
+        self.assertFalse(any(entry["command"][0:3] == [str((self.root / ".venv" / "Scripts" / "python.exe").resolve()), "-m", "pip"] for entry in calls))
+        retry_calls, retry_runner = self._runner()
+        run_setup(self.root, version_info=(3, 12, 0), runner=retry_runner)
+        self.assertTrue((self.root / ".venv").exists())
+
+    def test_existing_incomplete_venv_is_not_recreated(self) -> None:
+        context = build_context(self.root)
+        context.venv_dir.mkdir(parents=True, exist_ok=True)
+        calls, runner = self._runner(create_venv=False)
+        with self.assertRaises(SetupFailure) as caught:
+            run_setup(self.root, version_info=(3, 12, 0), runner=runner)
+        self.assertEqual(caught.exception.code, "venv_incomplete")
+        self.assertFalse(any(entry["command"][:4] == ["py", "-3.12", "-m", "venv"] for entry in calls))
+        self.assertIn("仅将当前项目目录里的 .venv 重命名为备份目录", str(caught.exception))
+
+    def test_run_setup_prints_visible_progress_and_keeps_success_paths_clean(self) -> None:
+        calls, runner = self._runner()
+        stdout = StringIO()
+        with redirect_stdout(stdout):
+            run_setup(self.root, version_info=(3, 12, 0), runner=runner)
+        output = stdout.getvalue()
+        self.assertIn("正在检查 CPython 3.12", output)
+        self.assertIn("正在检查或创建项目运行环境", output)
+        self.assertIn("正在安装项目依赖", output)
+        self.assertIn("正在检查网页资源和插件文件", output)
+        venv_call = next(entry for entry in calls if entry["command"][:4] == ["py", "-3.12", "-m", "venv"])
+        self.assertFalse(venv_call["capture_output"])
+
+    def test_main_reports_stable_failure_code_without_creating_database_files(self) -> None:
+        import setup_web_workbench
+
+        stderr = StringIO()
+        with patch.object(
+            setup_web_workbench,
+            "run_setup",
+            side_effect=SetupFailure("requirements_missing", "项目缺少 requirements.txt，无法完成初始化。"),
+        ):
+            with redirect_stderr(stderr):
+                exit_code = setup_web_workbench.main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("requirements_missing", stderr.getvalue())
+        self.assertFalse((self.root / "bootstrap.json").exists())
+        self.assertFalse((self.root / "data" / "boss_local_tool.db").exists())
 
     def test_frontend_resource_missing_fails(self) -> None:
         (self.root / "web" / "frontend" / "dist" / "assets" / "index.js").unlink()
@@ -132,17 +229,27 @@ class SetupWorkbenchTest(unittest.TestCase):
         self.assertIn("setup_web_workbench.cmd", text)
         self.assertIn("缺少网页工作台运行环境", text)
 
-    def test_readme_and_guides_do_not_keep_outdated_web_phase_language(self) -> None:
+    def test_readme_and_guides_are_portable_and_current_preview_is_not_fixed_to_old_audit_commit(self) -> None:
         repo = Path(__file__).resolve().parents[1]
         readme = (repo / "README.md").read_text(encoding="utf-8")
+        quick_start = (repo / "docs" / "guides" / "web-workbench-quick-start.md").read_text(encoding="utf-8")
+        backup = (repo / "docs" / "guides" / "backup-and-recovery.md").read_text(encoding="utf-8")
+        current_preview = (repo / "docs" / "releases" / "current-preview.md").read_text(encoding="utf-8")
         self.assertTrue((repo / "docs" / "guides" / "web-workbench-quick-start.md").is_file())
         self.assertTrue((repo / "docs" / "guides" / "backup-and-recovery.md").is_file())
         self.assertTrue((repo / "docs" / "releases" / "current-preview.md").is_file())
         self.assertIn("launch_web_workbench.cmd", readme)
         self.assertIn("setup_web_workbench.cmd", readme)
-        self.assertNotIn("网页只是 Phase 1 壳层", readme)
-        self.assertNotIn("插件必须连接 17863 桌面端", readme)
-        self.assertNotIn("网页端没有候选人和批次业务页面", readme)
+        self.assertIn("[网页工作台快速开始](docs/guides/web-workbench-quick-start.md)", readme)
+        self.assertIn("[备份与恢复](docs/guides/backup-and-recovery.md)", readme)
+        self.assertIn("[当前预览版本说明](docs/releases/current-preview.md)", readme)
+        self.assertIn("<项目目录>", readme)
+        for text in (readme, quick_start, backup, current_preview):
+            self.assertNotIn(r"D:\codex\BOSS-LOCAL-CAPTURE-review", text)
+        self.assertIn("正式下载基准", current_preview)
+        self.assertIn("GitHub `main`", current_preview)
+        self.assertIn("M0 开始时的审计基线", current_preview)
+        self.assertNotIn("当前确认基线提交", current_preview)
 
 
 if __name__ == "__main__":
