@@ -428,18 +428,28 @@ async function refreshWebIntakeStatus(settingsOverride = null, options = {}) {
 
 async function refreshPluginContext(settingsOverride = null) {
   const settings = settingsOverride ? { ...DEFAULTS, ...settingsOverride } : collectSettings();
-  if (!isWebWorkbenchMode(settings)) {
-    pluginContextStatusEl.textContent = "当前为桌面兼容模式，岗位上下文由桌面端自动化流程决定。";
-    return settings;
-  }
-  if (!settings.apiToken) {
+  async function clearContextIds(message) {
     activeJobProfileId = null;
     activeRecruitmentTaskId = null;
-    pluginContextStatusEl.textContent = "当前未选择招聘任务；仍可进行无岗位采集。";
+    await chrome.storage.local.set({ jobProfileId: null, recruitmentTaskId: null });
+    pluginContextStatusEl.textContent = message;
     return { ...settings, jobProfileId: null, recruitmentTaskId: null };
+  }
+  if (!isWebWorkbenchMode(settings)) {
+    activeJobProfileId = null;
+    activeRecruitmentTaskId = null;
+    await chrome.storage.local.set({ jobProfileId: null, recruitmentTaskId: null });
+    pluginContextStatusEl.textContent = "当前为桌面兼容模式，岗位上下文由桌面端自动化流程决定。";
+    return { ...settings, jobProfileId: null, recruitmentTaskId: null };
+  }
+  if (!settings.apiToken) {
+    return clearContextIds("当前未选择招聘任务；仍可进行无岗位采集。");
   }
 
   const apiBase = BossLocalWebIntake.deriveWebApiBase(settings);
+  await chrome.storage.local.set({ jobProfileId: null, recruitmentTaskId: null });
+  activeJobProfileId = null;
+  activeRecruitmentTaskId = null;
   try {
     const response = await fetch(`${apiBase}/api/plugin/context`, {
       method: "GET",
@@ -448,11 +458,7 @@ async function refreshPluginContext(settingsOverride = null) {
       },
     });
     if (response.status === 409) {
-      activeJobProfileId = null;
-      activeRecruitmentTaskId = null;
-      await chrome.storage.local.set({ jobProfileId: null, recruitmentTaskId: null });
-      pluginContextStatusEl.textContent = "当前未选择招聘任务；仍可进行无岗位采集。";
-      return { ...settings, jobProfileId: null, recruitmentTaskId: null };
+      return clearContextIds("上下文未确认，将按无岗位采集。");
     }
     const payload = await response.json();
     if (!response.ok) {
@@ -481,8 +487,7 @@ async function refreshPluginContext(settingsOverride = null) {
     ].join("\n");
     return synced;
   } catch (_error) {
-    pluginContextStatusEl.textContent = "当前未能读取招聘任务上下文；仍可进行无岗位采集。";
-    return settings;
+    return clearContextIds("上下文未确认，将按无岗位采集。");
   }
 }
 

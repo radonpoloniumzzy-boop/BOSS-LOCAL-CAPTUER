@@ -1011,6 +1011,15 @@ async function testPopupPairsWithSingleWebCodeAndRemembersConnection() {
         assert.strictEqual(options.headers["X-Boss-Local-Token"], "remembered-web-token");
         return { ok: true, status: 200, async json() { return { ok: true }; } };
       }
+      if (String(url).endsWith("/api/plugin/context")) {
+        return {
+          ok: false,
+          status: 409,
+          async json() {
+            return { error: { code: "context_unavailable", message: "当前未选择可用招聘任务。" } };
+          },
+        };
+      }
       throw new Error(`Unexpected fetch: ${String(url)}`);
     },
   });
@@ -1289,6 +1298,78 @@ async function testPopupManualDesktopAdvancedSettingsOverrideWebMode() {
   assert(!popup.fetchCalls.some((call) => call.url.endsWith("/api/intake/candidates")));
 }
 
+async function testPopupClearsOldTaskContextWhenNewConnectionContextFails() {
+  let intakePayload = null;
+  const popup = createPopupTestContext({
+    store: {
+      apiBase: "http://127.0.0.1:17864",
+      apiToken: "old-token",
+      connectionMode: "web",
+      connectionModeConfirmed: true,
+      jobProfileId: 99,
+      recruitmentTaskId: 88,
+    },
+    runtimeHandler: createPopupWebRuntimeHandler(),
+    fetchImpl: async (url, options = {}) => {
+      const endpoint = String(url);
+      if (endpoint === "http://127.0.0.1:19064/api/plugin/pair") {
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return { api_base: "http://127.0.0.1:19064", api_token: "new-token" };
+          },
+        };
+      }
+      if (endpoint === "http://127.0.0.1:19064/api/plugin/connection/check") {
+        assert.strictEqual(options.headers["X-Boss-Local-Token"], "new-token");
+        return { ok: true, status: 200, async json() { return { ok: true }; } };
+      }
+      if (endpoint === "http://127.0.0.1:19064/api/plugin/context") {
+        return {
+          ok: false,
+          status: 401,
+          async json() {
+            return { error: { code: "unauthorized", message: "本地写入鉴权失败。" } };
+          },
+        };
+      }
+      if (endpoint === "http://127.0.0.1:19064/api/intake/candidates") {
+        intakePayload = JSON.parse(options.body);
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return {
+              batch_id: 19065,
+              status: "completed",
+              received_count: 1,
+              inserted_candidates: 1,
+              updated_candidates: 0,
+              skipped_candidates: 0,
+              failed_candidates: 0,
+            };
+          },
+        };
+      }
+      throw new Error(`Unexpected fetch: ${endpoint}`);
+    },
+  });
+
+  popup.elements.pairingCode.value =
+    "boss-local://web-pair?apiBase=http%3A%2F%2F127.0.0.1%3A19064&pairingCode=ABC123-DEF456";
+  await popup.api.applyPairingCodeAndTest();
+  assert.strictEqual(popup.store.apiBase, "http://127.0.0.1:19064");
+  assert.strictEqual(popup.store.jobProfileId, null);
+  assert.strictEqual(popup.store.recruitmentTaskId, null);
+  assert(popup.elements.pluginContextStatus.textContent.includes("上下文未确认"));
+
+  await popup.api.runCollection(false);
+  assert.notStrictEqual(intakePayload, null);
+  assert.strictEqual(intakePayload.job_profile_id, null);
+  assert.strictEqual(intakePayload.recruitment_task_id, null);
+}
+
 async function testPopupWebModeCollectCurrentPostsDirectlyToWebIntake() {
   const popup = createPopupTestContext({
     apiBase: "http://127.0.0.1:17864",
@@ -1336,7 +1417,7 @@ async function testPopupWebModeCollectCurrentPostsDirectlyToWebIntake() {
   assert.strictEqual(payload.recruitment_task_id, null);
   assert.strictEqual(payload.candidates[0].platform_uid, "boss:1");
   assert.strictEqual(payload.candidates[0].source_candidate_id, "boss-1");
-  assert(popup.elements.pluginContextStatus.textContent.includes("仍可进行无岗位采集"));
+  assert(popup.elements.pluginContextStatus.textContent.includes("上下文未确认"));
   assert(popup.elements.automationAuto.title.includes("Web"));
 
   await popup.api.downloadCurrentBatch();
@@ -3653,6 +3734,7 @@ async function main() {
   await testPopupManualDesktopAdvancedSettingsOverrideWebMode();
   await testPopupPairingSuccessDoesNotReferenceCollectionVariables();
   await testPopupDesktopCustomPortRemainsDesktopMode();
+  await testPopupClearsOldTaskContextWhenNewConnectionContextFails();
   await testPopupWebModeCollectCurrentPostsDirectlyToWebIntake();
   await testPopupWebModeCollectAutoPostsDirectlyToWebIntake();
   await testPopupDesktopModeStillUsesDesktopImportOnly();

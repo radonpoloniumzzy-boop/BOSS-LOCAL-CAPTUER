@@ -52,10 +52,14 @@ class IntakeCandidatesRequest(BaseModel):
 
 
 class PairingRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
     pairing_code: str
 
 
 class JobProfilePayload(BaseModel):
+    model_config = {"extra": "forbid"}
+
     job_title: str
     department: str = ""
     hiring_manager: str = ""
@@ -81,10 +85,18 @@ class JobProfileUpdatePayload(JobProfilePayload):
 
 
 class StatusPayload(BaseModel):
+    model_config = {"extra": "forbid"}
+
     status: str
 
 
+class JobProfileStatusPayload(StatusPayload):
+    expected_version: int
+
+
 class RecruitmentTaskPayload(BaseModel):
+    model_config = {"extra": "forbid"}
+
     name: str
     role_id: int
     profile_version: int
@@ -94,6 +106,8 @@ class RecruitmentTaskPayload(BaseModel):
 
 
 class PluginContextPayload(BaseModel):
+    model_config = {"extra": "forbid"}
+
     recruitment_task_id: int | None = None
 
 
@@ -489,6 +503,15 @@ def create_web_app(
             "message": "已更新插件当前任务。" if context else "已清除插件当前任务。",
         }
 
+    @app.get("/api/plugin-context")
+    def get_web_plugin_context() -> dict[str, object]:
+        if runtime.repository is None:
+            raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。")
+        try:
+            return {"context": runtime.get_plugin_context()}
+        except RuntimeError as exc:
+            raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。") from exc
+
     @app.get("/api/plugin/context")
     def get_plugin_context(_auth: None = Depends(require_local_api_token)) -> dict[str, object]:
         try:
@@ -571,20 +594,24 @@ def create_web_app(
         }
 
     @app.post("/api/job-profiles/{profile_id}/status")
-    def set_job_profile_status(profile_id: int, payload: StatusPayload) -> dict[str, object]:
+    def set_job_profile_status(profile_id: int, payload: JobProfileStatusPayload) -> dict[str, object]:
         if runtime.repository is None:
             raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。")
         try:
-            profile = runtime.repository.set_job_profile_status(profile_id, payload.status)
+            profile = runtime.set_job_profile_status(
+                profile_id,
+                payload.status,
+                expected_version=payload.expected_version,
+            )
+        except JobProfileVersionConflictError as exc:
+            raise ApiError(409, "job_profile_version_conflict", str(exc)) from exc
         except InvalidJobProfileStatusTransitionError as exc:
             raise ApiError(409, "invalid_job_profile_status_transition", str(exc)) from exc
+        except RuntimeError as exc:
+            raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。") from exc
         except ValueError as exc:
             code = "job_profile_not_found" if "不存在" in str(exc) else "invalid_request"
             raise ApiError(404 if code == "job_profile_not_found" else 400, code, str(exc)) from exc
-        if payload.status == "closed":
-            current = runtime.get_plugin_context()
-            if current and int(current["job_profile_id"]) == profile_id:
-                runtime.set_plugin_context(None)
         return _project_job_profile(profile.to_dict(), detail=True)
 
     @app.get("/api/recruitment-tasks")
@@ -635,15 +662,13 @@ def create_web_app(
         if runtime.repository is None:
             raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。")
         try:
-            saved = runtime.repository.set_recruitment_task_status(task_id, payload.status)
+            saved = runtime.set_recruitment_task_status(task_id, payload.status)
         except InvalidRecruitmentTaskStatusTransitionError as exc:
             raise ApiError(409, "invalid_recruitment_task_status_transition", str(exc)) from exc
+        except RuntimeError as exc:
+            raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。") from exc
         except ValueError as exc:
             raise ApiError(400, "invalid_request", str(exc)) from exc
-        if payload.status in {"completed", "cancelled", "failed"}:
-            current = runtime.get_plugin_context()
-            if current and int(current["recruitment_task_id"]) == task_id:
-                runtime.set_plugin_context(None)
         return _project_recruitment_task(runtime.repository.get_recruitment_task_summary(int(saved.id)))
 
     @app.get("/api/candidates")

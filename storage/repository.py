@@ -1969,32 +1969,121 @@ class CandidateRepository:
             saved = self.save_job_profile(profile)
             return saved, True
 
-        current = self.get_job_profile(int(profile.id))
-        if current is None:
-            raise ValueError("岗位档案不存在")
         if expected_version is None:
             raise JobProfileVersionConflictError("保存前请刷新岗位档案版本。")
-        if int(current.get("version") or 0) != int(expected_version):
-            raise JobProfileVersionConflictError("岗位档案已被更新，请刷新后再保存。")
+        return self._save_web_job_profile_existing_atomic(profile, expected_version=int(expected_version))
 
-        profile.prompt_text = str(current.get("prompt_text") or "")
-        profile.prompt_source = str(current.get("prompt_source") or "generated")
-        profile.status = str(current.get("status") or profile.status or "draft")
-        profile.created_at = str(current.get("created_at") or "")
-        profile.version = int(current.get("version") or 1)
-        profile.parent_profile_id = current.get("parent_profile_id")  # type: ignore[assignment]
+    def _save_web_job_profile_existing_atomic(
+        self,
+        profile: ScreeningProfile,
+        *,
+        expected_version: int,
+    ) -> tuple[ScreeningProfile, bool]:
+        connection = self.db.get_connection()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM screening_profiles WHERE id = ?",
+                (int(profile.id),),
+            ).fetchone()
+            if row is None:
+                connection.rollback()
+                raise ValueError("岗位档案不存在")
+            current = self._decode_screening_profile(row)
+            if int(current.get("version") or 0) != expected_version:
+                connection.rollback()
+                raise JobProfileVersionConflictError("岗位档案已被更新，请刷新后再保存。")
 
-        if not self._job_profile_has_web_changes(current, profile):
-            return ScreeningProfile(
-                **{
-                    key: current.get(key)
-                    for key in ScreeningProfile.__dataclass_fields__
-                    if key in current
-                }
-            ), False
+            duplicate = connection.execute(
+                "SELECT id FROM screening_profiles WHERE job_title = ? AND id <> ?",
+                (profile.job_title, int(profile.id)),
+            ).fetchone()
+            if duplicate is not None:
+                connection.rollback()
+                raise ValueError("同名岗位档案已存在")
 
-        saved = self.save_job_profile(profile)
-        return saved, True
+            profile.prompt_text = str(current.get("prompt_text") or "")
+            profile.prompt_source = str(current.get("prompt_source") or "generated")
+            profile.status = str(current.get("status") or profile.status or "draft")
+            profile.created_at = str(current.get("created_at") or "")
+            profile.version = int(current.get("version") or 1)
+            profile.parent_profile_id = current.get("parent_profile_id")  # type: ignore[assignment]
+
+            if not self._job_profile_has_web_changes(current, profile):
+                connection.commit()
+                return ScreeningProfile(
+                    **{
+                        key: current.get(key)
+                        for key in ScreeningProfile.__dataclass_fields__
+                        if key in current
+                    }
+                ), False
+
+            timestamp = now_iso()
+            next_version = int(current.get("version") or 1) + 1
+            values = self._job_profile_sql_values(profile)
+            cursor = connection.execute(
+                """
+                UPDATE screening_profiles
+                SET job_title = ?, department = ?, hiring_manager = ?, location = ?,
+                    employment_type = ?, experience_requirement = ?,
+                    education_requirement = ?, target_hires = ?, recruitment_deadline = ?,
+                    priority = ?, status = ?, jd_text = ?, prompt_text = ?, prompt_source = ?,
+                    must_have_json = ?, nice_to_have_json = ?, risk_flags_json = ?,
+                    exclusions_json = ?, interview_checks_json = ?, evidence_policy_json = ?,
+                    version = ?, parent_profile_id = ?, updated_at = ?
+                WHERE id = ? AND version = ?
+                """,
+                (*values, next_version, profile.parent_profile_id, timestamp, int(profile.id), expected_version),
+            )
+            if cursor.rowcount != 1:
+                connection.rollback()
+                raise JobProfileVersionConflictError("岗位档案已被更新，请刷新后再保存。")
+            profile.version = next_version
+            profile.updated_at = timestamp
+            connection.execute(
+                """
+                INSERT INTO job_profile_versions(profile_id, version, snapshot_json, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    int(profile.id),
+                    int(profile.version),
+                    json.dumps(profile.to_dict(), ensure_ascii=False, sort_keys=True),
+                    timestamp,
+                ),
+            )
+            connection.commit()
+            return profile, True
+        except Exception:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+
+    @staticmethod
+    def _job_profile_sql_values(profile: ScreeningProfile) -> tuple[object, ...]:
+        return (
+            profile.job_title,
+            profile.department,
+            profile.hiring_manager,
+            profile.location,
+            profile.employment_type,
+            profile.experience_requirement,
+            profile.education_requirement,
+            max(1, int(profile.target_hires)),
+            profile.recruitment_deadline,
+            profile.priority,
+            profile.status,
+            profile.jd_text,
+            profile.prompt_text,
+            profile.prompt_source,
+            json.dumps(profile.must_have, ensure_ascii=False),
+            json.dumps(profile.nice_to_have, ensure_ascii=False),
+            json.dumps(profile.risk_flags, ensure_ascii=False),
+            json.dumps(profile.exclusions, ensure_ascii=False),
+            json.dumps(profile.interview_checks, ensure_ascii=False),
+            json.dumps(profile.evidence_policy, ensure_ascii=False, sort_keys=True),
+        )
 
     @staticmethod
     def _job_profile_has_web_changes(current: dict[str, object], profile: ScreeningProfile) -> bool:
@@ -2166,9 +2255,21 @@ class CandidateRepository:
     def clone_screening_profile(self, profile_id: int, new_job_title: str) -> ScreeningProfile:
         return self.clone_job_profile(profile_id, new_job_title)
 
-    def set_job_profile_status(self, profile_id: int, status: str) -> ScreeningProfile:
+    def set_job_profile_status(
+        self,
+        profile_id: int,
+        status: str,
+        *,
+        expected_version: int | None = None,
+    ) -> ScreeningProfile:
         if status not in {"draft", "active", "paused", "closed"}:
             raise ValueError("岗位状态无效")
+        if expected_version is not None:
+            return self._set_job_profile_status_atomic(
+                profile_id,
+                status,
+                expected_version=int(expected_version),
+            )
         source = self.get_job_profile(profile_id)
         if source is None:
             raise ValueError("岗位档案不存在")
@@ -2180,6 +2281,105 @@ class CandidateRepository:
         profile = ScreeningProfile(**values)
         profile.status = status
         return self.save_job_profile(profile)
+
+    def _set_job_profile_status_atomic(
+        self,
+        profile_id: int,
+        status: str,
+        *,
+        expected_version: int,
+    ) -> ScreeningProfile:
+        connection = self.db.get_connection()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM screening_profiles WHERE id = ?",
+                (profile_id,),
+            ).fetchone()
+            if row is None:
+                connection.rollback()
+                raise ValueError("岗位档案不存在")
+            current = self._decode_screening_profile(row)
+            if int(current.get("version") or 0) != expected_version:
+                connection.rollback()
+                raise JobProfileVersionConflictError("岗位档案已被更新，请刷新后再操作。")
+            self._validate_job_profile_status_transition(str(current.get("status") or "draft"), status)
+            if str(current.get("status") or "") == status:
+                connection.commit()
+                return ScreeningProfile(
+                    **{
+                        key: current.get(key)
+                        for key in ScreeningProfile.__dataclass_fields__
+                        if key in current
+                    }
+                )
+
+            values = {
+                key: current.get(key)
+                for key in ScreeningProfile.__dataclass_fields__
+                if key in current
+            }
+            profile = ScreeningProfile(**values)
+            profile.status = status
+            profile.version = expected_version + 1
+            timestamp = now_iso()
+            profile.updated_at = timestamp
+            sql_values = self._job_profile_sql_values(profile)
+            cursor = connection.execute(
+                """
+                UPDATE screening_profiles
+                SET job_title = ?, department = ?, hiring_manager = ?, location = ?,
+                    employment_type = ?, experience_requirement = ?,
+                    education_requirement = ?, target_hires = ?, recruitment_deadline = ?,
+                    priority = ?, status = ?, jd_text = ?, prompt_text = ?, prompt_source = ?,
+                    must_have_json = ?, nice_to_have_json = ?, risk_flags_json = ?,
+                    exclusions_json = ?, interview_checks_json = ?, evidence_policy_json = ?,
+                    version = ?, parent_profile_id = ?, updated_at = ?
+                WHERE id = ? AND version = ?
+                """,
+                (*sql_values, profile.version, profile.parent_profile_id, timestamp, profile_id, expected_version),
+            )
+            if cursor.rowcount != 1:
+                connection.rollback()
+                raise JobProfileVersionConflictError("岗位档案已被更新，请刷新后再操作。")
+            connection.execute(
+                """
+                INSERT INTO job_profile_versions(profile_id, version, snapshot_json, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    profile_id,
+                    int(profile.version),
+                    json.dumps(profile.to_dict(), ensure_ascii=False, sort_keys=True),
+                    timestamp,
+                ),
+            )
+            if status == "closed":
+                connection.execute(
+                    """
+                    UPDATE recruitment_tasks
+                    SET status = ?, current_step = ?, latest_message = ?, updated_at = ?
+                    WHERE role_id = ? AND status IN (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "cancelled",
+                        "已取消",
+                        "岗位已关闭，招聘任务自动取消。",
+                        timestamp,
+                        profile_id,
+                        "ready",
+                        "running",
+                        "waiting_user",
+                        "paused",
+                        "failed",
+                    ),
+                )
+            connection.commit()
+            return profile
+        except Exception:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
 
     @staticmethod
     def _validate_job_profile_status_transition(current: str, target: str) -> None:

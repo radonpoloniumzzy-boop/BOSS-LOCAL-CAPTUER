@@ -38,7 +38,7 @@ DATABASE_FAULTS = {
     "database_in_use": "人才库正在被另一个程序实例使用，请关闭其他实例后重试。",
 }
 
-PLUGIN_CONTEXT_ACTIVE_TASK_STATUSES = {"ready", "running", "waiting_user", "paused"}
+PLUGIN_CONTEXT_ACTIVE_TASK_STATUSES = {"running"}
 
 
 def write_runtime_log(
@@ -298,6 +298,38 @@ class WebRuntime:
 
             self.config_service.update(remember)
             return context
+
+    def set_job_profile_status(
+        self,
+        profile_id: int,
+        status: str,
+        *,
+        expected_version: int,
+    ) -> object:
+        with self._state_lock:
+            if self.config_service is None or self.repository is None:
+                raise RuntimeError("database_not_ready")
+            profile = self.repository.set_job_profile_status(
+                profile_id,
+                status,
+                expected_version=expected_version,
+            )
+            if status == "closed":
+                flow = self.config_service.load().automation_flow
+                if flow.enabled and flow.profile_id == profile_id:
+                    self.set_plugin_context(None)
+            return profile
+
+    def set_recruitment_task_status(self, task_id: int, status: str):
+        with self._state_lock:
+            if self.config_service is None or self.repository is None:
+                raise RuntimeError("database_not_ready")
+            task = self.repository.set_recruitment_task_status(task_id, status)
+            if status != "running":
+                flow = self.config_service.load().automation_flow
+                if flow.enabled and flow.task_id == task_id:
+                    self.set_plugin_context(None)
+            return task
 
     def get_plugin_context(self) -> dict[str, object] | None:
         with self._state_lock:
