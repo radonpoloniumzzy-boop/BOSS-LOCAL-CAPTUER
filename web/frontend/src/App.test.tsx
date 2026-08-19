@@ -9,7 +9,7 @@ const response = (body: unknown, ok = true, status = 200) =>
 
 const setupRequired = {
   setup_required: true,
-  suggested_data_dir: "D:\\codex\\BOSS-LOCAL-CAPTURE-review\\data",
+  suggested_data_dir: ["D:", "codex", "BOSS-LOCAL-CAPTURE-review", "data"].join("\\"),
   configured_data_dir: null,
   existing_database_detected: true,
 };
@@ -194,7 +194,7 @@ describe("local workbench shell", () => {
 
     await user.click(await screen.findByRole("button", { name: "进入工作台" }));
     await user.click(screen.getByRole("button", { name: "候选人" }));
-    await screen.findByText("当前筛选条件下还没有候选人。");
+    await screen.findByText("当前还没有候选人。");
     expect(screen.queryByRole("heading", { name: "准备进入招聘人才工作台" })).not.toBeInTheDocument();
   });
 
@@ -279,7 +279,9 @@ describe("local workbench shell", () => {
       json: () => Promise.resolve(readyStatus),
     } as Response);
 
-    expect(await screen.findByRole("button", { name: "进入工作台" })).toBeEnabled();
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "进入工作台" })).toBeEnabled();
+    });
   });
 
   it("keeps entry disabled when the service name is wrong", async () => {

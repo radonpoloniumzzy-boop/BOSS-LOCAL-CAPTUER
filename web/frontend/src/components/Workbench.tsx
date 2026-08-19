@@ -12,10 +12,23 @@ type View = "home" | "candidates" | "batches" | "settings";
 export function Workbench({ status }: { status: AppStatus }) {
   const [view, setView] = useState<View>("home");
   const [requestedBatch, setRequestedBatch] = useState<number | null>(null);
+  const [requestedBatchOrigin, setRequestedBatchOrigin] = useState<View | null>(null);
+  const [visited, setVisited] = useState<Record<View, boolean>>({
+    home: true,
+    candidates: false,
+    batches: false,
+    settings: false,
+  });
 
-  const openBatch = (batchId: number) => {
+  const activateView = (nextView: View) => {
+    setVisited((current) => ({ ...current, [nextView]: true }));
+    setView(nextView);
+  };
+
+  const openBatch = (batchId: number, origin: View = view) => {
     setRequestedBatch(batchId);
-    setView("batches");
+    setRequestedBatchOrigin(origin);
+    activateView("batches");
   };
 
   const latestLabel = status.latest_batch_id ? `#${status.latest_batch_id}` : "暂无批次";
@@ -43,15 +56,15 @@ export function Workbench({ status }: { status: AppStatus }) {
         </div>
         <nav className="workflow-nav" aria-label="主导航">
           <div className="workflow-scroll">
-            <NavButton active={view === "home"} onClick={() => setView("home")} icon={<Home size={16} />} label="概览" />
-            <NavButton active={view === "candidates"} onClick={() => setView("candidates")} icon={<Users size={16} />} label="候选人" />
-            <NavButton active={view === "batches"} onClick={() => setView("batches")} icon={<Layers3 size={16} />} label="最近批次" />
+            <NavButton active={view === "home"} onClick={() => activateView("home")} icon={<Home size={16} />} label="概览" />
+            <NavButton active={view === "candidates"} onClick={() => activateView("candidates")} icon={<Users size={16} />} label="候选人" />
+            <NavButton active={view === "batches"} onClick={() => activateView("batches")} icon={<Layers3 size={16} />} label="最近批次" />
             <button className="nav-item" disabled aria-label="岗位，待开发">
               <BriefcaseBusiness size={16} />
               <span>岗位</span>
               <small>待开发</small>
             </button>
-            <NavButton active={view === "settings"} onClick={() => setView("settings")} icon={<Settings size={16} />} label="设置" />
+            <NavButton active={view === "settings"} onClick={() => activateView("settings")} icon={<Settings size={16} />} label="设置" />
           </div>
         </nav>
       </header>
@@ -113,9 +126,30 @@ export function Workbench({ status }: { status: AppStatus }) {
             </section>
           </div>
         )}
-        {view === "candidates" && <CandidatesPage onOpenBatch={openBatch} />}
-        {view === "batches" && <BatchesPage initialBatchId={requestedBatch} onInitialBatchConsumed={() => setRequestedBatch(null)} />}
-        {view === "settings" && <SettingsPage status={status} />}
+        {visited.candidates && (
+          <section hidden={view !== "candidates"} aria-hidden={view !== "candidates"}>
+            <CandidatesPage active={view === "candidates"} onOpenBatch={(batchId) => openBatch(batchId, "candidates")} />
+          </section>
+        )}
+        {visited.batches && (
+          <section hidden={view !== "batches"} aria-hidden={view !== "batches"}>
+            <BatchesPage
+              active={view === "batches"}
+              initialBatchId={requestedBatch}
+              initialReturnView={requestedBatchOrigin}
+              onInitialBatchConsumed={() => setRequestedBatch(null)}
+              onReturnFromInitialBatch={() => {
+                if (requestedBatchOrigin) activateView(requestedBatchOrigin);
+                setRequestedBatchOrigin(null);
+              }}
+            />
+          </section>
+        )}
+        {visited.settings && (
+          <section hidden={view !== "settings"} aria-hidden={view !== "settings"}>
+            <SettingsPage status={status} />
+          </section>
+        )}
       </main>
     </div>
   );

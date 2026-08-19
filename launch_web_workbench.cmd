@@ -5,7 +5,7 @@ cd /d "%~dp0"
 title 启动网页工作台
 
 if not exist ".venv\Scripts\pythonw.exe" (
-  echo 缺少本地运行环境，请重新安装完整项目后再试。
+  echo 缺少网页工作台运行环境，请先运行 setup_web_workbench.cmd 完成初始化。
   pause
   exit /b 1
 )

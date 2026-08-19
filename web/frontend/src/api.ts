@@ -34,6 +34,37 @@ export type CandidateRow = {
   latest_ingest_status: string;
   latest_batch_role_id: number | null;
   has_role_binding: boolean | number;
+  batch_count: number;
+};
+
+export type CandidateDetail = CandidateRow & {
+  job_title: string;
+  source_url: string;
+  capture_time: string;
+  raw_card_text: string;
+  active_status: string;
+  expected_salary: string;
+  work_experience_text: string;
+  education_text: string;
+  tags_text: string;
+  summary_text: string;
+  detail_url: string;
+  latest_raw_card_text: string;
+  latest_source_url: string;
+  latest_detail_url: string;
+  city: string;
+  years_experience: number | null;
+  job_family: string;
+  job_track: string;
+  batch_count: number;
+};
+
+export type CandidateAppearanceRow = {
+  batch_id: number;
+  source_platform: string;
+  source_job_title: string;
+  capture_time: string;
+  ingest_status: string;
 };
 
 export type CaptureBatchRow = {
@@ -102,4 +133,44 @@ export async function requestJson<T>(path: string, init?: RequestInit): Promise<
     );
   }
   return payload;
+}
+
+export async function downloadBatchMarkdown(batchId: number): Promise<void> {
+  let response: Response;
+  try {
+    response = await fetch(`/api/capture-batches/${batchId}/export.md`);
+  } catch {
+    throw new ApiRequestError("network_error", "无法连接本地服务，请确认网页程序仍在运行。");
+  }
+
+  if (!response.ok) {
+    let payload: ApiError = {};
+    try {
+      payload = await response.json() as ApiError;
+    } catch {
+      payload = {};
+    }
+    throw new ApiRequestError(
+      payload.error?.code || "export_failed",
+      payload.error?.message || "Markdown 导出失败，请稍后重试。",
+    );
+  }
+
+  const blob = await response.blob();
+  const objectUrl = URL.createObjectURL(blob);
+  try {
+    const disposition = response.headers.get("Content-Disposition") || "";
+    const match = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+    const filename = match ? decodeURIComponent(match[1]) : `batch-${batchId}.md`;
+    const link = document.createElement("a");
+    link.href = objectUrl;
+    link.download = filename;
+    try {
+      link.click();
+    } catch {
+      throw new ApiRequestError("export_failed", "Markdown 导出失败，请稍后重试。");
+    }
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
 }

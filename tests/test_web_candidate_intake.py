@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -44,6 +45,11 @@ class CandidateIntakeWebApiTest(unittest.TestCase):
             "Origin": origin,
             "X-Boss-Local-Token": self.token,
         }
+
+    def _repository(self) -> CandidateRepository:
+        runtime = self.app.state.runtime
+        assert runtime.repository is not None
+        return runtime.repository
 
     def test_candidate_intake_requires_token(self) -> None:
         response = self.client.post(
@@ -270,6 +276,536 @@ class CandidateIntakeWebApiTest(unittest.TestCase):
         self.assertEqual(payload["error"]["code"], "idempotency_conflict")
         self.assertNotIn("Bob card", second.text)
         self.assertNotIn(self.token, second.text)
+
+    def test_candidate_search_sort_detail_and_batch_lookup(self) -> None:
+        first = self.client.post(
+            "/api/intake/candidates",
+            json={
+                "source_platform": "boss",
+                "source_job_title": "证券交易员",
+                "idempotency_key": "candidate-search-1",
+                "candidates": [
+                    {
+                        "name": "Alice Zhang",
+                        "source_candidate_id": "boss-101",
+                        "raw_card_text": "Alice raw card with 高频交易 经验",
+                        "capture_time": "2026-08-10T09:00:00",
+                    }
+                ],
+            },
+            headers=self._headers(),
+        )
+        second = self.client.post(
+            "/api/intake/candidates",
+            json={
+                "source_platform": "liepin",
+                "source_job_title": "量化研究员",
+                "idempotency_key": "candidate-search-2",
+                "candidates": [
+                    {
+                        "name": "Bob Li",
+                        "source_candidate_id": "liepin-202",
+                        "raw_card_text": "Bob raw card with 因子研究 与 原始卡片关键词",
+                        "capture_time": "2026-08-11T10:30:00",
+                    }
+                ],
+            },
+            headers=self._headers(),
+        )
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(second.status_code, 200, second.text)
+
+        by_name = self.client.get("/api/candidates?page=1&page_size=100&keyword=Alice")
+        self.assertEqual(by_name.status_code, 200)
+        self.assertEqual(len(by_name.json()["rows"]), 1)
+        self.assertEqual(by_name.json()["rows"][0]["name"], "Alice Zhang")
+        self.assertEqual(
+            set(by_name.json()["rows"][0].keys()),
+            {
+                "id",
+                "name",
+                "source_platform",
+                "latest_source_platform",
+                "latest_source_job_title",
+                "latest_batch_id",
+                "latest_capture_time",
+                "latest_ingest_status",
+                "latest_batch_role_id",
+                "has_role_binding",
+                "batch_count",
+            },
+        )
+        for forbidden_field in (
+            "raw_card_text",
+            "latest_raw_card_text",
+            "source_url",
+            "latest_source_url",
+            "detail_url",
+            "latest_detail_url",
+            "evidence_json",
+            "gap_json",
+            "risk_json",
+            "recommended_action",
+            "human_decision",
+            "status_events",
+            "role_matches",
+        ):
+            self.assertNotIn(forbidden_field, by_name.json()["rows"][0])
+
+        by_job_title = self.client.get("/api/candidates?page=1&page_size=100&keyword=量化研究员")
+        self.assertEqual(by_job_title.status_code, 200)
+        self.assertEqual(len(by_job_title.json()["rows"]), 1)
+        self.assertEqual(by_job_title.json()["rows"][0]["name"], "Bob Li")
+
+        by_raw_keyword = self.client.get("/api/candidates?page=1&page_size=100&keyword=原始卡片关键词")
+        self.assertEqual(by_raw_keyword.status_code, 200)
+        self.assertEqual(len(by_raw_keyword.json()["rows"]), 1)
+        self.assertEqual(by_raw_keyword.json()["rows"][0]["name"], "Bob Li")
+
+        newest_first = self.client.get("/api/candidates?page=1&page_size=100&sort=latest_capture_desc")
+        oldest_first = self.client.get("/api/candidates?page=1&page_size=100&sort=latest_capture_asc")
+        self.assertEqual(newest_first.status_code, 200)
+        self.assertEqual(oldest_first.status_code, 200)
+        self.assertEqual(newest_first.json()["rows"][0]["name"], "Bob Li")
+        self.assertEqual(oldest_first.json()["rows"][0]["name"], "Alice Zhang")
+
+        candidate_id = newest_first.json()["rows"][0]["id"]
+        detail = self.client.get(f"/api/candidates/{candidate_id}")
+        self.assertEqual(detail.status_code, 200)
+        detail_payload = detail.json()
+        self.assertEqual(detail_payload["name"], "Bob Li")
+        self.assertEqual(detail_payload["latest_source_job_title"], "量化研究员")
+        self.assertIn("原始卡片关键词", detail_payload["latest_raw_card_text"])
+        self.assertEqual(
+            set(detail_payload.keys()),
+            {
+                "id",
+                "name",
+                "source_platform",
+                "latest_source_platform",
+                "latest_source_job_title",
+                "latest_batch_id",
+                "latest_capture_time",
+                "latest_ingest_status",
+                "latest_batch_role_id",
+                "has_role_binding",
+                "batch_count",
+                "job_title",
+                "source_url",
+                "capture_time",
+                "raw_card_text",
+                "active_status",
+                "expected_salary",
+                "work_experience_text",
+                "education_text",
+                "tags_text",
+                "summary_text",
+                "detail_url",
+                "latest_raw_card_text",
+                "latest_source_url",
+                "latest_detail_url",
+                "city",
+                "years_experience",
+                "job_family",
+                "job_track",
+            },
+        )
+        for forbidden_field in (
+            "role_matches",
+            "status_events",
+            "evidence_json",
+            "gap_json",
+            "risk_json",
+            "recommended_action",
+            "human_decision",
+        ):
+            self.assertNotIn(forbidden_field, detail_payload)
+
+        batch_id = newest_first.json()["rows"][0]["latest_batch_id"]
+        batch = self.client.get(f"/api/capture-batches/{batch_id}")
+        self.assertEqual(batch.status_code, 200)
+        self.assertEqual(batch.json()["id"], batch_id)
+
+    def test_candidate_detail_returns_not_found_for_missing_candidate(self) -> None:
+        response = self.client.get("/api/candidates/999999")
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["error"]["code"], "candidate_not_found")
+
+    def test_candidate_appearance_history_uses_batch_snapshots_and_limited_fields(self) -> None:
+        first = self.client.post(
+            "/api/intake/candidates",
+            json={
+                "source_platform": "boss",
+                "source_job_title": "证券交易员",
+                "idempotency_key": "appearance-history-1",
+                "candidates": [
+                    {
+                        "name": "History Candidate",
+                        "source_candidate_id": "boss-history-1",
+                        "raw_card_text": "first snapshot",
+                        "capture_time": "2026-08-10T09:00:00",
+                    }
+                ],
+            },
+            headers=self._headers(),
+        )
+        second = self.client.post(
+            "/api/intake/candidates",
+            json={
+                "source_platform": "boss",
+                "source_job_title": "量化研究员",
+                "idempotency_key": "appearance-history-2",
+                "candidates": [
+                    {
+                        "name": "History Candidate Updated",
+                        "source_candidate_id": "boss-history-1",
+                        "raw_card_text": "second snapshot",
+                        "capture_time": "2026-08-11T10:30:00",
+                    }
+                ],
+            },
+            headers=self._headers(),
+        )
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(second.status_code, 200, second.text)
+
+        candidates = self.client.get("/api/candidates?page=1&page_size=100&keyword=History Candidate")
+        self.assertEqual(candidates.status_code, 200)
+        candidate_id = candidates.json()["rows"][0]["id"]
+
+        appearances = self.client.get(f"/api/candidates/{candidate_id}/appearances")
+        self.assertEqual(appearances.status_code, 200)
+        rows = appearances.json()["rows"]
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["source_job_title"], "量化研究员")
+        self.assertEqual(rows[1]["source_job_title"], "证券交易员")
+        self.assertEqual(
+            set(rows[0].keys()),
+            {"batch_id", "source_platform", "source_job_title", "capture_time", "ingest_status"},
+        )
+        for forbidden in (
+            "raw_card_text",
+            "name",
+            "source_url",
+            "detail_url",
+            "role_matches",
+            "status_events",
+            "evidence_json",
+            "gap_json",
+            "risk_json",
+            "recommended_action",
+            "human_decision",
+        ):
+            self.assertNotIn(forbidden, rows[0])
+
+        missing = self.client.get("/api/candidates/999999/appearances")
+        self.assertEqual(missing.status_code, 404)
+        self.assertEqual(missing.json()["error"]["code"], "candidate_not_found")
+
+    def test_candidate_appearance_history_uses_lightweight_candidate_existence_check(self) -> None:
+        repo = self._repository()
+        created = self.client.post(
+            "/api/intake/candidates",
+            json={
+                "source_platform": "boss",
+                "source_job_title": "轻量历史",
+                "idempotency_key": "lightweight-appearance-check",
+                "candidates": [
+                    {
+                        "name": "Lightweight Candidate",
+                        "source_candidate_id": "boss-lightweight-1",
+                        "raw_card_text": "lightweight snapshot",
+                        "capture_time": "2026-08-18T10:00:00",
+                    }
+                ],
+            },
+            headers=self._headers(),
+        )
+        self.assertEqual(created.status_code, 200, created.text)
+
+        candidate_id = self.client.get("/api/candidates?page=1&page_size=20&keyword=Lightweight Candidate").json()["rows"][0]["id"]
+        with patch.object(repo, "get_candidate_detail", side_effect=AssertionError("history API should not use detail chain")):
+            appearances = self.client.get(f"/api/candidates/{candidate_id}/appearances")
+        self.assertEqual(appearances.status_code, 200, appearances.text)
+        self.assertEqual(len(appearances.json()["rows"]), 1)
+
+    def test_candidate_appearance_history_returns_empty_rows_for_existing_candidate_without_history(self) -> None:
+        repo = self._repository()
+        created = self.client.post(
+            "/api/intake/candidates",
+            json={
+                "source_platform": "boss",
+                "source_job_title": "空历史岗位",
+                "idempotency_key": "appearance-empty-history",
+                "candidates": [
+                    {
+                        "name": "No History Candidate",
+                        "source_candidate_id": "boss-no-history-1",
+                        "raw_card_text": "empty history snapshot",
+                        "capture_time": "2026-08-18T11:00:00",
+                    }
+                ],
+            },
+            headers=self._headers(),
+        )
+        self.assertEqual(created.status_code, 200, created.text)
+
+        candidate_id = self.client.get("/api/candidates?page=1&page_size=20&keyword=No History Candidate").json()["rows"][0]["id"]
+        repo.db.get_connection().execute("DELETE FROM capture_batch_items WHERE candidate_id = ?", (candidate_id,))
+        repo.db.get_connection().commit()
+
+        with patch.object(repo, "get_candidate_detail", side_effect=AssertionError("history API should not use detail chain")):
+            appearances = self.client.get(f"/api/candidates/{candidate_id}/appearances")
+        self.assertEqual(appearances.status_code, 200, appearances.text)
+        self.assertEqual(appearances.json()["rows"], [])
+
+    def test_capture_batch_filters_support_status_failed_today_and_export_snapshot(self) -> None:
+        repo = self._repository()
+        with patch("storage.repository.now_iso", return_value="2026-08-18T09:30:00"):
+            first = self.client.post(
+                "/api/intake/candidates",
+                json={
+                    "source_platform": "boss",
+                    "source_job_title": "证券交易员",
+                    "idempotency_key": "batch-filter-1",
+                    "candidates": [
+                        {
+                            "name": "Today Success",
+                            "source_candidate_id": "boss-batch-1",
+                            "raw_card_text": "today success snapshot",
+                            "capture_time": "2026-08-18T00:15:00",
+                        }
+                    ],
+                },
+                headers=self._headers(),
+            )
+            second = self.client.post(
+                "/api/intake/candidates",
+                json={
+                    "source_platform": "liepin",
+                    "source_job_title": "量化研究员",
+                    "idempotency_key": "batch-filter-2",
+                    "candidates": [
+                        {
+                            "name": "Today Partial",
+                            "source_candidate_id": "liepin-batch-2",
+                            "raw_card_text": "today partial snapshot",
+                            "capture_time": "2026-08-18T12:00:00",
+                        },
+                        {
+                            "name": "Broken",
+                            "source_candidate_id": "liepin-batch-3",
+                        },
+                    ],
+                },
+                headers=self._headers(),
+            )
+            third = self.client.post(
+                "/api/intake/candidates",
+                json={
+                    "source_platform": "boss",
+                    "source_job_title": "昨日批次",
+                    "idempotency_key": "batch-filter-3",
+                    "candidates": [
+                        {
+                            "name": "Yesterday Failed",
+                            "source_candidate_id": "boss-batch-4",
+                            "raw_card_text": "yesterday failed snapshot",
+                            "capture_time": "2026-08-17T23:50:00",
+                        }
+                    ],
+                },
+                headers=self._headers(),
+            )
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(second.status_code, 200, second.text)
+        self.assertEqual(third.status_code, 200, third.text)
+
+        batch_by_job = {
+            "证券交易员": first.json()["batch_id"],
+            "量化研究员": second.json()["batch_id"],
+            "昨日批次": third.json()["batch_id"],
+        }
+        repo.db.get_connection().execute(
+            "UPDATE capture_batches SET status = 'failed', total_failed = 1 WHERE id = ?",
+            (batch_by_job["昨日批次"],),
+        )
+        repo.db.get_connection().execute(
+            "UPDATE capture_batches SET start_time = '2026-08-17T23:50:00' WHERE id = ?",
+            (batch_by_job["昨日批次"],),
+        )
+        repo.db.get_connection().commit()
+
+        completed = self.client.get("/api/capture-batches?page=1&page_size=20&status=completed")
+        self.assertEqual(completed.status_code, 200)
+        self.assertEqual([row["job_title"] for row in completed.json()["rows"]], ["证券交易员"])
+
+        failed_only = self.client.get("/api/capture-batches?page=1&page_size=20&failed_only=true")
+        self.assertEqual(failed_only.status_code, 200)
+        self.assertEqual({row["job_title"] for row in failed_only.json()["rows"]}, {"量化研究员", "昨日批次"})
+
+        with patch("storage.repository.now_iso", return_value="2026-08-18T09:30:00"):
+            today_only = self.client.get("/api/capture-batches?page=1&page_size=20&today_only=true")
+        self.assertEqual(today_only.status_code, 200)
+        self.assertEqual({row["job_title"] for row in today_only.json()["rows"]}, {"证券交易员", "量化研究员"})
+
+        combo = self.client.get("/api/capture-batches?page=1&page_size=20&source_platform=liepin&status=partial")
+        self.assertEqual(combo.status_code, 200)
+        self.assertEqual(combo.json()["total"], 1)
+        self.assertEqual(combo.json()["rows"][0]["job_title"], "量化研究员")
+
+        paged = self.client.get("/api/capture-batches?page=1&page_size=1&failed_only=true")
+        self.assertEqual(paged.status_code, 200)
+        self.assertEqual(paged.json()["total"], 2)
+        self.assertEqual(len(paged.json()["rows"]), 1)
+
+        with patch("storage.repository.now_iso", return_value="2026-08-18T09:30:00"):
+            bounded_combo = self.client.get(
+                "/api/capture-batches?page=1&page_size=1&today_only=true&source_platform=liepin&status=partial&failed_only=true"
+            )
+        self.assertEqual(bounded_combo.status_code, 200)
+        self.assertEqual(bounded_combo.json()["total"], 1)
+        self.assertEqual(len(bounded_combo.json()["rows"]), 1)
+
+        export_target = batch_by_job["证券交易员"]
+        repo.db.get_connection().execute(
+            "UPDATE candidates SET name = 'Changed Later' WHERE candidate_key = ?",
+            ("boss:boss-batch-1",),
+        )
+        repo.db.get_connection().commit()
+        exported = self.client.get(f"/api/capture-batches/{export_target}/export.md")
+        self.assertEqual(exported.status_code, 200, exported.text)
+        self.assertIn("Today Success", exported.text)
+        self.assertIn("today success snapshot", exported.text)
+
+        missing_batch = self.client.get("/api/capture-batches/999999")
+        self.assertEqual(missing_batch.status_code, 404)
+        self.assertEqual(missing_batch.json()["error"]["code"], "batch_not_found")
+
+    def test_capture_batch_today_filter_uses_local_day_range_boundaries_and_index_friendly_sql(self) -> None:
+        repo = self._repository()
+        created_ids: dict[str, int] = {}
+        candidates = [
+            ("day-start", "2026-08-18T00:00:00", "day-start"),
+            ("day-end", "2026-08-18T23:59:59", "day-end"),
+            ("next-day", "2026-08-19T00:00:00", "next-day"),
+            ("prev-day", "2026-08-17T23:59:59", "prev-day"),
+        ]
+        for suffix, capture_time, name in candidates:
+            response = self.client.post(
+                "/api/intake/candidates",
+                json={
+                    "source_platform": "boss",
+                    "source_job_title": name,
+                    "idempotency_key": f"today-boundary-{suffix}",
+                    "candidates": [
+                        {
+                            "name": name,
+                            "source_candidate_id": f"boss-today-{suffix}",
+                            "raw_card_text": f"{name} snapshot",
+                            "capture_time": capture_time,
+                        }
+                    ],
+                },
+                headers=self._headers(),
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            created_ids[name] = response.json()["batch_id"]
+        for _, capture_time, name in candidates:
+            repo.db.get_connection().execute(
+                "UPDATE capture_batches SET start_time = ? WHERE id = ?",
+                (capture_time, created_ids[name]),
+            )
+        repo.db.get_connection().commit()
+
+        trace_sql: list[str] = []
+        connection = repo.db.get_connection()
+        connection.set_trace_callback(trace_sql.append)
+        try:
+            with patch("storage.repository.now_iso", return_value="2026-08-18T00:30:00"):
+                today_only = self.client.get("/api/capture-batches?page=1&page_size=20&today_only=true")
+            with patch("storage.repository.now_iso", return_value="2026-08-18T00:30:00"):
+                repo.page_capture_batches(today_only=True, page=1, page_size=20)
+        finally:
+            connection.set_trace_callback(None)
+        self.assertEqual(today_only.status_code, 200, today_only.text)
+        self.assertEqual(
+            {row["job_title"] for row in today_only.json()["rows"]},
+            {"day-start", "day-end"},
+        )
+        self.assertEqual(today_only.json()["today_summary"]["batch_count"], 2)
+        self.assertTrue(any("start_time >=" in sql and "start_time <" in sql for sql in trace_sql))
+        self.assertFalse(any("substr(start_time" in sql.lower() for sql in trace_sql))
+
+        day_start = "2026-08-18T00:00:00"
+        next_day_start = "2026-08-19T00:00:00"
+        plan_rows = connection.execute(
+            """
+            EXPLAIN QUERY PLAN
+            SELECT *
+            FROM capture_batches
+            WHERE source_platform = ? AND status = ? AND total_failed > 0 AND start_time >= ? AND start_time < ?
+            ORDER BY start_time DESC, id DESC
+            LIMIT ? OFFSET ?
+            """,
+            ("boss", "failed", day_start, next_day_start, 20, 0),
+        ).fetchall()
+        plan_details = " | ".join(str(row[3]) for row in plan_rows)
+        self.assertNotIn("substr", plan_details.lower())
+        self.assertRegex(plan_details, r"idx_capture_batches_(platform_start|start_time)")
+
+    def test_capture_batch_today_filter_reuses_one_local_day_boundary_across_midnight(self) -> None:
+        repo = self._repository()
+        created_ids: dict[str, int] = {}
+        candidates = [
+            ("before-midnight", "2026-08-18T23:59:59", "before-midnight"),
+            ("midnight-next-day", "2026-08-19T00:00:00", "midnight-next-day"),
+        ]
+        for suffix, capture_time, name in candidates:
+            response = self.client.post(
+                "/api/intake/candidates",
+                json={
+                    "source_platform": "boss",
+                    "source_job_title": name,
+                    "idempotency_key": f"midnight-boundary-{suffix}",
+                    "candidates": [
+                        {
+                            "name": name,
+                            "source_candidate_id": f"boss-midnight-{suffix}",
+                            "raw_card_text": f"{name} snapshot",
+                            "capture_time": capture_time,
+                        }
+                    ],
+                },
+                headers=self._headers(),
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            created_ids[name] = response.json()["batch_id"]
+        for _, capture_time, name in candidates:
+            repo.db.get_connection().execute(
+                "UPDATE capture_batches SET start_time = ? WHERE id = ?",
+                (capture_time, created_ids[name]),
+            )
+        repo.db.get_connection().commit()
+
+        trace_sql: list[str] = []
+        connection = repo.db.get_connection()
+        connection.set_trace_callback(trace_sql.append)
+        try:
+            with patch("storage.repository.now_iso", side_effect=["2026-08-18T23:59:59", "2026-08-19T00:00:00"]) as mocked_now:
+                payload = repo.page_capture_batches(today_only=True, page=1, page_size=20)
+        finally:
+            connection.set_trace_callback(None)
+
+        self.assertEqual(mocked_now.call_count, 1)
+        self.assertEqual([row["job_title"] for row in payload["rows"]], ["before-midnight"])
+        self.assertEqual(payload["today_summary"]["batch_count"], 1)
+        self.assertEqual(payload["today_summary"]["received"], 1)
+        self.assertEqual(payload["today_summary"]["added"], 1)
+        self.assertTrue(any("2026-08-18T00:00:00" in sql and "2026-08-19T00:00:00" in sql for sql in trace_sql))
+        self.assertFalse(any("2026-08-20T00:00:00" in sql for sql in trace_sql))
+        self.assertTrue(any("start_time >=" in sql and "start_time <" in sql for sql in trace_sql))
+        self.assertFalse(any("substr(start_time" in sql.lower() for sql in trace_sql))
 
 
 if __name__ == "__main__":

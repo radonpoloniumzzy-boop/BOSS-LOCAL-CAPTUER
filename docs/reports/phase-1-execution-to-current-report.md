@@ -4,7 +4,7 @@
 
 | 项目 | 内容 |
 |---|---|
-| 项目目录 | `D:\codex\BOSS-LOCAL-CAPTURE-review` |
+| 项目目录 | `<项目目录>` |
 | 执行分支 | `codex/web-phase-1-foundation` |
 | 起始基线 | `7f06d7e feat: download captured batch from extension` |
 | 报告基准提交 | `f544fcd docs: add web UI design reference report` |
@@ -375,7 +375,7 @@ f544fcd docs: add web UI design reference report
 首次或依赖更新后构建前端：
 
 ```powershell
-cd D:\codex\BOSS-LOCAL-CAPTURE-review\web\frontend
+cd <项目目录>\web\frontend
 npm.cmd install
 npm.cmd run build
 ```
@@ -383,7 +383,7 @@ npm.cmd run build
 启动网页工作台：
 
 ```powershell
-cd D:\codex\BOSS-LOCAL-CAPTURE-review
+cd <项目目录>
 .\.venv\Scripts\python.exe web_app.py
 ```
 

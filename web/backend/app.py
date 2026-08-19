@@ -49,6 +49,84 @@ class PairingRequest(BaseModel):
     pairing_code: str
 
 
+_CANDIDATE_LIST_FIELDS = (
+    "id",
+    "name",
+    "source_platform",
+    "latest_source_platform",
+    "latest_source_job_title",
+    "latest_batch_id",
+    "latest_capture_time",
+    "latest_ingest_status",
+    "latest_batch_role_id",
+    "has_role_binding",
+    "batch_count",
+)
+
+_CANDIDATE_DETAIL_FIELDS = (
+    "id",
+    "name",
+    "source_platform",
+    "latest_source_platform",
+    "latest_source_job_title",
+    "latest_batch_id",
+    "latest_capture_time",
+    "latest_ingest_status",
+    "latest_batch_role_id",
+    "has_role_binding",
+    "batch_count",
+    "job_title",
+    "source_url",
+    "capture_time",
+    "raw_card_text",
+    "active_status",
+    "expected_salary",
+    "work_experience_text",
+    "education_text",
+    "tags_text",
+    "summary_text",
+    "detail_url",
+    "latest_raw_card_text",
+    "latest_source_url",
+    "latest_detail_url",
+    "city",
+    "years_experience",
+    "job_family",
+    "job_track",
+)
+
+_CANDIDATE_APPEARANCE_FIELDS = (
+    "batch_id",
+    "source_platform",
+    "source_job_title",
+    "capture_time",
+    "ingest_status",
+)
+
+
+def _project_candidate_list_row(row: dict[str, object]) -> dict[str, object]:
+    return {field: row.get(field) for field in _CANDIDATE_LIST_FIELDS}
+
+
+def _project_candidate_detail(detail: dict[str, object]) -> dict[str, object]:
+    candidate = dict(detail["candidate"])
+    standard_profile = detail.get("standard_profile")
+    if isinstance(standard_profile, dict):
+        candidate.update(
+            {
+                "city": standard_profile.get("city"),
+                "years_experience": standard_profile.get("years_experience"),
+                "job_family": standard_profile.get("job_family"),
+                "job_track": standard_profile.get("job_track"),
+            }
+        )
+    return {field: candidate.get(field) for field in _CANDIDATE_DETAIL_FIELDS}
+
+
+def _project_candidate_appearance(row: dict[str, object]) -> dict[str, object]:
+    return {field: row.get(field) for field in _CANDIDATE_APPEARANCE_FIELDS}
+
+
 def error_response(status_code: int, code: str, message: str) -> JSONResponse:
     return JSONResponse(
         status_code=status_code,
@@ -273,30 +351,58 @@ def create_web_app(
     def list_candidates(
         page: int = Query(default=1, ge=1),
         page_size: int = Query(default=100, ge=1, le=500),
+        keyword: str = "",
         source_platform: str = "",
         unbound_only: bool = False,
+        sort: str = "latest_capture_desc",
     ) -> dict[str, object]:
         if runtime.repository is None:
             raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。")
         result = runtime.repository.page_candidates(
             page=page,
             page_size=page_size,
+            keyword=keyword,
             source_platform=source_platform,
             unbound_only=unbound_only,
+            sort=sort,
         )
-        result["rows"] = [dict(row) for row in result["rows"]]
+        result["rows"] = [_project_candidate_list_row(dict(row)) for row in result["rows"]]
         return result
+
+    @app.get("/api/candidates/{candidate_id}")
+    def get_candidate_detail(candidate_id: int) -> dict[str, object]:
+        if runtime.repository is None:
+            raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。")
+        detail = runtime.repository.get_candidate_detail(candidate_id)
+        if detail is None:
+            raise ApiError(404, "candidate_not_found", "候选人不存在。")
+        return _project_candidate_detail(detail)
+
+    @app.get("/api/candidates/{candidate_id}/appearances")
+    def list_candidate_appearances(candidate_id: int) -> dict[str, object]:
+        if runtime.repository is None:
+            raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。")
+        if not runtime.repository.candidate_exists(candidate_id):
+            raise ApiError(404, "candidate_not_found", "候选人不存在。")
+        rows = runtime.repository.list_candidate_appearances(candidate_id)
+        return {"rows": [_project_candidate_appearance(row) for row in rows]}
 
     @app.get("/api/capture-batches")
     def list_capture_batches(
         page: int = Query(default=1, ge=1),
         page_size: int = Query(default=20, ge=1, le=200),
         source_platform: str = "",
+        status: str = "",
+        failed_only: bool = False,
+        today_only: bool = False,
     ) -> dict[str, object]:
         if runtime.repository is None:
             raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。")
         return runtime.repository.page_capture_batches(
             source_platform=source_platform,
+            status=status,
+            failed_only=failed_only,
+            today_only=today_only,
             page=page,
             page_size=page_size,
         )
