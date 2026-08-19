@@ -65,6 +65,7 @@ const statusEl = document.getElementById("status");
 const batchStatusEl = document.getElementById("batchStatus");
 const batchLogEl = document.getElementById("batchLog");
 const webIntakeStatusEl = document.getElementById("webIntakeStatus");
+const pluginContextStatusEl = document.getElementById("pluginContextStatus");
 const automationAutoButton = document.getElementById("automationAuto");
 const pairingCodeInput = document.getElementById("pairingCode");
 const applyPairingCodeButton = document.getElementById("applyPairingCode");
@@ -188,6 +189,7 @@ async function init() {
     await clearDesktopBatchDownloadState();
   }
   await refreshWebIntakeStatus(collectSettings(), { updateDownloadButton: false });
+  await refreshPluginContext(collectSettings());
   updateBatchDownloadButton();
   await refreshBatchStatus();
   batchStatusTimer = window.setInterval(() => {
@@ -312,6 +314,7 @@ async function applyPairingCodeAndTest() {
     });
     syncConnectionControls(verifiedSettings);
     updateBatchDownloadButton();
+    verifiedSettings = await refreshPluginContext(verifiedSettings);
     pairingCodeInput.value = "";
     const target = isWebWorkbenchMode(verifiedSettings) ? "网页工作台" : "桌面兼容模式";
     setStatus(`已连接${target}。\n服务地址：${fields.apiBase.value}\n连接已记住`);
@@ -423,6 +426,66 @@ async function refreshWebIntakeStatus(settingsOverride = null, options = {}) {
   }
 }
 
+async function refreshPluginContext(settingsOverride = null) {
+  const settings = settingsOverride ? { ...DEFAULTS, ...settingsOverride } : collectSettings();
+  if (!isWebWorkbenchMode(settings)) {
+    pluginContextStatusEl.textContent = "当前为桌面兼容模式，岗位上下文由桌面端自动化流程决定。";
+    return settings;
+  }
+  if (!settings.apiToken) {
+    activeJobProfileId = null;
+    activeRecruitmentTaskId = null;
+    pluginContextStatusEl.textContent = "当前未选择招聘任务；仍可进行无岗位采集。";
+    return { ...settings, jobProfileId: null, recruitmentTaskId: null };
+  }
+
+  const apiBase = BossLocalWebIntake.deriveWebApiBase(settings);
+  try {
+    const response = await fetch(`${apiBase}/api/plugin/context`, {
+      method: "GET",
+      headers: {
+        "X-Boss-Local-Token": settings.apiToken || "",
+      },
+    });
+    if (response.status === 409) {
+      activeJobProfileId = null;
+      activeRecruitmentTaskId = null;
+      await chrome.storage.local.set({ jobProfileId: null, recruitmentTaskId: null });
+      pluginContextStatusEl.textContent = "当前未选择招聘任务；仍可进行无岗位采集。";
+      return { ...settings, jobProfileId: null, recruitmentTaskId: null };
+    }
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload?.error?.message || `网页工作台返回状态码 ${response.status}`);
+    }
+    activeJobProfileId = Number(payload.job_profile_id);
+    activeRecruitmentTaskId = Number(payload.recruitment_task_id);
+    fields.jobTitle.value = String(payload.job_title || settings.jobTitle || DEFAULTS.jobTitle);
+    const synced = {
+      ...settings,
+      jobTitle: fields.jobTitle.value,
+      jobProfileId: activeJobProfileId,
+      recruitmentTaskId: activeRecruitmentTaskId,
+    };
+    await chrome.storage.local.set({
+      jobTitle: synced.jobTitle,
+      jobProfileId: activeJobProfileId,
+      recruitmentTaskId: activeRecruitmentTaskId,
+    });
+    pluginContextStatusEl.textContent = [
+      "当前招聘任务已连接。",
+      `任务 #${payload.recruitment_task_id}`,
+      `岗位：${payload.job_title || "-"}`,
+      `版本：v${payload.job_profile_version || "-"}`,
+      `状态：${payload.task_status || "-"}`,
+    ].join("\n");
+    return synced;
+  } catch (_error) {
+    pluginContextStatusEl.textContent = "当前未能读取招聘任务上下文；仍可进行无岗位采集。";
+    return settings;
+  }
+}
+
 async function queueAndSendWebBatch(settings, sourceUrl, merged, runId) {
   const response = await chrome.runtime.sendMessage({
     type: "web_intake_enqueue_and_send",
@@ -495,13 +558,7 @@ async function runCollection(autoScroll, options = {}) {
 
   const platform = detectCollectPlatform(tab.url);
   const settings = applyPlatformDefaults(baseSettings, platform);
-  const webSettings = webMode
-    ? {
-        ...settings,
-        jobProfileId: null,
-        recruitmentTaskId: null,
-      }
-    : settings;
+  const webSettings = webMode ? await refreshPluginContext(settings) : settings;
   await resetScrollPause(tab.id);
   setStatus(
     autoScroll
@@ -1262,6 +1319,7 @@ globalThis.BossLocalPopup = {
   openWebWorkbench,
   downloadCurrentBatch,
   refreshWebIntakeStatus,
+  refreshPluginContext,
   queueAndSendWebBatch,
   collectSettings,
   isWebWorkbenchMode,

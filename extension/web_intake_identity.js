@@ -145,6 +145,8 @@
 
   function buildPayload({ settings, merged, sourceUrl, idempotencyKey }) {
     const sourcePlatform = String(merged?.platform || settings?.platform || "").trim();
+    const jobProfileId = Number(settings?.jobProfileId || 0);
+    const recruitmentTaskId = Number(settings?.recruitmentTaskId || 0);
     const candidates = Array.isArray(merged?.cards)
       ? merged.cards
           .filter((card) => card && typeof card === "object" && String(card.raw_card_text || "").trim())
@@ -157,8 +159,8 @@
       source_platform: sourcePlatform,
       source_url: String(sourceUrl || "").trim(),
       source_job_title: String(settings?.jobTitle || "").trim(),
-      job_profile_id: null,
-      recruitment_task_id: null,
+      job_profile_id: jobProfileId > 0 ? jobProfileId : null,
+      recruitment_task_id: recruitmentTaskId > 0 ? recruitmentTaskId : null,
       idempotency_key: String(idempotencyKey || "").trim(),
       candidates,
     };

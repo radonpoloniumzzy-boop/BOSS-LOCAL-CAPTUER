@@ -275,6 +275,7 @@ function createPopupTestContext(options = {}) {
     "batchStatus",
     "batchLog",
     "webIntakeStatus",
+    "pluginContextStatus",
     "automationAuto",
     "pairingCode",
     "applyPairingCode",
@@ -309,6 +310,7 @@ function createPopupTestContext(options = {}) {
   elements.batchActionDelaySeconds.value = "5";
   elements.maxBatchSessions.value = "50";
   elements.webIntakeStatus.textContent = "网页入库：等待发送";
+  elements.pluginContextStatus.textContent = "当前未选择招聘任务；仍可进行无岗位采集。";
 
   const chrome = {
     storage: {
@@ -1023,6 +1025,7 @@ async function testPopupPairsWithSingleWebCodeAndRemembersConnection() {
 }
 
 async function testPopupPairsAndUsesConfiguredWebPortEndToEnd() {
+  let webIntakePayload = null;
   const popup = createPopupTestContext({
     runtimeHandler: createPopupWebRuntimeHandler(),
     fetchImpl: async (url, options = {}) => {
@@ -1041,8 +1044,28 @@ async function testPopupPairsAndUsesConfiguredWebPortEndToEnd() {
         assert.strictEqual(options.headers["X-Boss-Local-Token"], "configured-port-token");
         return { ok: true, status: 200, async json() { return { ok: true }; } };
       }
+      if (endpoint === "http://127.0.0.1:19064/api/plugin/context") {
+        assert.strictEqual(options.headers["X-Boss-Local-Token"], "configured-port-token");
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return {
+              recruitment_task_id: 42,
+              job_profile_id: 17,
+              job_profile_version: 3,
+              job_title: "量化研究员",
+              platform: "boss",
+              source_url: "https://www.zhipin.com/web/geek/recommend",
+              task_status: "running",
+              context_updated_at: "2026-08-19T10:00:00",
+            };
+          },
+        };
+      }
       if (endpoint === "http://127.0.0.1:19064/api/intake/candidates") {
         assert.strictEqual(options.headers["X-Boss-Local-Token"], "configured-port-token");
+        webIntakePayload = JSON.parse(options.body);
         return {
           ok: true,
           status: 200,
@@ -1073,7 +1096,15 @@ async function testPopupPairsAndUsesConfiguredWebPortEndToEnd() {
   assert.strictEqual(popup.store.apiBase, "http://127.0.0.1:19064", popup.elements.status.textContent);
   assert.strictEqual(popup.store.apiToken, "configured-port-token");
   assert.strictEqual(popup.store.connectionMode, "web");
+  assert.strictEqual(popup.store.jobProfileId, 17);
+  assert.strictEqual(popup.store.recruitmentTaskId, 42);
+  assert(popup.elements.pluginContextStatus.textContent.includes("当前招聘任务已连接"));
+  assert(popup.elements.pluginContextStatus.textContent.includes("v3"));
   await popup.api.runCollection(false);
+  assert.notStrictEqual(webIntakePayload, null, popup.elements.status.textContent);
+  assert.strictEqual(webIntakePayload.job_profile_id, 17);
+  assert.strictEqual(webIntakePayload.recruitment_task_id, 42);
+  assert.strictEqual(webIntakePayload.source_job_title, "量化研究员");
   await popup.api.downloadCurrentBatch();
   await popup.api.openWebWorkbench();
 
@@ -1264,6 +1295,15 @@ async function testPopupWebModeCollectCurrentPostsDirectlyToWebIntake() {
     apiToken: "web-token",
     runtimeHandler: createPopupWebRuntimeHandler(),
     fetchImpl: async (url, requestOptions) => {
+      if (String(url).endsWith("/api/plugin/context")) {
+        return {
+          ok: false,
+          status: 409,
+          async json() {
+            return { error: { code: "context_unavailable", message: "当前未选择可用招聘任务。" } };
+          },
+        };
+      }
       if (String(url).endsWith("/api/intake/candidates")) {
         return {
           ok: true,
@@ -1288,14 +1328,15 @@ async function testPopupWebModeCollectCurrentPostsDirectlyToWebIntake() {
   await popup.api.init();
   await popup.api.runCollection(false);
 
-  assert.strictEqual(popup.fetchCalls.length, 1);
-  assert.strictEqual(popup.fetchCalls[0].url, "http://127.0.0.1:17864/api/intake/candidates");
-  assert(!("Origin" in popup.fetchCalls[0].options.headers));
-  const payload = JSON.parse(popup.fetchCalls[0].options.body);
+  const intakeCalls = popup.fetchCalls.filter((call) => call.url === "http://127.0.0.1:17864/api/intake/candidates");
+  assert.strictEqual(intakeCalls.length, 1);
+  assert(!("Origin" in intakeCalls[0].options.headers));
+  const payload = JSON.parse(intakeCalls[0].options.body);
   assert.strictEqual(payload.job_profile_id, null);
   assert.strictEqual(payload.recruitment_task_id, null);
   assert.strictEqual(payload.candidates[0].platform_uid, "boss:1");
   assert.strictEqual(payload.candidates[0].source_candidate_id, "boss-1");
+  assert(popup.elements.pluginContextStatus.textContent.includes("仍可进行无岗位采集"));
   assert(popup.elements.automationAuto.title.includes("Web"));
 
   await popup.api.downloadCurrentBatch();
@@ -1316,6 +1357,15 @@ async function testPopupWebModeCollectAutoPostsDirectlyToWebIntake() {
     apiToken: "web-token",
     runtimeHandler: createPopupWebRuntimeHandler(),
     fetchImpl: async (url) => {
+      if (String(url).endsWith("/api/plugin/context")) {
+        return {
+          ok: false,
+          status: 409,
+          async json() {
+            return { error: { code: "context_unavailable", message: "当前未选择可用招聘任务。" } };
+          },
+        };
+      }
       if (String(url).endsWith("/api/intake/candidates")) {
         return {
           ok: true,
@@ -1340,8 +1390,8 @@ async function testPopupWebModeCollectAutoPostsDirectlyToWebIntake() {
   await popup.api.init();
   await popup.api.runCollection(true);
 
-  assert.strictEqual(popup.fetchCalls.length, 1);
-  assert.strictEqual(popup.fetchCalls[0].url, "http://127.0.0.1:17864/api/intake/candidates");
+  const intakeCalls = popup.fetchCalls.filter((call) => call.url === "http://127.0.0.1:17864/api/intake/candidates");
+  assert.strictEqual(intakeCalls.length, 1);
 }
 
 async function testPopupDesktopModeStillUsesDesktopImportOnly() {
@@ -2183,7 +2233,16 @@ async function testWorkerKeepsCustomPortPendingWhenMigrationNeedsRePair() {
 
 async function testPopupAndWorkerConcurrentMigrationIsIdempotent() {
   let fetchCalls = 0;
-  const worker = loadServiceWorker(async () => {
+  const worker = loadServiceWorker(async (url) => {
+    if (String(url).endsWith("/api/plugin/context")) {
+      return {
+        ok: false,
+        status: 409,
+        async json() {
+          return { error: { code: "context_unavailable", message: "当前未选择可用招聘任务。" } };
+        },
+      };
+    }
     fetchCalls += 1;
     return {
       ok: true,
@@ -3376,7 +3435,16 @@ async function testLegacyWarningRemainsVisibleAlongsideCurrentWaitingRetry() {
   let fetchCount = 0;
   const popup = createPopupTestContext({
     store: sharedStore,
-    fetchImpl: async () => {
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/api/plugin/context")) {
+        return {
+          ok: false,
+          status: 409,
+          async json() {
+            return { error: { code: "context_unavailable", message: "当前未选择可用招聘任务。" } };
+          },
+        };
+      }
       fetchCount += 1;
       return {
         ok: true,

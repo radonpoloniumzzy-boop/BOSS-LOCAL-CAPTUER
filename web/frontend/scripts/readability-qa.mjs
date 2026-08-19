@@ -162,7 +162,7 @@ async function installMockApi(page) {
         status: "ok",
         service: "recruiting-talent-workbench",
         version: "0.2.0",
-        capabilities: ["phase2c_pairing", "batch_markdown_export"],
+        capabilities: ["phase2c_pairing", "batch_markdown_export", "m2a_job_task_foundation"],
       }));
     }
     if (pathname === "/api/app/status") return route.fulfill(json(appStatus));

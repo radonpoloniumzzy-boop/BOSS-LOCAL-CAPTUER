@@ -109,6 +109,71 @@ export type PluginConnectionStatus = {
   data_dir: string;
 };
 
+export type JobProfileRow = {
+  id: number;
+  job_title: string;
+  department: string;
+  location: string;
+  employment_type: string;
+  target_hires: number;
+  priority: string;
+  status: string;
+  version: number;
+  updated_at: string;
+};
+
+export type JobProfileDetail = JobProfileRow & {
+  hiring_manager: string;
+  experience_requirement: string;
+  education_requirement: string;
+  recruitment_deadline: string;
+  jd_text: string;
+  must_have: string[];
+  nice_to_have: string[];
+  risk_flags: string[];
+  exclusions: string[];
+  interview_checks: string[];
+  evidence_policy: Record<string, unknown>;
+  created_at: string;
+};
+
+export type JobProfileVersionRow = {
+  version: number;
+  created_at: string;
+  snapshot: JobProfileDetail;
+};
+
+export type RecruitmentTaskRow = {
+  id: number;
+  name: string;
+  role_id: number;
+  role_title: string;
+  profile_version: number;
+  platform: string;
+  source_url: string;
+  target_candidates: number;
+  status: string;
+  current_step: string;
+  latest_message: string;
+  batch_count: number;
+  candidate_count: number;
+  run_count: number;
+  export_count: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type PluginTaskContext = {
+  recruitment_task_id: number;
+  job_profile_id: number;
+  job_profile_version: number;
+  job_title: string;
+  platform: string;
+  source_url: string;
+  task_status: string;
+  context_updated_at: string;
+};
+
 type ApiError = { error?: { code?: string; message?: string } };
 
 export class ApiRequestError extends Error {

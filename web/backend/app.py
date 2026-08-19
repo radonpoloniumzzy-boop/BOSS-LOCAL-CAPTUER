@@ -8,20 +8,26 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from core.app_lock import ApplicationLockError
 from core.bootstrap import BootstrapService, DataDirectoryError
 from core.version import APP_VERSION
-from storage.repository import IdempotencyConflictError
+from core.models import RecruitmentTask, ScreeningProfile
+from storage.repository import (
+    IdempotencyConflictError,
+    InvalidJobProfileStatusTransitionError,
+    InvalidRecruitmentTaskStatusTransitionError,
+    JobProfileVersionConflictError,
+)
 from web.backend.batch_markdown import BatchMarkdownExporter
 from web.backend.pairing import PairingCodeError
 from web.backend.runtime import WebRuntime
 
 
 SERVICE_NAME = "recruiting-talent-workbench"
-WEB_CAPABILITIES = ["phase2c_pairing", "batch_markdown_export"]
+WEB_CAPABILITIES = ["phase2c_pairing", "batch_markdown_export", "m2a_job_task_foundation"]
 
 
 class ApiError(RuntimeError):
@@ -47,6 +53,48 @@ class IntakeCandidatesRequest(BaseModel):
 
 class PairingRequest(BaseModel):
     pairing_code: str
+
+
+class JobProfilePayload(BaseModel):
+    job_title: str
+    department: str = ""
+    hiring_manager: str = ""
+    location: str = ""
+    employment_type: str = ""
+    experience_requirement: str = ""
+    education_requirement: str = ""
+    target_hires: int = 1
+    recruitment_deadline: str = ""
+    priority: str = "normal"
+    status: str = "draft"
+    jd_text: str = ""
+    must_have: list[str] = Field(default_factory=list)
+    nice_to_have: list[str] = Field(default_factory=list)
+    risk_flags: list[str] = Field(default_factory=list)
+    exclusions: list[str] = Field(default_factory=list)
+    interview_checks: list[str] = Field(default_factory=list)
+    evidence_policy: dict[str, object] = Field(default_factory=dict)
+
+
+class JobProfileUpdatePayload(JobProfilePayload):
+    expected_version: int
+
+
+class StatusPayload(BaseModel):
+    status: str
+
+
+class RecruitmentTaskPayload(BaseModel):
+    name: str
+    role_id: int
+    profile_version: int
+    platform: str = "boss"
+    source_url: str = ""
+    target_candidates: int = 0
+
+
+class PluginContextPayload(BaseModel):
+    recruitment_task_id: int | None = None
 
 
 _CANDIDATE_LIST_FIELDS = (
@@ -103,6 +151,55 @@ _CANDIDATE_APPEARANCE_FIELDS = (
     "ingest_status",
 )
 
+_JOB_PROFILE_LIST_FIELDS = (
+    "id",
+    "job_title",
+    "department",
+    "location",
+    "employment_type",
+    "target_hires",
+    "priority",
+    "status",
+    "version",
+    "updated_at",
+)
+
+_JOB_PROFILE_DETAIL_FIELDS = (
+    *_JOB_PROFILE_LIST_FIELDS,
+    "hiring_manager",
+    "experience_requirement",
+    "education_requirement",
+    "recruitment_deadline",
+    "jd_text",
+    "must_have",
+    "nice_to_have",
+    "risk_flags",
+    "exclusions",
+    "interview_checks",
+    "evidence_policy",
+    "created_at",
+)
+
+_RECRUITMENT_TASK_FIELDS = (
+    "id",
+    "name",
+    "role_id",
+    "role_title",
+    "profile_version",
+    "platform",
+    "source_url",
+    "target_candidates",
+    "status",
+    "current_step",
+    "latest_message",
+    "batch_count",
+    "candidate_count",
+    "run_count",
+    "export_count",
+    "created_at",
+    "updated_at",
+)
+
 
 def _project_candidate_list_row(row: dict[str, object]) -> dict[str, object]:
     return {field: row.get(field) for field in _CANDIDATE_LIST_FIELDS}
@@ -125,6 +222,50 @@ def _project_candidate_detail(detail: dict[str, object]) -> dict[str, object]:
 
 def _project_candidate_appearance(row: dict[str, object]) -> dict[str, object]:
     return {field: row.get(field) for field in _CANDIDATE_APPEARANCE_FIELDS}
+
+
+def _project_job_profile(row: dict[str, object], *, detail: bool = False) -> dict[str, object]:
+    fields = _JOB_PROFILE_DETAIL_FIELDS if detail else _JOB_PROFILE_LIST_FIELDS
+    return {field: row.get(field) for field in fields}
+
+
+def _project_job_version(row: dict[str, object]) -> dict[str, object]:
+    snapshot = row.get("snapshot") if isinstance(row.get("snapshot"), dict) else {}
+    return {
+        "version": row.get("version"),
+        "created_at": row.get("created_at"),
+        "snapshot": _project_job_profile(snapshot, detail=True),
+    }
+
+
+def _project_recruitment_task(row: dict[str, object]) -> dict[str, object]:
+    return {field: row.get(field) for field in _RECRUITMENT_TASK_FIELDS}
+
+
+def _job_payload_to_profile(payload: JobProfilePayload, *, profile_id: int | None = None) -> ScreeningProfile:
+    return ScreeningProfile(
+        id=profile_id,
+        job_title=payload.job_title.strip(),
+        department=payload.department.strip(),
+        hiring_manager=payload.hiring_manager.strip(),
+        location=payload.location.strip(),
+        employment_type=payload.employment_type.strip(),
+        experience_requirement=payload.experience_requirement.strip(),
+        education_requirement=payload.education_requirement.strip(),
+        target_hires=max(1, int(payload.target_hires or 1)),
+        recruitment_deadline=payload.recruitment_deadline.strip(),
+        priority=payload.priority.strip() or "normal",
+        status=payload.status.strip() or "draft",
+        jd_text=payload.jd_text,
+        prompt_text="",
+        prompt_source="generated",
+        must_have=[str(value).strip() for value in payload.must_have if str(value).strip()],
+        nice_to_have=[str(value).strip() for value in payload.nice_to_have if str(value).strip()],
+        risk_flags=[str(value).strip() for value in payload.risk_flags if str(value).strip()],
+        exclusions=[str(value).strip() for value in payload.exclusions if str(value).strip()],
+        interview_checks=[str(value).strip() for value in payload.interview_checks if str(value).strip()],
+        evidence_policy=dict(payload.evidence_policy or {}),
+    )
 
 
 def error_response(status_code: int, code: str, message: str) -> JSONResponse:
@@ -165,6 +306,7 @@ def create_web_app(
             "/api/intake/candidates",
             "/api/plugin/pair",
             "/api/plugin/connection/check",
+            "/api/plugin/context",
         }
         extension_allowed = request.url.path in extension_paths or (
             request.url.path.startswith("/api/capture-batches/")
@@ -333,6 +475,30 @@ def create_web_app(
         runtime.revoke_plugin_connection()
         return {"revoked": True, "message": "现有插件连接已撤销，请重新配对。"}
 
+    @app.put("/api/plugin-context")
+    def set_plugin_context(payload: PluginContextPayload) -> dict[str, object]:
+        if runtime.repository is None:
+            raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。")
+        try:
+            context = runtime.set_plugin_context(payload.recruitment_task_id)
+        except ValueError as exc:
+            raise ApiError(409, "plugin_context_unavailable", str(exc)) from exc
+        return {
+            "ok": True,
+            "context": context,
+            "message": "已更新插件当前任务。" if context else "已清除插件当前任务。",
+        }
+
+    @app.get("/api/plugin/context")
+    def get_plugin_context(_auth: None = Depends(require_local_api_token)) -> dict[str, object]:
+        try:
+            context = runtime.get_plugin_context()
+        except RuntimeError as exc:
+            raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。") from exc
+        if context is None:
+            raise ApiError(409, "context_unavailable", "当前未选择可用招聘任务。")
+        return context
+
     @app.post("/api/intake/candidates")
     def intake_candidates(
         payload: IntakeCandidatesRequest,
@@ -346,6 +512,139 @@ def create_web_app(
             raise ApiError(409, "idempotency_conflict", str(exc)) from exc
         except ValueError as exc:
             raise ApiError(400, "invalid_request", str(exc)) from exc
+
+    @app.get("/api/job-profiles")
+    def list_job_profiles() -> dict[str, object]:
+        if runtime.repository is None:
+            raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。")
+        return {"rows": [_project_job_profile(row) for row in runtime.repository.list_job_profiles()]}
+
+    @app.post("/api/job-profiles")
+    def create_job_profile(payload: JobProfilePayload) -> dict[str, object]:
+        if runtime.repository is None:
+            raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。")
+        try:
+            profile, _changed = runtime.repository.save_web_job_profile(_job_payload_to_profile(payload))
+        except InvalidJobProfileStatusTransitionError as exc:
+            raise ApiError(409, "invalid_job_profile_status_transition", str(exc)) from exc
+        except ValueError as exc:
+            raise ApiError(400, "invalid_request", str(exc)) from exc
+        return _project_job_profile(profile.to_dict(), detail=True)
+
+    @app.get("/api/job-profiles/{profile_id}")
+    def get_job_profile(profile_id: int) -> dict[str, object]:
+        if runtime.repository is None:
+            raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。")
+        profile = runtime.repository.get_job_profile(profile_id)
+        if profile is None:
+            raise ApiError(404, "job_profile_not_found", "岗位档案不存在。")
+        return _project_job_profile(profile, detail=True)
+
+    @app.put("/api/job-profiles/{profile_id}")
+    def update_job_profile(profile_id: int, payload: JobProfileUpdatePayload) -> dict[str, object]:
+        if runtime.repository is None:
+            raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。")
+        try:
+            profile, changed = runtime.repository.save_web_job_profile(
+                _job_payload_to_profile(payload, profile_id=profile_id),
+                expected_version=payload.expected_version,
+            )
+        except JobProfileVersionConflictError as exc:
+            raise ApiError(409, "job_profile_version_conflict", str(exc)) from exc
+        except InvalidJobProfileStatusTransitionError as exc:
+            raise ApiError(409, "invalid_job_profile_status_transition", str(exc)) from exc
+        except ValueError as exc:
+            raise ApiError(400, "invalid_request", str(exc)) from exc
+        return {**_project_job_profile(profile.to_dict(), detail=True), "changed": changed}
+
+    @app.get("/api/job-profiles/{profile_id}/versions")
+    def list_job_profile_versions(profile_id: int) -> dict[str, object]:
+        if runtime.repository is None:
+            raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。")
+        if runtime.repository.get_job_profile(profile_id) is None:
+            raise ApiError(404, "job_profile_not_found", "岗位档案不存在。")
+        return {
+            "rows": [
+                _project_job_version(row)
+                for row in runtime.repository.list_job_profile_versions(profile_id)
+            ]
+        }
+
+    @app.post("/api/job-profiles/{profile_id}/status")
+    def set_job_profile_status(profile_id: int, payload: StatusPayload) -> dict[str, object]:
+        if runtime.repository is None:
+            raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。")
+        try:
+            profile = runtime.repository.set_job_profile_status(profile_id, payload.status)
+        except InvalidJobProfileStatusTransitionError as exc:
+            raise ApiError(409, "invalid_job_profile_status_transition", str(exc)) from exc
+        except ValueError as exc:
+            code = "job_profile_not_found" if "不存在" in str(exc) else "invalid_request"
+            raise ApiError(404 if code == "job_profile_not_found" else 400, code, str(exc)) from exc
+        if payload.status == "closed":
+            current = runtime.get_plugin_context()
+            if current and int(current["job_profile_id"]) == profile_id:
+                runtime.set_plugin_context(None)
+        return _project_job_profile(profile.to_dict(), detail=True)
+
+    @app.get("/api/recruitment-tasks")
+    def list_recruitment_tasks(role_id: int | None = None) -> dict[str, object]:
+        if runtime.repository is None:
+            raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。")
+        rows = runtime.repository.list_recruitment_tasks(role_id=role_id)
+        summaries = []
+        for row in rows:
+            summaries.append(_project_recruitment_task(runtime.repository.get_recruitment_task_summary(int(row["id"]))))
+        return {"rows": summaries}
+
+    @app.post("/api/recruitment-tasks")
+    def create_recruitment_task(payload: RecruitmentTaskPayload) -> dict[str, object]:
+        if runtime.repository is None:
+            raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。")
+        task = RecruitmentTask(
+            name=payload.name.strip(),
+            role_id=payload.role_id,
+            profile_version=payload.profile_version,
+            platform=payload.platform,
+            source_url=payload.source_url.strip(),
+            target_candidates=max(0, int(payload.target_candidates or 0)),
+            target_ssr=0,
+            minimum_rating="SR",
+            view_quota=0,
+            greeting_quota=0,
+            current_step="待启动",
+            latest_message="",
+        )
+        try:
+            saved = runtime.repository.save_recruitment_task(task)
+            return _project_recruitment_task(runtime.repository.get_recruitment_task_summary(int(saved.id)))
+        except ValueError as exc:
+            raise ApiError(400, "invalid_request", str(exc)) from exc
+
+    @app.get("/api/recruitment-tasks/{task_id}")
+    def get_recruitment_task(task_id: int) -> dict[str, object]:
+        if runtime.repository is None:
+            raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。")
+        try:
+            return _project_recruitment_task(runtime.repository.get_recruitment_task_summary(task_id))
+        except ValueError as exc:
+            raise ApiError(404, "recruitment_task_not_found", str(exc)) from exc
+
+    @app.post("/api/recruitment-tasks/{task_id}/status")
+    def set_recruitment_task_status(task_id: int, payload: StatusPayload) -> dict[str, object]:
+        if runtime.repository is None:
+            raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。")
+        try:
+            saved = runtime.repository.set_recruitment_task_status(task_id, payload.status)
+        except InvalidRecruitmentTaskStatusTransitionError as exc:
+            raise ApiError(409, "invalid_recruitment_task_status_transition", str(exc)) from exc
+        except ValueError as exc:
+            raise ApiError(400, "invalid_request", str(exc)) from exc
+        if payload.status in {"completed", "cancelled", "failed"}:
+            current = runtime.get_plugin_context()
+            if current and int(current["recruitment_task_id"]) == task_id:
+                runtime.set_plugin_context(None)
+        return _project_recruitment_task(runtime.repository.get_recruitment_task_summary(int(saved.id)))
 
     @app.get("/api/candidates")
     def list_candidates(

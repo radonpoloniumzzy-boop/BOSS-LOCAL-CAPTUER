@@ -319,6 +319,129 @@ describe("drawer accessibility behavior", () => {
 });
 
 describe("workbench candidate intake views", () => {
+  it("manages job profiles, fixed versions, tasks, and plugin context", async () => {
+    const fetchMock = vi.fn((input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/job-profiles") && !init?.method) {
+        return response({
+          rows: [{
+            id: 7,
+            job_title: "量化研究员",
+            department: "投研",
+            location: "上海",
+            employment_type: "全职",
+            target_hires: 2,
+            priority: "high",
+            status: "active",
+            version: 2,
+            updated_at: "2026-08-19T10:00:00",
+          }],
+        });
+      }
+      if (url.endsWith("/api/recruitment-tasks") && !init?.method) {
+        return response({
+          rows: [{
+            id: 11,
+            name: "Boss 推荐流",
+            role_id: 7,
+            role_title: "量化研究员",
+            profile_version: 2,
+            platform: "boss",
+            source_url: "https://www.zhipin.com/web/geek/recommend",
+            target_candidates: 20,
+            status: "ready",
+            current_step: "待启动",
+            latest_message: "",
+            batch_count: 0,
+            candidate_count: 0,
+            run_count: 0,
+            export_count: 0,
+            created_at: "2026-08-19T09:00:00",
+            updated_at: "2026-08-19T09:00:00",
+          }],
+        });
+      }
+      if (url.endsWith("/api/job-profiles/7")) {
+        return response({
+          id: 7,
+          job_title: "量化研究员",
+          department: "投研",
+          hiring_manager: "招聘经理",
+          location: "上海",
+          employment_type: "全职",
+          target_hires: 2,
+          priority: "high",
+          status: "active",
+          version: 2,
+          updated_at: "2026-08-19T10:00:00",
+          created_at: "2026-08-19T09:00:00",
+          experience_requirement: "3 年以上",
+          education_requirement: "本科",
+          recruitment_deadline: "2026-10-01",
+          jd_text: "负责策略研究",
+          must_have: ["Python"],
+          nice_to_have: ["期货"],
+          risk_flags: [],
+          exclusions: [],
+          interview_checks: ["策略复盘"],
+          evidence_policy: {},
+        });
+      }
+      if (url.endsWith("/api/job-profiles/7/versions")) {
+        return response({
+          rows: [
+            { version: 2, created_at: "2026-08-19T10:00:00", snapshot: { jd_text: "负责策略研究" } },
+            { version: 1, created_at: "2026-08-19T09:00:00", snapshot: { jd_text: "旧 JD" } },
+          ],
+        });
+      }
+      if (url.endsWith("/api/plugin-context") && init?.method === "PUT") {
+        return response({ ok: true, context: { recruitment_task_id: 11 }, message: "已更新插件当前任务。" });
+      }
+      if (url.endsWith("/api/recruitment-tasks/11/status") && init?.method === "POST") {
+        return response({
+          id: 11,
+          name: "Boss 推荐流",
+          role_id: 7,
+          role_title: "量化研究员",
+          profile_version: 2,
+          platform: "boss",
+          source_url: "https://www.zhipin.com/web/geek/recommend",
+          target_candidates: 20,
+          status: "running",
+          current_step: "采集与筛选",
+          latest_message: "",
+          batch_count: 0,
+          candidate_count: 0,
+          run_count: 0,
+          export_count: 0,
+          created_at: "2026-08-19T09:00:00",
+          updated_at: "2026-08-19T10:05:00",
+        });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    render(<Workbench status={status} />);
+
+    await user.click(screen.getByRole("button", { name: "岗位" }));
+    expect(await screen.findByRole("heading", { name: "岗位、版本与招聘任务" })).toBeInTheDocument();
+    expect(screen.getByText("量化研究员")).toBeInTheDocument();
+    expect(screen.queryByText("待开发")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "查看" }));
+    expect(await screen.findByRole("dialog", { name: "岗位档案详情" })).toBeInTheDocument();
+    expect(screen.getByText("版本历史")).toBeInTheDocument();
+    expect(screen.getAllByText("v2").length).toBeGreaterThanOrEqual(1);
+
+    await user.click(screen.getByRole("button", { name: "设为插件当前任务" }));
+    expect(await screen.findByText("已设为插件当前任务：Boss 推荐流")).toBeInTheDocument();
+    const contextCall = fetchMock.mock.calls.find(([url]) => String(url).endsWith("/api/plugin-context"));
+    expect(contextCall?.[1]?.body).toBe(JSON.stringify({ recruitment_task_id: 11 }));
+    expect(fetchMock.mock.calls.map(([url]) => String(url)).join("|")).not.toContain("prompt_text");
+  });
+
   it("generates and copies a one-time plugin pairing code without exposing a token", async () => {
     const fetchMock = vi.fn((input: string | URL, init?: RequestInit) => {
       const url = String(input);

@@ -24,6 +24,18 @@ class IdempotencyConflictError(ValueError):
     """Raised when the same idempotency key is reused with different content."""
 
 
+class JobProfileVersionConflictError(ValueError):
+    """Raised when a web edit is based on a stale job profile version."""
+
+
+class InvalidJobProfileStatusTransitionError(ValueError):
+    """Raised when a job profile status transition is not allowed."""
+
+
+class InvalidRecruitmentTaskStatusTransitionError(ValueError):
+    """Raised when a recruitment task status transition is not allowed."""
+
+
 RECRUITMENT_STATUSES = {
     "collected",
     "screened",
@@ -403,11 +415,12 @@ class CandidateRepository:
             raise ValueError("只有招聘中的岗位才能创建或编辑招聘任务")
         if task.id is None and task.status != "ready":
             raise ValueError("新招聘任务必须从待启动状态开始")
-        if self.get_job_profile_version(int(task.role_id), int(profile.get("version") or 1)) is None:
-            raise ValueError("当前岗位版本快照不存在，不能创建招聘任务")
         timestamp = now_iso()
         if task.id is None:
-            task.profile_version = int(profile.get("version") or 1)
+            requested_version = int(task.profile_version or 0) or int(profile["version"])
+            if self.get_job_profile_version(int(task.role_id), requested_version) is None:
+                raise ValueError("招聘任务固定的岗位版本不存在")
+            task.profile_version = requested_version
             cursor = connection.execute(
                 """
                 INSERT INTO recruitment_tasks(
@@ -434,6 +447,8 @@ class CandidateRepository:
                 raise ValueError("招聘任务启动后不能修改目标、平台或额度；请复制或新建任务")
             task.role_id = int(existing["role_id"])
             task.profile_version = int(existing["profile_version"])
+            if self.get_job_profile_version(int(task.role_id), int(task.profile_version)) is None:
+                raise ValueError("招聘任务固定的岗位版本不存在")
             connection.execute(
                 """
                 UPDATE recruitment_tasks
@@ -493,8 +508,8 @@ class CandidateRepository:
         current = str(row["status"])
         if status != current and status not in RECRUITMENT_TASK_STATUS_TRANSITIONS.get(current, set()):
             if current in {"completed", "cancelled"}:
-                raise ValueError("已进入终态的招聘任务不能重新开启")
-            raise ValueError(f"招聘任务状态不能从 {current} 变更为 {status}")
+                raise InvalidRecruitmentTaskStatusTransitionError("已进入终态的招聘任务不能重新开启")
+            raise InvalidRecruitmentTaskStatusTransitionError(f"招聘任务状态不能从 {current} 变更为 {status}")
         if status == "running":
             profile = self.get_job_profile(int(row["role_id"]))
             if profile is None or profile.get("status") != "active":
@@ -1937,6 +1952,90 @@ class CandidateRepository:
             )
         return profile
 
+    def save_web_job_profile(
+        self,
+        profile: ScreeningProfile,
+        *,
+        expected_version: int | None = None,
+    ) -> tuple[ScreeningProfile, bool]:
+        """Save a job profile through the Web API contract.
+
+        Returns (profile, changed). Existing prompt fields are preserved because
+        prompt/model behavior is not part of the Web job editor.
+        """
+        if profile.id is None:
+            profile.prompt_text = ""
+            profile.prompt_source = "generated"
+            saved = self.save_job_profile(profile)
+            return saved, True
+
+        current = self.get_job_profile(int(profile.id))
+        if current is None:
+            raise ValueError("岗位档案不存在")
+        if expected_version is None:
+            raise JobProfileVersionConflictError("保存前请刷新岗位档案版本。")
+        if int(current.get("version") or 0) != int(expected_version):
+            raise JobProfileVersionConflictError("岗位档案已被更新，请刷新后再保存。")
+
+        profile.prompt_text = str(current.get("prompt_text") or "")
+        profile.prompt_source = str(current.get("prompt_source") or "generated")
+        profile.status = str(current.get("status") or profile.status or "draft")
+        profile.created_at = str(current.get("created_at") or "")
+        profile.version = int(current.get("version") or 1)
+        profile.parent_profile_id = current.get("parent_profile_id")  # type: ignore[assignment]
+
+        if not self._job_profile_has_web_changes(current, profile):
+            return ScreeningProfile(
+                **{
+                    key: current.get(key)
+                    for key in ScreeningProfile.__dataclass_fields__
+                    if key in current
+                }
+            ), False
+
+        saved = self.save_job_profile(profile)
+        return saved, True
+
+    @staticmethod
+    def _job_profile_has_web_changes(current: dict[str, object], profile: ScreeningProfile) -> bool:
+        comparable = {
+            "job_title": profile.job_title,
+            "department": profile.department,
+            "hiring_manager": profile.hiring_manager,
+            "location": profile.location,
+            "employment_type": profile.employment_type,
+            "experience_requirement": profile.experience_requirement,
+            "education_requirement": profile.education_requirement,
+            "target_hires": max(1, int(profile.target_hires)),
+            "recruitment_deadline": profile.recruitment_deadline,
+            "priority": profile.priority,
+            "status": profile.status,
+            "jd_text": profile.jd_text,
+            "must_have": list(profile.must_have),
+            "nice_to_have": list(profile.nice_to_have),
+            "risk_flags": list(profile.risk_flags),
+            "exclusions": list(profile.exclusions),
+            "interview_checks": list(profile.interview_checks),
+            "evidence_policy": dict(profile.evidence_policy),
+        }
+        for key, value in comparable.items():
+            current_value = current.get(key)
+            if key == "target_hires":
+                current_value = max(1, int(current_value or 1))
+            if key in {
+                "must_have",
+                "nice_to_have",
+                "risk_flags",
+                "exclusions",
+                "interview_checks",
+            }:
+                current_value = list(current_value or [])
+            if key == "evidence_policy":
+                current_value = dict(current_value or {})
+            if current_value != value:
+                return True
+        return False
+
     def save_screening_profile(self, profile: ScreeningProfile) -> ScreeningProfile:
         if profile.status == "draft":
             profile.status = "active"
@@ -2090,8 +2189,8 @@ class CandidateRepository:
             return
         if target not in JOB_PROFILE_STATUS_TRANSITIONS.get(current, set()):
             if current == "closed":
-                raise ValueError("已结束的岗位档案不能重新开启")
-            raise ValueError(f"岗位状态不能从 {current} 变更为 {target}")
+                raise InvalidJobProfileStatusTransitionError("已结束的岗位档案不能重新开启")
+            raise InvalidJobProfileStatusTransitionError(f"岗位状态不能从 {current} 变更为 {target}")
 
     def delete_screening_profile(self, profile_id: int) -> None:
         self.set_job_profile_status(profile_id, "closed")

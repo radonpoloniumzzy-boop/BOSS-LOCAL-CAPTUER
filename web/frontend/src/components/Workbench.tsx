@@ -5,9 +5,10 @@ import { AppStatus } from "../api";
 import { CountUp } from "./CountUp";
 import { BatchesPage } from "./workbench/BatchesPage";
 import { CandidatesPage } from "./workbench/CandidatesPage";
+import { JobsPage } from "./workbench/JobsPage";
 import { SettingsPage } from "./workbench/SettingsPage";
 
-type View = "home" | "candidates" | "batches" | "settings";
+type View = "home" | "candidates" | "batches" | "jobs" | "settings";
 
 export function Workbench({ status }: { status: AppStatus }) {
   const [view, setView] = useState<View>("home");
@@ -17,6 +18,7 @@ export function Workbench({ status }: { status: AppStatus }) {
     home: true,
     candidates: false,
     batches: false,
+    jobs: false,
     settings: false,
   });
 
@@ -59,11 +61,7 @@ export function Workbench({ status }: { status: AppStatus }) {
             <NavButton active={view === "home"} onClick={() => activateView("home")} icon={<Home size={16} />} label="概览" />
             <NavButton active={view === "candidates"} onClick={() => activateView("candidates")} icon={<Users size={16} />} label="候选人" />
             <NavButton active={view === "batches"} onClick={() => activateView("batches")} icon={<Layers3 size={16} />} label="最近批次" />
-            <button className="nav-item" disabled aria-label="岗位，待开发">
-              <BriefcaseBusiness size={16} />
-              <span>岗位</span>
-              <small>待开发</small>
-            </button>
+            <NavButton active={view === "jobs"} onClick={() => activateView("jobs")} icon={<BriefcaseBusiness size={16} />} label="岗位" />
             <NavButton active={view === "settings"} onClick={() => activateView("settings")} icon={<Settings size={16} />} label="设置" />
           </div>
         </nav>
@@ -143,6 +141,11 @@ export function Workbench({ status }: { status: AppStatus }) {
                 setRequestedBatchOrigin(null);
               }}
             />
+          </section>
+        )}
+        {visited.jobs && (
+          <section hidden={view !== "jobs"} aria-hidden={view !== "jobs"}>
+            <JobsPage active={view === "jobs"} />
           </section>
         )}
         {visited.settings && (

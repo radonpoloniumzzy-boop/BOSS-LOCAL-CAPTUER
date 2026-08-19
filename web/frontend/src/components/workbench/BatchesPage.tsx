@@ -20,7 +20,7 @@ export function BatchesPage({
 }: {
   active?: boolean;
   initialBatchId?: number | null;
-  initialReturnView?: "home" | "candidates" | "batches" | "settings" | null;
+  initialReturnView?: "home" | "candidates" | "batches" | "jobs" | "settings" | null;
   onInitialBatchConsumed?: () => void;
   onReturnFromInitialBatch?: () => void;
 }) {
