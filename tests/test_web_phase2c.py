@@ -693,13 +693,14 @@ class Handler(BaseHTTPRequestHandler):
             payload = {
                 "status": "ok",
                 "service": "recruiting-talent-workbench",
-                "capabilities": [
-                    "phase2c_pairing",
-                    "batch_markdown_export",
-                    "m2a_job_task_foundation",
-                    "m2b_external_rating_badges",
-                ],
-            }
+                    "capabilities": [
+                        "phase2c_pairing",
+                        "batch_markdown_export",
+                        "m2a_job_task_foundation",
+                        "m2b_external_rating_badges",
+                        "m2c_keyword_filter_highlights",
+                    ],
+                }
         elif self.path == "/api/app/status":
             payload = {"status": "ready", "database_ready": True}
         else:

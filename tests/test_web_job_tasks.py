@@ -992,6 +992,117 @@ class WebJobTaskFoundationTest(unittest.TestCase):
         self.assertEqual(current.status_code, 200, current.text)
         self.assertEqual(current.json()["badges"][0]["badge_text"], "1SSR")
 
+    def test_running_task_keyword_rules_are_versioned_and_available_to_plugin(self) -> None:
+        job = self._create_active_job()
+        task = self._start_task(self._create_task(job))
+
+        empty = self.client.get(f"/api/recruitment-tasks/{task['id']}/keyword-rules", headers=self.origin)
+        self.assertEqual(empty.status_code, 200, empty.text)
+        self.assertEqual(empty.json()["keyword_rules"], {"must": [], "plus": [], "risk": [], "note": []})
+
+        saved = self.client.put(
+            f"/api/recruitment-tasks/{task['id']}/keyword-rules",
+            json={
+                "expected_version": task["profile_version"],
+                "keyword_rules": {
+                    "must": [" Python ", "python", "量化"],
+                    "plus": ["React"],
+                    "risk": ["外包"],
+                    "note": [""],
+                },
+            },
+            headers=self.origin,
+        )
+        self.assertEqual(saved.status_code, 200, saved.text)
+        payload = saved.json()
+        self.assertTrue(payload["changed"])
+        self.assertEqual(payload["job_profile_version"], task["profile_version"] + 1)
+        self.assertEqual(payload["keyword_rules"]["must"], ["Python", "量化"])
+        self.assertEqual(payload["keyword_rules"]["risk"], ["外包"])
+        self.assertNotIn(self.token, saved.text)
+        self.assertNotIn("prompt_text", saved.text)
+        self.assertNotIn("provider", saved.text)
+        self.assertNotIn("raw_card_text", saved.text)
+
+        selected = self.client.put("/api/plugin-context", json={"recruitment_task_id": task["id"]}, headers=self.origin)
+        self.assertEqual(selected.status_code, 200, selected.text)
+        plugin_rules = self.client.get("/api/plugin/keyword-rules", headers=self.extension)
+        self.assertEqual(plugin_rules.status_code, 200, plugin_rules.text)
+        self.assertEqual(plugin_rules.json()["keyword_rules"]["must"], ["Python", "量化"])
+        self.assertEqual(plugin_rules.json()["keyword_rules"]["plus"], ["React"])
+
+    def test_keyword_rules_reject_non_running_and_context_unavailable(self) -> None:
+        job = self._create_active_job()
+        task = self._create_task(job)
+
+        read_rejected = self.client.get(f"/api/recruitment-tasks/{task['id']}/keyword-rules", headers=self.origin)
+        self.assertEqual(read_rejected.status_code, 409, read_rejected.text)
+        self.assertEqual(read_rejected.json()["error"]["code"], "keyword_rules_task_not_running")
+
+        rejected = self.client.put(
+            f"/api/recruitment-tasks/{task['id']}/keyword-rules",
+            json={"expected_version": task["profile_version"], "keyword_rules": {"must": ["Python"]}},
+            headers=self.origin,
+        )
+        self.assertEqual(rejected.status_code, 409, rejected.text)
+        self.assertEqual(rejected.json()["error"]["code"], "keyword_rules_task_not_running")
+
+        no_context = self.client.get("/api/plugin/keyword-rules", headers=self.extension)
+        self.assertEqual(no_context.status_code, 409, no_context.text)
+        self.assertEqual(no_context.json()["error"]["code"], "context_unavailable")
+
+    def test_keyword_rules_do_not_leak_across_context_or_future_profile_versions(self) -> None:
+        job = self._create_active_job()
+        task_a = self._start_task(self._create_task(job))
+        saved = self.client.put(
+            f"/api/recruitment-tasks/{task_a['id']}/keyword-rules",
+            json={"expected_version": task_a["profile_version"], "keyword_rules": {"must": ["Python"], "risk": ["外包"]}},
+            headers=self.origin,
+        )
+        self.assertEqual(saved.status_code, 200, saved.text)
+        task_a_after = self.client.get(f"/api/recruitment-tasks/{task_a['id']}").json()
+
+        future = self.client.put(
+            f"/api/job-profiles/{job['id']}",
+            json={
+                **self._job_payload(),
+                "target_hires": 3,
+                "evidence_policy": {"keyword_rules": {"must": ["未来版本"]}},
+                "expected_version": task_a_after["profile_version"],
+            },
+            headers=self.origin,
+        )
+        self.assertEqual(future.status_code, 200, future.text)
+        task_a_rules = self.client.get(f"/api/recruitment-tasks/{task_a['id']}/keyword-rules", headers=self.origin)
+        self.assertEqual(task_a_rules.json()["keyword_rules"]["must"], ["Python"])
+
+        task_b = self._start_task(self._create_task(future.json()))
+        selected_b = self.client.put("/api/plugin-context", json={"recruitment_task_id": task_b["id"]}, headers=self.origin)
+        self.assertEqual(selected_b.status_code, 200, selected_b.text)
+        plugin_b = self.client.get("/api/plugin/keyword-rules", headers=self.extension)
+        self.assertEqual(plugin_b.status_code, 200, plugin_b.text)
+        self.assertEqual(plugin_b.json()["keyword_rules"]["must"], ["未来版本"])
+        self.assertEqual(plugin_b.json()["keyword_rules"]["risk"], [])
+
+        selected_a = self.client.put("/api/plugin-context", json={"recruitment_task_id": task_a["id"]}, headers=self.origin)
+        self.assertEqual(selected_a.status_code, 200, selected_a.text)
+        plugin_a = self.client.get("/api/plugin/keyword-rules", headers=self.extension)
+        self.assertEqual(plugin_a.status_code, 200, plugin_a.text)
+        self.assertEqual(plugin_a.json()["keyword_rules"]["must"], ["Python"])
+        self.assertEqual(plugin_a.json()["keyword_rules"]["risk"], ["外包"])
+
+    def test_keyword_rules_expected_version_conflict(self) -> None:
+        job = self._create_active_job()
+        task = self._start_task(self._create_task(job))
+
+        conflict = self.client.put(
+            f"/api/recruitment-tasks/{task['id']}/keyword-rules",
+            json={"expected_version": task["profile_version"] + 99, "keyword_rules": {"must": ["Python"]}},
+            headers=self.origin,
+        )
+        self.assertEqual(conflict.status_code, 409, conflict.text)
+        self.assertEqual(conflict.json()["error"]["code"], "job_profile_version_conflict")
+
 
 if __name__ == "__main__":
     unittest.main()

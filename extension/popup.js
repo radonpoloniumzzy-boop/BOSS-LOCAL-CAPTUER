@@ -566,8 +566,10 @@ async function runCollection(autoScroll, options = {}) {
   const webSettings = webMode ? await refreshPluginContext(settings) : settings;
   if (webMode) {
     await refreshRatingBadges(tab.id, webSettings);
+    await refreshKeywordHighlights(tab.id, webSettings);
   } else {
     await clearRatingBadges(tab.id);
+    await clearKeywordHighlights(tab.id);
   }
   await resetScrollPause(tab.id);
   setStatus(
@@ -678,6 +680,159 @@ async function clearRatingBadges(tabId) {
       target: { tabId, allFrames: true },
       func: () => {
         document.querySelectorAll(".boss-local-rating-badge").forEach((node) => node.remove());
+      },
+    });
+  } catch (_error) {}
+}
+
+async function refreshKeywordHighlights(tabId, settings) {
+  if (!isWebWorkbenchMode(settings) || !settings.apiToken) {
+    await clearKeywordHighlights(tabId);
+    return;
+  }
+  try {
+    const apiBase = BossLocalWebIntake.deriveWebApiBase(settings);
+    const response = await fetch(`${apiBase}/api/plugin/keyword-rules`, {
+      headers: { "X-Boss-Local-Token": settings.apiToken || "" },
+    });
+    if (!response.ok) {
+      await clearKeywordHighlights(tabId);
+      return;
+    }
+    const payload = await response.json();
+    await applyKeywordHighlights(tabId, payload?.keyword_rules || {});
+  } catch (_error) {
+    await clearKeywordHighlights(tabId);
+  }
+}
+
+async function clearKeywordHighlights(tabId) {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      func: () => {
+        document.querySelectorAll(".boss-local-keyword-filterbar").forEach((node) => node.remove());
+        document.querySelectorAll("[data-boss-local-keyword-original-html]").forEach((card) => {
+          card.innerHTML = card.getAttribute("data-boss-local-keyword-original-html") || card.innerHTML;
+          card.removeAttribute("data-boss-local-keyword-original-html");
+          card.removeAttribute("data-boss-local-keyword-groups");
+          card.style.display = "";
+        });
+      },
+    });
+  } catch (_error) {}
+}
+
+async function applyKeywordHighlights(tabId, keywordRules) {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      args: [keywordRules],
+      func: (rules) => {
+        const groups = ["must", "plus", "risk", "note"];
+        const normalizeRules = (payload) => {
+          const result = {};
+          for (const group of groups) {
+            const values = Array.isArray(payload?.[group]) ? payload[group] : [];
+            const seen = new Set();
+            result[group] = [];
+            for (const value of values) {
+              const keyword = String(value || "").trim();
+              if (!keyword) continue;
+              const key = keyword.toLocaleLowerCase();
+              if (seen.has(key)) continue;
+              seen.add(key);
+              result[group].push(keyword);
+            }
+          }
+          return result;
+        };
+        const escapeRegExp = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const candidateSelectors = [
+          ".candidate-card-wrap",
+          ".candidate-card",
+          ".geek-card",
+          "[data-testid='candidate-card']",
+          "[class*='card'][class*='candidate']",
+        ];
+        const cards = Array.from(document.querySelectorAll(candidateSelectors.join(",")));
+        const restoreCard = (card) => {
+          if (card.hasAttribute("data-boss-local-keyword-original-html")) {
+            card.innerHTML = card.getAttribute("data-boss-local-keyword-original-html") || card.innerHTML;
+          } else {
+            card.setAttribute("data-boss-local-keyword-original-html", card.innerHTML);
+          }
+          card.removeAttribute("data-boss-local-keyword-groups");
+          card.style.display = "";
+        };
+        const rulesByGroup = normalizeRules(rules);
+        const allKeywords = groups.flatMap((group) => rulesByGroup[group].map((keyword) => ({ group, keyword })));
+        document.querySelectorAll(".boss-local-keyword-filterbar").forEach((node) => node.remove());
+        cards.forEach(restoreCard);
+        if (!allKeywords.length) return;
+        if (!document.getElementById("boss-local-keyword-style")) {
+          const style = document.createElement("style");
+          style.id = "boss-local-keyword-style";
+          style.textContent = ".boss-local-keyword-badge{display:inline-flex;align-items:center;margin-right:6px;padding:2px 7px;border-radius:999px;font-size:12px;font-weight:700;line-height:1.4;border:1px solid #bfdbfe;background:#eff6ff;color:#1d4ed8}.boss-local-keyword-danger-badge{border-color:#fed7aa;background:#fff7ed;color:#c2410c}.boss-local-keyword-highlight{border-radius:4px;padding:0 2px;background:#e0f2fe;color:#0f172a}.boss-local-keyword-highlight.must{background:#dbeafe}.boss-local-keyword-highlight.plus{background:#dcfce7}.boss-local-keyword-highlight.risk{background:#ffedd5;color:#9a3412}.boss-local-keyword-highlight.note{background:#f1f5f9}.boss-local-keyword-filterbar{position:sticky;top:0;z-index:20;display:flex;flex-wrap:wrap;gap:6px;margin:8px 0;padding:8px;border:1px solid #dbe3ef;border-radius:10px;background:#fff}.boss-local-keyword-filterbar button{border:1px solid #dbe3ef;border-radius:999px;background:#f8fafc;color:#334155;padding:3px 9px;font-size:12px;cursor:pointer}";
+          document.head.appendChild(style);
+        }
+        const makeRegex = (keywords) => new RegExp(`(${keywords.map(escapeRegExp).join("|")})`, "gi");
+        const groupRegex = {};
+        for (const group of groups) {
+          if (rulesByGroup[group].length) groupRegex[group] = makeRegex(rulesByGroup[group]);
+        }
+        const applyFilter = (filter) => {
+          for (const card of cards) {
+            const hitGroups = String(card.getAttribute("data-boss-local-keyword-groups") || "").split(",").filter(Boolean);
+            const matched = hitGroups.length > 0;
+            const visible = filter === "all" || (filter === "unmatched" && !matched) || hitGroups.includes(filter);
+            card.style.display = visible ? "" : "none";
+          }
+        };
+        const firstParent = cards[0]?.parentElement;
+        if (firstParent) {
+          const bar = document.createElement("div");
+          bar.className = "boss-local-keyword-filterbar";
+          for (const [filter, label] of [["all", "全部"], ["must", "有必须"], ["plus", "有加分"], ["risk", "有风险"], ["unmatched", "未命中"]]) {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.textContent = label;
+            button.addEventListener("click", () => applyFilter(filter));
+            bar.appendChild(button);
+          }
+          firstParent.insertBefore(bar, cards[0]);
+        }
+        for (const card of cards) {
+          const text = card.innerText || card.textContent || "";
+          const lowerText = text.toLocaleLowerCase();
+          const hitGroups = [];
+          const hitCount = { total: 0, risk: 0 };
+          for (const group of groups) {
+            const hits = rulesByGroup[group].filter((keyword) => lowerText.includes(keyword.toLocaleLowerCase()));
+            if (!hits.length) continue;
+            hitGroups.push(group);
+            hitCount.total += hits.length;
+            if (group === "risk") hitCount.risk += hits.length;
+          }
+          if (!hitGroups.length) continue;
+          card.setAttribute("data-boss-local-keyword-groups", hitGroups.join(","));
+          for (const group of groups) {
+            const regex = groupRegex[group];
+            if (!regex) continue;
+            card.innerHTML = card.innerHTML.replace(regex, (match) => `<span class="boss-local-keyword-highlight ${group}" data-boss-local-keyword-group="${group}">${match}</span>`);
+          }
+          const badgeTarget = card.querySelector(".name, .geek-name, .candidate-name, [class*='name']") || card;
+          const summary = document.createElement("span");
+          summary.className = "boss-local-keyword-badge";
+          summary.textContent = `关键词 ${hitCount.total}`;
+          badgeTarget.insertAdjacentElement("afterbegin", summary);
+          if (hitCount.risk > 0) {
+            const risk = document.createElement("span");
+            risk.className = "boss-local-keyword-badge boss-local-keyword-danger-badge";
+            risk.textContent = `风险 ${hitCount.risk}`;
+            badgeTarget.insertAdjacentElement("afterbegin", risk);
+          }
+        }
       },
     });
   } catch (_error) {}
@@ -1444,6 +1599,8 @@ globalThis.BossLocalPopup = {
   refreshPluginContext,
   refreshRatingBadges,
   clearRatingBadges,
+  refreshKeywordHighlights,
+  clearKeywordHighlights,
   queueAndSendWebBatch,
   collectSettings,
   isWebWorkbenchMode,

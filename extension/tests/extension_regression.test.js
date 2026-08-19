@@ -4017,6 +4017,192 @@ async function testPopupDesktopModeDoesNotRequestRatingBadgesAndClearsOldBadges(
   assert.strictEqual(clearCount, 1);
 }
 
+function createKeywordHighlightDom() {
+  const inserted = [];
+  const filterBars = [];
+  const card = {
+    innerHTML: "<span class=\"boss-local-rating-badge\">1SSR</span><span class=\"name\">Alice Python 外包 React</span>",
+    innerText: "Alice Python 外包 React",
+    textContent: "Alice Python 外包 React",
+    style: {},
+    attributes: {},
+    parentElement: {
+      insertBefore(node) {
+        filterBars.push(node);
+      },
+    },
+    hasAttribute(name) {
+      return Object.prototype.hasOwnProperty.call(this.attributes, name);
+    },
+    getAttribute(name) {
+      return this.attributes[name] || "";
+    },
+    setAttribute(name, value) {
+      this.attributes[name] = String(value);
+    },
+    removeAttribute(name) {
+      delete this.attributes[name];
+    },
+    querySelector() {
+      return {
+        insertAdjacentElement(_position, node) {
+          inserted.push(node);
+          card.innerHTML = `${node.textContent}${card.innerHTML}`;
+        },
+      };
+    },
+  };
+  const styleNodes = {};
+  const fakeDocument = {
+    head: {
+      appendChild(node) {
+        if (node.id) styleNodes[node.id] = node;
+      },
+    },
+    getElementById(id) {
+      return styleNodes[id] || null;
+    },
+    querySelectorAll(selector) {
+      const value = String(selector);
+      if (value.includes(".boss-local-keyword-filterbar")) return filterBars;
+      if (value.includes("[data-boss-local-keyword-original-html]")) {
+        return card.hasAttribute("data-boss-local-keyword-original-html") ? [card] : [];
+      }
+      if (value.includes(".boss-local-rating-badge")) return [];
+      return [card];
+    },
+    createElement(tagName) {
+      return {
+        tagName,
+        id: "",
+        className: "",
+        textContent: "",
+        type: "",
+        style: {},
+        children: [],
+        setAttribute(name, value) {
+          this[name] = value;
+        },
+        appendChild(node) {
+          this.children.push(node);
+        },
+        addEventListener(_name, listener) {
+          this.listener = listener;
+        },
+        remove() {},
+      };
+    },
+  };
+  return { card, fakeDocument, inserted, filterBars };
+}
+
+async function testPopupWebModeRefreshesKeywordHighlights() {
+  const dom = createKeywordHighlightDom();
+  const keywordFetches = [];
+  const popup = createPopupTestContext({
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "web-token",
+    connectionMode: "web",
+    fetchImpl: async (url, requestOptions = {}) => {
+      keywordFetches.push({ url: String(url), headers: requestOptions.headers || {} });
+      return {
+        ok: true,
+        json: async () => ({
+          task_id: 11,
+          keyword_rules: {
+            must: ["python"],
+            plus: ["React"],
+            risk: ["外包"],
+            note: [],
+          },
+        }),
+      };
+    },
+  });
+  popup.chrome.scripting.executeScript = async (details) => {
+    const previousDocument = global.document;
+    const previousVmDocument = popup.context.document;
+    global.document = dom.fakeDocument;
+    popup.context.document = dom.fakeDocument;
+    try {
+      details.func(...(details.args || []));
+    } finally {
+      global.document = previousDocument;
+      popup.context.document = previousVmDocument;
+    }
+    return [{ result: true }];
+  };
+
+  await popup.api.refreshKeywordHighlights(7, {
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "web-token",
+    connectionMode: "web",
+  });
+
+  assert.strictEqual(keywordFetches[0].url, "http://127.0.0.1:17864/api/plugin/keyword-rules");
+  assert.strictEqual(keywordFetches[0].headers["X-Boss-Local-Token"], "web-token");
+  assert(!keywordFetches[0].url.includes("web-token"));
+  assert(dom.card.innerHTML.includes("boss-local-rating-badge"));
+  assert(dom.card.innerHTML.includes("boss-local-keyword-highlight must"));
+  assert(dom.card.innerHTML.includes("boss-local-keyword-highlight plus"));
+  assert(dom.card.innerHTML.includes("boss-local-keyword-highlight risk"));
+  assert(dom.inserted.some((node) => node.textContent === "关键词 3"));
+  assert(dom.inserted.some((node) => node.textContent === "风险 1"));
+  assert.strictEqual(dom.filterBars.length, 1);
+
+  await popup.api.refreshKeywordHighlights(7, {
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "web-token",
+    connectionMode: "web",
+  });
+  assert.strictEqual((dom.card.innerHTML.match(/boss-local-keyword-highlight/g) || []).length, 3);
+}
+
+async function testPopupKeywordHighlightsClearOnFailureAndDesktopMode() {
+  const dom = createKeywordHighlightDom();
+  let fetchCount = 0;
+  let executeCount = 0;
+  const popup = createPopupTestContext({
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "web-token",
+    connectionMode: "web",
+    fetchImpl: async () => {
+      fetchCount += 1;
+      return { ok: false, json: async () => ({}) };
+    },
+  });
+  popup.chrome.scripting.executeScript = async (details) => {
+    executeCount += 1;
+    const previousDocument = global.document;
+    const previousVmDocument = popup.context.document;
+    global.document = dom.fakeDocument;
+    popup.context.document = dom.fakeDocument;
+    try {
+      details.func(...(details.args || []));
+    } finally {
+      global.document = previousDocument;
+      popup.context.document = previousVmDocument;
+    }
+    return [{ result: true }];
+  };
+
+  await popup.api.refreshKeywordHighlights(7, {
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "web-token",
+    connectionMode: "web",
+  });
+  assert.strictEqual(fetchCount, 1);
+  assert.strictEqual(executeCount, 1);
+
+  await popup.api.refreshKeywordHighlights(7, {
+    apiBase: "http://127.0.0.1:19001",
+    apiToken: "desktop-token",
+    connectionMode: "desktop",
+  });
+  assert.strictEqual(fetchCount, 1);
+  assert.strictEqual(executeCount, 2);
+}
+
 async function main() {
   await testDownloadEndpointValidation();
   await testStopGuardIgnoresStaleProgress();
@@ -4071,6 +4257,8 @@ async function main() {
   await testPopupRatingBadgesIgnoreRowsWithoutStableIdentity();
   await testPopupRatingBadgesDoNotCanonicalizeUnknownPlatform();
   await testPopupDesktopModeDoesNotRequestRatingBadgesAndClearsOldBadges();
+  await testPopupWebModeRefreshesKeywordHighlights();
+  await testPopupKeywordHighlightsClearOnFailureAndDesktopMode();
   await testPendingLimitConcurrentEnqueueStaysWithinTen();
   await testWebIntakeSuccessSanitizesCompletedPayload();
   await testCompletedTransitionScrubsSensitivePendingBeforeDelete();

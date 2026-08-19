@@ -197,6 +197,19 @@ export type ExternalRatingImportResult = {
   rows: ExternalRatingImportRow[];
 };
 
+export type KeywordRuleGroup = "must" | "plus" | "risk" | "note";
+
+export type KeywordRules = Record<KeywordRuleGroup, string[]>;
+
+export type KeywordRulesResponse = {
+  task_id: number;
+  job_profile_id: number;
+  job_profile_version: number;
+  task_status: string;
+  keyword_rules: KeywordRules;
+  changed?: boolean;
+};
+
 type ApiError = { error?: { code?: string; message?: string } };
 
 export class ApiRequestError extends Error {

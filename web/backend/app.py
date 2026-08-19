@@ -34,6 +34,7 @@ WEB_CAPABILITIES = [
     "batch_markdown_export",
     "m2a_job_task_foundation",
     "m2b_external_rating_badges",
+    "m2c_keyword_filter_highlights",
 ]
 
 
@@ -116,6 +117,13 @@ class PluginContextPayload(BaseModel):
     model_config = {"extra": "forbid"}
 
     recruitment_task_id: int | None = None
+
+
+class KeywordRulesPayload(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    expected_version: int
+    keyword_rules: dict[str, object] = Field(default_factory=dict)
 
 
 class ExternalRatingsImportRequest(BaseModel):
@@ -379,6 +387,7 @@ def create_web_app(
             "/api/plugin/connection/check",
             "/api/plugin/context",
             "/api/plugin/ratings/badges",
+            "/api/plugin/keyword-rules",
         }
         extension_allowed = request.url.path in extension_paths or (
             request.url.path.startswith("/api/capture-batches/")
@@ -580,6 +589,25 @@ def create_web_app(
             raise ApiError(409, "context_unavailable", "当前未选择可用招聘任务。")
         return context
 
+    @app.get("/api/plugin/keyword-rules")
+    def get_plugin_keyword_rules(_auth: None = Depends(require_local_api_token)) -> dict[str, object]:
+        if runtime.repository is None:
+            raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。")
+        try:
+            context = runtime.get_plugin_context()
+        except RuntimeError as exc:
+            raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。") from exc
+        if context is None:
+            raise ApiError(409, "context_unavailable", "当前未选择可用招聘任务。")
+        rules = runtime.repository.get_task_keyword_rules(int(context["recruitment_task_id"]))
+        return {
+            "task_id": rules["task_id"],
+            "job_profile_id": rules["job_profile_id"],
+            "job_profile_version": rules["job_profile_version"],
+            "task_status": rules["task_status"],
+            "keyword_rules": rules["keyword_rules"],
+        }
+
     @app.post("/api/intake/candidates")
     def intake_candidates(
         payload: IntakeCandidatesRequest,
@@ -728,6 +756,34 @@ def create_web_app(
         except ValueError as exc:
             raise ApiError(400, "invalid_request", str(exc)) from exc
         return _project_recruitment_task(runtime.repository.get_recruitment_task_summary(int(saved.id)))
+
+    @app.get("/api/recruitment-tasks/{task_id}/keyword-rules")
+    def get_task_keyword_rules(task_id: int) -> dict[str, object]:
+        if runtime.repository is None:
+            raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。")
+        try:
+            return runtime.repository.get_task_keyword_rules(task_id)
+        except InvalidRecruitmentTaskStatusTransitionError as exc:
+            raise ApiError(409, "keyword_rules_task_not_running", str(exc)) from exc
+        except ValueError as exc:
+            raise ApiError(404, "recruitment_task_not_found", str(exc)) from exc
+
+    @app.put("/api/recruitment-tasks/{task_id}/keyword-rules")
+    def set_task_keyword_rules(task_id: int, payload: KeywordRulesPayload) -> dict[str, object]:
+        if runtime.repository is None:
+            raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。")
+        try:
+            return runtime.repository.set_task_keyword_rules(
+                task_id,
+                payload.keyword_rules,
+                expected_version=payload.expected_version,
+            )
+        except JobProfileVersionConflictError as exc:
+            raise ApiError(409, "job_profile_version_conflict", str(exc)) from exc
+        except InvalidRecruitmentTaskStatusTransitionError as exc:
+            raise ApiError(409, "keyword_rules_task_not_running", str(exc)) from exc
+        except ValueError as exc:
+            raise ApiError(404, "recruitment_task_not_found", str(exc)) from exc
 
     @app.post("/api/recruitment-tasks/{task_id}/external-ratings/import")
     def import_external_ratings(task_id: int, payload: ExternalRatingsImportRequest) -> dict[str, object]:

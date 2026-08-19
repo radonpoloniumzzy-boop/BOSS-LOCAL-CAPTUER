@@ -1,7 +1,7 @@
 import { useState } from "react";
-import { Link2, Upload } from "lucide-react";
+import { Link2, Search, Upload } from "lucide-react";
 
-import { ExternalRatingImportResult, PluginTaskContext, RecruitmentTaskRow } from "../../api";
+import { ExternalRatingImportResult, KeywordRules, KeywordRulesResponse, PluginTaskContext, RecruitmentTaskRow } from "../../api";
 import { Drawer } from "./Drawer";
 import { RatingBadge, StatusBadge } from "./common";
 import { statusLabel, toneForStatus } from "./JobEditorDrawer";
@@ -13,6 +13,8 @@ type RecruitmentTasksPanelProps = {
   onStatusChange: (task: RecruitmentTaskRow, status: string) => Promise<void>;
   onAssignContext: (task: RecruitmentTaskRow | null) => Promise<void>;
   onImportRatings: (task: RecruitmentTaskRow, text: string) => Promise<ExternalRatingImportResult>;
+  onLoadKeywordRules: (task: RecruitmentTaskRow) => Promise<KeywordRulesResponse>;
+  onSaveKeywordRules: (task: RecruitmentTaskRow, rules: KeywordRules, expectedVersion: number) => Promise<KeywordRulesResponse>;
 };
 
 export function RecruitmentTasksPanel({
@@ -22,6 +24,8 @@ export function RecruitmentTasksPanel({
   onStatusChange,
   onAssignContext,
   onImportRatings,
+  onLoadKeywordRules,
+  onSaveKeywordRules,
 }: RecruitmentTasksPanelProps) {
   const [cancelTarget, setCancelTarget] = useState<RecruitmentTaskRow | null>(null);
   const [importTarget, setImportTarget] = useState<RecruitmentTaskRow | null>(null);
@@ -29,6 +33,12 @@ export function RecruitmentTasksPanel({
   const [importText, setImportText] = useState("");
   const [importError, setImportError] = useState("");
   const [importResult, setImportResult] = useState<ExternalRatingImportResult | null>(null);
+  const [keywordTarget, setKeywordTarget] = useState<RecruitmentTaskRow | null>(null);
+  const [keywordVersion, setKeywordVersion] = useState(0);
+  const [keywordForm, setKeywordForm] = useState<KeywordRulesText>(() => emptyKeywordRulesText());
+  const [keywordLoading, setKeywordLoading] = useState(false);
+  const [keywordError, setKeywordError] = useState("");
+  const [keywordSaved, setKeywordSaved] = useState("");
   const [panelError, setPanelError] = useState("");
 
   const changeStatus = async (task: RecruitmentTaskRow, status: string) => {
@@ -71,6 +81,41 @@ export function RecruitmentTasksPanel({
       setImportResult(result);
     } catch (err) {
       setImportError(err instanceof Error ? err.message : "外部评级导入失败，请检查名单后重试。");
+    }
+  };
+
+  const openKeywordRules = async (task: RecruitmentTaskRow) => {
+    setKeywordTarget(task);
+    setKeywordVersion(task.profile_version);
+    setKeywordForm(emptyKeywordRulesText());
+    setKeywordError("");
+    setKeywordSaved("");
+    setKeywordLoading(true);
+    try {
+      const payload = await onLoadKeywordRules(task);
+      setKeywordVersion(payload.job_profile_version);
+      setKeywordForm(keywordRulesToText(payload.keyword_rules));
+    } catch (err) {
+      setKeywordError(err instanceof Error ? err.message : "关键词筛选规则读取失败，请稍后重试。");
+    } finally {
+      setKeywordLoading(false);
+    }
+  };
+
+  const keywordRules = keywordTextToRules(keywordForm);
+  const keywordCounts = Object.values(keywordRules).reduce((total, values) => total + values.length, 0);
+
+  const confirmKeywordSave = async () => {
+    if (!keywordTarget || saving) return;
+    setKeywordError("");
+    setKeywordSaved("");
+    try {
+      const result = await onSaveKeywordRules(keywordTarget, keywordRules, keywordVersion);
+      setKeywordVersion(result.job_profile_version);
+      setKeywordForm(keywordRulesToText(result.keyword_rules));
+      setKeywordSaved(`已保存 ${Object.values(result.keyword_rules).reduce((total, values) => total + values.length, 0)} 个关键词。`);
+    } catch (err) {
+      setKeywordError(err instanceof Error ? err.message : "关键词筛选规则保存失败，请稍后重试。");
     }
   };
 
@@ -127,6 +172,11 @@ export function RecruitmentTasksPanel({
                     </button>
                   )}
                   {task.status === "running" && (
+                    <button className="secondary-button compact" disabled={saving} onClick={() => void openKeywordRules(task)}>
+                      <Search size={14} />关键词筛选规则
+                    </button>
+                  )}
+                  {task.status === "running" && (
                     <button
                       className="secondary-button compact"
                       disabled={saving}
@@ -168,6 +218,55 @@ export function RecruitmentTasksPanel({
               onClick={() => void confirmCancel()}
             >
               确认取消任务
+            </button>
+          </div>
+        </Drawer>
+      )}
+      {keywordTarget && (
+        <Drawer label="关键词筛选规则" className="drawer-panel detail-drawer-panel" onClose={() => setKeywordTarget(null)}>
+          <div className="drawer-header">
+            <div>
+              <p className="eyebrow">关键词筛选</p>
+              <h2>任务：{keywordTarget.name}</h2>
+              <p>这些规则只用于页面标记和辅助筛选，不调用 AI，也不会自动操作候选人。</p>
+            </div>
+            <button className="icon-button" onClick={() => setKeywordTarget(null)} aria-label="关闭关键词筛选规则">×</button>
+          </div>
+          {keywordLoading ? (
+            <div className="table-state">正在读取关键词筛选规则...</div>
+          ) : (
+            <>
+              <div className="keyword-rule-grid">
+                <label>必须关键词<textarea rows={5} value={keywordForm.must} onChange={(event) => setKeywordForm({ ...keywordForm, must: event.target.value })} placeholder="Python&#10;量化&#10;风控" /></label>
+                <label>加分关键词<textarea rows={5} value={keywordForm.plus} onChange={(event) => setKeywordForm({ ...keywordForm, plus: event.target.value })} placeholder="React&#10;数据分析" /></label>
+                <label>风险关键词<textarea rows={5} value={keywordForm.risk} onChange={(event) => setKeywordForm({ ...keywordForm, risk: event.target.value })} placeholder="外包&#10;频繁跳槽" /></label>
+                <label>关注关键词<textarea rows={5} value={keywordForm.note} onChange={(event) => setKeywordForm({ ...keywordForm, note: event.target.value })} placeholder="可迁移&#10;英文沟通" /></label>
+              </div>
+              <div className="rating-import-summary">
+                <span>必须 {keywordRules.must.length}</span>
+                <span>加分 {keywordRules.plus.length}</span>
+                <span>风险 {keywordRules.risk.length}</span>
+                <span>关注 {keywordRules.note.length}</span>
+                <span>合计 {keywordCounts}</span>
+              </div>
+              {keywordCounts > 0 && (
+                <div className="keyword-preview-list">
+                  {(["must", "plus", "risk", "note"] as const).map((group) => (
+                    <div key={group}>
+                      <strong>{keywordGroupLabel(group)}</strong>
+                      <p>{keywordRules[group].join("、") || "未设置"}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+          {keywordError && <div className="form-error" role="alert">{keywordError}</div>}
+          {keywordSaved && <div className="rating-import-result" role="status">{keywordSaved}</div>}
+          <div className="button-row">
+            <button className="secondary-button" onClick={() => setKeywordTarget(null)}>关闭</button>
+            <button className="primary-button" disabled={saving || keywordLoading} onClick={() => void confirmKeywordSave()}>
+              保存关键词筛选规则
             </button>
           </div>
         </Drawer>
@@ -257,6 +356,53 @@ export function RecruitmentTasksPanel({
 
 function isValidRating(value: string) {
   return ["UR", "SSR", "SR", "R", "N"].includes(String(value || "").trim().toUpperCase());
+}
+
+type KeywordRulesText = Record<"must" | "plus" | "risk" | "note", string>;
+
+function emptyKeywordRulesText(): KeywordRulesText {
+  return { must: "", plus: "", risk: "", note: "" };
+}
+
+function normalizeKeywordLines(text: string) {
+  const seen = new Set<string>();
+  const values: string[] = [];
+  for (const item of text.replace(/,/g, "\n").split(/\r?\n/)) {
+    const keyword = item.trim();
+    if (!keyword) continue;
+    const key = keyword.toLocaleLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    values.push(keyword);
+  }
+  return values;
+}
+
+function keywordTextToRules(text: KeywordRulesText): KeywordRules {
+  return {
+    must: normalizeKeywordLines(text.must),
+    plus: normalizeKeywordLines(text.plus),
+    risk: normalizeKeywordLines(text.risk),
+    note: normalizeKeywordLines(text.note),
+  };
+}
+
+function keywordRulesToText(rules: KeywordRules): KeywordRulesText {
+  return {
+    must: (rules.must || []).join("\n"),
+    plus: (rules.plus || []).join("\n"),
+    risk: (rules.risk || []).join("\n"),
+    note: (rules.note || []).join("\n"),
+  };
+}
+
+function keywordGroupLabel(group: "must" | "plus" | "risk" | "note") {
+  return {
+    must: "必须",
+    plus: "加分",
+    risk: "风险",
+    note: "关注",
+  }[group];
 }
 
 function parseRatingPreview(text: string) {

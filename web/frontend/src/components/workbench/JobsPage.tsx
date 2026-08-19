@@ -7,6 +7,8 @@ import {
   JobProfileDetail,
   JobProfileRow,
   JobProfileVersionRow,
+  KeywordRules,
+  KeywordRulesResponse,
   PluginTaskContext,
   RecruitmentTaskRow,
   requestJson,
@@ -220,6 +222,35 @@ export function JobsPage({ active }: { active: boolean }) {
     }
   };
 
+  const loadKeywordRules = async (task: RecruitmentTaskRow): Promise<KeywordRulesResponse> => {
+    return requestJson<KeywordRulesResponse>(`/api/recruitment-tasks/${task.id}/keyword-rules`);
+  };
+
+  const saveKeywordRules = async (
+    task: RecruitmentTaskRow,
+    rules: KeywordRules,
+    expectedVersion: number,
+  ): Promise<KeywordRulesResponse> => {
+    setSaving(true);
+    setError("");
+    try {
+      const result = await requestJson<KeywordRulesResponse>(`/api/recruitment-tasks/${task.id}/keyword-rules`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ expected_version: expectedVersion, keyword_rules: rules }),
+      });
+      setNotice("关键词筛选规则已保存。");
+      await load();
+      return result;
+    } catch (err) {
+      const message = err instanceof ApiRequestError ? err.message : "关键词筛选规则保存失败，请稍后重试。";
+      setError(message);
+      throw new Error(message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
     <div className="page-content page-enter">
       <div className="page-heading">
@@ -295,6 +326,8 @@ export function JobsPage({ active }: { active: boolean }) {
           onStatusChange={setTaskStatus}
           onAssignContext={assignPluginContext}
           onImportRatings={importExternalRatings}
+          onLoadKeywordRules={loadKeywordRules}
+          onSaveKeywordRules={saveKeywordRules}
         />
       </div>
 

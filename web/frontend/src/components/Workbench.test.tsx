@@ -846,6 +846,125 @@ describe("workbench candidate intake views", () => {
     expect(within(dialog).getByRole("button", { name: "确认导入外部评级" })).toBeEnabled();
   });
 
+  it("edits keyword filter rules for running recruitment tasks and preserves input on failure", async () => {
+    let saveAttempts = 0;
+    const fetchMock = vi.fn((input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/job-profiles") && !init?.method) return response({ rows: [] });
+      if (url.endsWith("/api/recruitment-tasks") && !init?.method) {
+        return response({
+          rows: [{
+            id: 11,
+            name: "Boss 推荐流",
+            role_id: 7,
+            role_title: "量化研究员",
+            profile_version: saveAttempts > 1 ? 3 : 2,
+            platform: "boss",
+            source_url: "https://www.zhipin.com/web/geek/recommend",
+            target_candidates: 20,
+            status: "running",
+            current_step: "采集与筛选",
+            latest_message: "",
+            batch_count: 1,
+            candidate_count: 2,
+            run_count: 0,
+            export_count: 0,
+            created_at: "2026-08-19T09:00:00",
+            updated_at: "2026-08-19T09:00:00",
+          }],
+        });
+      }
+      if (url.endsWith("/api/plugin-context") && !init?.method) return response({ context: null });
+      if (url.endsWith("/api/recruitment-tasks/11/keyword-rules") && !init?.method) {
+        return response({
+          task_id: 11,
+          job_profile_id: 7,
+          job_profile_version: 2,
+          task_status: "running",
+          keyword_rules: { must: ["Python"], plus: [], risk: [], note: [] },
+        });
+      }
+      if (url.endsWith("/api/recruitment-tasks/11/keyword-rules") && init?.method === "PUT") {
+        saveAttempts += 1;
+        if (saveAttempts === 1) return errorResponse("关键词筛选规则保存失败，请刷新后重试。");
+        return response({
+          task_id: 11,
+          job_profile_id: 7,
+          job_profile_version: 3,
+          task_status: "running",
+          changed: true,
+          keyword_rules: { must: ["Python", "量化"], plus: ["React"], risk: ["外包"], note: [] },
+        });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    render(<Workbench status={status} />);
+
+    await user.click(screen.getByRole("button", { name: "岗位" }));
+    await screen.findByText("Boss 推荐流");
+    await user.click(screen.getByRole("button", { name: "关键词筛选规则" }));
+    const dialog = await screen.findByRole("dialog", { name: "关键词筛选规则" });
+    expect(within(dialog).getByLabelText("必须关键词")).toHaveValue("Python");
+    expect(within(dialog).queryByText(/AI 评级/)).not.toBeInTheDocument();
+    await user.type(within(dialog).getByLabelText("必须关键词"), "\n量化");
+    await user.type(within(dialog).getByLabelText("加分关键词"), "React");
+    await user.type(within(dialog).getByLabelText("风险关键词"), "外包");
+    expect(within(dialog).getByText("合计 4")).toBeInTheDocument();
+
+    await user.click(within(dialog).getByRole("button", { name: "保存关键词筛选规则" }));
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("关键词筛选规则保存失败，请刷新后重试。");
+    expect(within(dialog).getByLabelText("风险关键词")).toHaveValue("外包");
+    await user.click(within(dialog).getByRole("button", { name: "保存关键词筛选规则" }));
+    expect(await within(dialog).findByRole("status")).toHaveTextContent("已保存 4 个关键词");
+    const saveCall = fetchMock.mock.calls.find(([url], index) =>
+      index > 0 && String(url).endsWith("/api/recruitment-tasks/11/keyword-rules")
+        && fetchMock.mock.calls[index][1]?.method === "PUT",
+    );
+    expect(saveCall?.[1]?.body).toContain('"expected_version":2');
+    expect(saveCall?.[1]?.body).toContain('"risk":["外包"]');
+  });
+
+  it("hides keyword rule editing for non-running recruitment tasks", async () => {
+    const fetchMock = vi.fn((input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/job-profiles") && !init?.method) return response({ rows: [] });
+      if (url.endsWith("/api/recruitment-tasks") && !init?.method) {
+        return response({
+          rows: [{
+            id: 11,
+            name: "Boss 推荐流",
+            role_id: 7,
+            role_title: "量化研究员",
+            profile_version: 2,
+            platform: "boss",
+            source_url: "https://www.zhipin.com/web/geek/recommend",
+            target_candidates: 20,
+            status: "paused",
+            current_step: "暂停",
+            latest_message: "",
+            batch_count: 1,
+            candidate_count: 2,
+            run_count: 0,
+            export_count: 0,
+            created_at: "2026-08-19T09:00:00",
+            updated_at: "2026-08-19T09:00:00",
+          }],
+        });
+      }
+      if (url.endsWith("/api/plugin-context") && !init?.method) return response({ context: null });
+      throw new Error(`unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    render(<Workbench status={status} />);
+
+    await user.click(screen.getByRole("button", { name: "岗位" }));
+    await screen.findByText("Boss 推荐流");
+    expect(screen.queryByRole("button", { name: "关键词筛选规则" })).not.toBeInTheDocument();
+  });
+
   it("generates and copies a one-time plugin pairing code without exposing a token", async () => {
     const fetchMock = vi.fn((input: string | URL, init?: RequestInit) => {
       const url = String(input);
