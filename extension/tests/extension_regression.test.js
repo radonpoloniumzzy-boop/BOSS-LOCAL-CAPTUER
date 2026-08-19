@@ -3717,7 +3717,7 @@ async function testPopupWebModeRefreshesSearchableRatingBadges() {
   };
   const card = {
     getAttribute(name) {
-      return name === "data-geek-id" ? "boss:alice" : "";
+      return name === "data-geek-id" ? "alice" : "";
     },
     querySelector(selector) {
       if (String(selector).includes("href")) {
@@ -3762,6 +3762,7 @@ async function testPopupWebModeRefreshesSearchableRatingBadges() {
           task_id: 11,
           badges: [
             {
+              source_platform: "boss",
               platform_uid: "boss:alice",
               rating: "SSR",
               badge_text: "1SSR",
@@ -3927,6 +3928,67 @@ async function testPopupRatingBadgesIgnoreRowsWithoutStableIdentity() {
   assert.strictEqual(inserted.length, 0);
 }
 
+async function testPopupRatingBadgesDoNotCanonicalizeUnknownPlatform() {
+  const inserted = [];
+  const card = {
+    getAttribute(name) {
+      return name === "data-geek-id" ? "alice" : "";
+    },
+    querySelector() {
+      return {
+        insertAdjacentElement(_position, node) {
+          inserted.push(node);
+        },
+      };
+    },
+  };
+  const fakeDocument = {
+    querySelectorAll(selector) {
+      if (String(selector).includes(".boss-local-rating-badge")) return [];
+      return [card];
+    },
+    createElement() {
+      return {
+        textContent: "",
+        style: {},
+        setAttribute() {},
+      };
+    },
+  };
+  const popup = createPopupTestContext({
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "web-token",
+    connectionMode: "web",
+    fetchImpl: async () => ({
+      ok: true,
+      json: async () => ({
+        badges: [{ source_platform: "unknown", platform_uid: "unknown:alice", rating: "SSR", badge_text: "1SSR" }],
+      }),
+    }),
+  });
+  popup.chrome.scripting.executeScript = async (details) => {
+    const previousDocument = global.document;
+    const previousVmDocument = popup.context.document;
+    global.document = fakeDocument;
+    popup.context.document = fakeDocument;
+    try {
+      details.func(...(details.args || []));
+    } finally {
+      global.document = previousDocument;
+      popup.context.document = previousVmDocument;
+    }
+    return [{ result: true }];
+  };
+
+  await popup.api.refreshRatingBadges(7, {
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "web-token",
+    connectionMode: "web",
+  });
+
+  assert.strictEqual(inserted.length, 0);
+}
+
 async function testPopupDesktopModeDoesNotRequestRatingBadgesAndClearsOldBadges() {
   let fetchCount = 0;
   let clearCount = 0;
@@ -4007,6 +4069,7 @@ async function main() {
   await testPopupWebModeRefreshesSearchableRatingBadges();
   await testPopupRatingBadgesIgnoreGenericDataId();
   await testPopupRatingBadgesIgnoreRowsWithoutStableIdentity();
+  await testPopupRatingBadgesDoNotCanonicalizeUnknownPlatform();
   await testPopupDesktopModeDoesNotRequestRatingBadgesAndClearsOldBadges();
   await testPendingLimitConcurrentEnqueueStaysWithinTen();
   await testWebIntakeSuccessSanitizesCompletedPayload();

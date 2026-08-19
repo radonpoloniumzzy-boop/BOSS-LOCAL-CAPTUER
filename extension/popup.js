@@ -706,10 +706,23 @@ async function applyRatingBadges(tabId, badges) {
           }
           return "";
         };
+        const canonicalizePlatformUid = (sourcePlatform, rawUid) => {
+          const uid = normalize(rawUid);
+          if (!uid) return "";
+          const platform = normalize(sourcePlatform).toLowerCase();
+          if (!platform || platform === "unknown") return "";
+          if (uid.includes(":")) {
+            const prefix = normalize(uid.split(":", 1)[0]).toLowerCase();
+            return prefix === platform ? uid : `${platform}:${uid}`;
+          }
+          return `${platform}:${uid}`;
+        };
         const sameBadge = (card, badge) => {
-          const platformUid = firstAttr(card, ["data-geek-id", "data-candidate-id", "data-user-id"]);
-          if (badge.platform_uid && platformUid && badge.platform_uid === platformUid) return true;
-          return false;
+          const rawPlatformUid = firstAttr(card, ["data-geek-id", "data-candidate-id", "data-user-id"]);
+          const badgePlatformUid = normalize(badge.platform_uid);
+          if (!badgePlatformUid || !rawPlatformUid) return false;
+          if (badgePlatformUid === rawPlatformUid) return true;
+          return badgePlatformUid === canonicalizePlatformUid(badge.source_platform, rawPlatformUid);
         };
         const rows = (Array.isArray(badgeRows) ? badgeRows : []).filter((badge) =>
           ["UR", "SSR", "SR", "R", "N"].includes(String(badge?.rating || "")),
