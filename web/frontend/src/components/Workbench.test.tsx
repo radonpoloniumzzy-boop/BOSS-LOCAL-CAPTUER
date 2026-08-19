@@ -846,7 +846,7 @@ describe("workbench candidate intake views", () => {
     expect(within(dialog).getByRole("button", { name: "确认导入外部评级" })).toBeEnabled();
   });
 
-  it("edits keyword filter rules for running recruitment tasks and preserves input on failure", async () => {
+  it("keeps keyword rule input when a running task rejects rule changes", async () => {
     let saveAttempts = 0;
     const fetchMock = vi.fn((input: string | URL, init?: RequestInit) => {
       const url = String(input);
@@ -858,7 +858,7 @@ describe("workbench candidate intake views", () => {
             name: "Boss 推荐流",
             role_id: 7,
             role_title: "量化研究员",
-            profile_version: saveAttempts > 1 ? 3 : 2,
+            profile_version: 2,
             platform: "boss",
             source_url: "https://www.zhipin.com/web/geek/recommend",
             target_candidates: 20,
@@ -886,15 +886,7 @@ describe("workbench candidate intake views", () => {
       }
       if (url.endsWith("/api/recruitment-tasks/11/keyword-rules") && init?.method === "PUT") {
         saveAttempts += 1;
-        if (saveAttempts === 1) return errorResponse("关键词筛选规则保存失败，请刷新后重试。");
-        return response({
-          task_id: 11,
-          job_profile_id: 7,
-          job_profile_version: 3,
-          task_status: "running",
-          changed: true,
-          keyword_rules: { must: ["Python", "量化"], plus: ["React"], risk: ["外包"], note: [] },
-        });
+        return errorResponse("关键词规则属于岗位版本快照；当前招聘任务已固定引用该版本。请更新岗位档案后新建任务。");
       }
       throw new Error(`unexpected request: ${url}`);
     });
@@ -914,10 +906,11 @@ describe("workbench candidate intake views", () => {
     expect(within(dialog).getByText("合计 4")).toBeInTheDocument();
 
     await user.click(within(dialog).getByRole("button", { name: "保存关键词筛选规则" }));
-    expect(await within(dialog).findByRole("alert")).toHaveTextContent("关键词筛选规则保存失败，请刷新后重试。");
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("当前招聘任务已固定引用该版本");
     expect(within(dialog).getByLabelText("风险关键词")).toHaveValue("外包");
     await user.click(within(dialog).getByRole("button", { name: "保存关键词筛选规则" }));
-    expect(await within(dialog).findByRole("status")).toHaveTextContent("已保存 4 个关键词");
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("当前招聘任务已固定引用该版本");
+    expect(saveAttempts).toBe(2);
     const saveCall = fetchMock.mock.calls.find(([url], index) =>
       index > 0 && String(url).endsWith("/api/recruitment-tasks/11/keyword-rules")
         && fetchMock.mock.calls[index][1]?.method === "PUT",

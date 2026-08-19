@@ -4,6 +4,7 @@ const path = require("path");
 const { webcrypto } = require("crypto");
 const { TextEncoder } = require("util");
 const vm = require("vm");
+const { JSDOM } = require("../../web/frontend/node_modules/jsdom");
 
 const EXTENSION_DIR = path.resolve(__dirname, "..");
 
@@ -4018,82 +4019,50 @@ async function testPopupDesktopModeDoesNotRequestRatingBadgesAndClearsOldBadges(
 }
 
 function createKeywordHighlightDom() {
-  const inserted = [];
-  const filterBars = [];
-  const card = {
-    innerHTML: "<span class=\"boss-local-rating-badge\">1SSR</span><span class=\"name\">Alice Python 外包 React</span>",
-    innerText: "Alice Python 外包 React",
-    textContent: "Alice Python 外包 React",
-    style: {},
-    attributes: {},
-    parentElement: {
-      insertBefore(node) {
-        filterBars.push(node);
-      },
-    },
-    hasAttribute(name) {
-      return Object.prototype.hasOwnProperty.call(this.attributes, name);
-    },
-    getAttribute(name) {
-      return this.attributes[name] || "";
-    },
-    setAttribute(name, value) {
-      this.attributes[name] = String(value);
-    },
-    removeAttribute(name) {
-      delete this.attributes[name];
-    },
-    querySelector() {
-      return {
-        insertAdjacentElement(_position, node) {
-          inserted.push(node);
-          card.innerHTML = `${node.textContent}${card.innerHTML}`;
-        },
-      };
-    },
+  const dom = new JSDOM(`
+    <!doctype html>
+    <html>
+      <head></head>
+      <body>
+        <main id="feed">
+          <article class="candidate-card" data-name="class-token">
+            <span class="boss-local-rating-badge">1SSR</span>
+            <span class="name" data-source="class-value">Alice Python 外包 React class</span>
+            <a class="profile-link" href="https://example.test/class">候选人详情</a>
+            <button type="button">Python button</button>
+          </article>
+        </main>
+      </body>
+    </html>
+  `);
+  return {
+    document: dom.window.document,
+    window: dom.window,
+    card: dom.window.document.querySelector(".candidate-card"),
   };
-  const styleNodes = {};
-  const fakeDocument = {
-    head: {
-      appendChild(node) {
-        if (node.id) styleNodes[node.id] = node;
-      },
-    },
-    getElementById(id) {
-      return styleNodes[id] || null;
-    },
-    querySelectorAll(selector) {
-      const value = String(selector);
-      if (value.includes(".boss-local-keyword-filterbar")) return filterBars;
-      if (value.includes("[data-boss-local-keyword-original-html]")) {
-        return card.hasAttribute("data-boss-local-keyword-original-html") ? [card] : [];
-      }
-      if (value.includes(".boss-local-rating-badge")) return [];
-      return [card];
-    },
-    createElement(tagName) {
-      return {
-        tagName,
-        id: "",
-        className: "",
-        textContent: "",
-        type: "",
-        style: {},
-        children: [],
-        setAttribute(name, value) {
-          this[name] = value;
-        },
-        appendChild(node) {
-          this.children.push(node);
-        },
-        addEventListener(_name, listener) {
-          this.listener = listener;
-        },
-        remove() {},
-      };
-    },
+}
+
+function installKeywordDomExecutor(popup, dom, onExecute = () => {}) {
+  popup.chrome.scripting.executeScript = async (details) => {
+    onExecute(details);
+    const previousDocument = global.document;
+    const previousVmDocument = popup.context.document;
+    const previousGetComputedStyle = global.getComputedStyle;
+    const previousVmGetComputedStyle = popup.context.getComputedStyle;
+    global.document = dom.document;
+    popup.context.document = dom.document;
+    global.getComputedStyle = dom.window.getComputedStyle.bind(dom.window);
+    popup.context.getComputedStyle = dom.window.getComputedStyle.bind(dom.window);
+    try {
+      details.func(...(details.args || []));
+    } finally {
+      global.document = previousDocument;
+      popup.context.document = previousVmDocument;
+      global.getComputedStyle = previousGetComputedStyle;
+      popup.context.getComputedStyle = previousVmGetComputedStyle;
+    }
+    return [{ result: true }];
   };
-  return { card, fakeDocument, inserted, filterBars };
 }
 
 async function testPopupWebModeRefreshesKeywordHighlights() {
@@ -4110,7 +4079,7 @@ async function testPopupWebModeRefreshesKeywordHighlights() {
         json: async () => ({
           task_id: 11,
           keyword_rules: {
-            must: ["python"],
+            must: ["python", "class"],
             plus: ["React"],
             risk: ["外包"],
             note: [],
@@ -4119,19 +4088,7 @@ async function testPopupWebModeRefreshesKeywordHighlights() {
       };
     },
   });
-  popup.chrome.scripting.executeScript = async (details) => {
-    const previousDocument = global.document;
-    const previousVmDocument = popup.context.document;
-    global.document = dom.fakeDocument;
-    popup.context.document = dom.fakeDocument;
-    try {
-      details.func(...(details.args || []));
-    } finally {
-      global.document = previousDocument;
-      popup.context.document = previousVmDocument;
-    }
-    return [{ result: true }];
-  };
+  installKeywordDomExecutor(popup, dom);
 
   await popup.api.refreshKeywordHighlights(7, {
     apiBase: "http://127.0.0.1:17864",
@@ -4142,49 +4099,65 @@ async function testPopupWebModeRefreshesKeywordHighlights() {
   assert.strictEqual(keywordFetches[0].url, "http://127.0.0.1:17864/api/plugin/keyword-rules");
   assert.strictEqual(keywordFetches[0].headers["X-Boss-Local-Token"], "web-token");
   assert(!keywordFetches[0].url.includes("web-token"));
-  assert(dom.card.innerHTML.includes("boss-local-rating-badge"));
-  assert(dom.card.innerHTML.includes("boss-local-keyword-highlight must"));
-  assert(dom.card.innerHTML.includes("boss-local-keyword-highlight plus"));
-  assert(dom.card.innerHTML.includes("boss-local-keyword-highlight risk"));
-  assert(dom.inserted.some((node) => node.textContent === "关键词 3"));
-  assert(dom.inserted.some((node) => node.textContent === "风险 1"));
-  assert.strictEqual(dom.filterBars.length, 1);
+  assert.strictEqual(dom.card.querySelectorAll(".boss-local-rating-badge").length, 1);
+  assert.strictEqual(dom.card.querySelector(".boss-local-rating-badge").textContent, "1SSR");
+  assert.strictEqual(dom.card.querySelectorAll(".boss-local-keyword-highlight.must").length, 2);
+  assert.strictEqual(dom.card.querySelectorAll(".boss-local-keyword-highlight.plus").length, 1);
+  assert.strictEqual(dom.card.querySelectorAll(".boss-local-keyword-highlight.risk").length, 1);
+  assert.strictEqual(dom.card.querySelector(".boss-local-keyword-badge").textContent, "风险 1");
+  assert.strictEqual(dom.document.querySelectorAll(".boss-local-keyword-filterbar").length, 1);
+  assert.strictEqual(dom.card.getAttribute("data-name"), "class-token");
+  assert.strictEqual(dom.card.querySelector(".name").getAttribute("data-source"), "class-value");
+  assert.strictEqual(dom.card.querySelector(".profile-link").getAttribute("href"), "https://example.test/class");
+  assert.strictEqual(dom.card.querySelector("button .boss-local-keyword-highlight"), null);
 
   await popup.api.refreshKeywordHighlights(7, {
     apiBase: "http://127.0.0.1:17864",
     apiToken: "web-token",
     connectionMode: "web",
   });
-  assert.strictEqual((dom.card.innerHTML.match(/boss-local-keyword-highlight/g) || []).length, 3);
+  assert.strictEqual(dom.card.querySelectorAll(".boss-local-keyword-highlight").length, 4);
+  assert.strictEqual(dom.document.querySelectorAll(".boss-local-keyword-filterbar").length, 1);
+  assert.strictEqual(dom.card.querySelectorAll(".boss-local-keyword-badge").length, 2);
+
+  dom.card.querySelector(".boss-local-rating-badge").textContent = "1SR";
+  await popup.api.refreshKeywordHighlights(7, {
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "web-token",
+    connectionMode: "web",
+  });
+  assert.strictEqual(dom.card.querySelector(".boss-local-rating-badge").textContent, "1SR");
+  await popup.api.clearKeywordHighlights(7);
+  assert.strictEqual(dom.card.querySelectorAll(".boss-local-keyword-highlight").length, 0);
+  assert.strictEqual(dom.card.querySelectorAll(".boss-local-keyword-badge").length, 0);
+  assert.strictEqual(dom.document.querySelectorAll(".boss-local-keyword-filterbar").length, 0);
+  assert.strictEqual(dom.card.querySelector(".boss-local-rating-badge").textContent, "1SR");
+  assert.strictEqual(dom.card.getAttribute("data-name"), "class-token");
 }
 
 async function testPopupKeywordHighlightsClearOnFailureAndDesktopMode() {
   const dom = createKeywordHighlightDom();
   let fetchCount = 0;
   let executeCount = 0;
+  let failFetch = false;
   const popup = createPopupTestContext({
     apiBase: "http://127.0.0.1:17864",
     apiToken: "web-token",
     connectionMode: "web",
     fetchImpl: async () => {
       fetchCount += 1;
-      return { ok: false, json: async () => ({}) };
+      if (failFetch) return { ok: false, json: async () => ({}) };
+      return {
+        ok: true,
+        json: async () => ({
+          keyword_rules: { must: ["Python"], plus: [], risk: ["外包"], note: [] },
+        }),
+      };
     },
   });
-  popup.chrome.scripting.executeScript = async (details) => {
+  installKeywordDomExecutor(popup, dom, () => {
     executeCount += 1;
-    const previousDocument = global.document;
-    const previousVmDocument = popup.context.document;
-    global.document = dom.fakeDocument;
-    popup.context.document = dom.fakeDocument;
-    try {
-      details.func(...(details.args || []));
-    } finally {
-      global.document = previousDocument;
-      popup.context.document = previousVmDocument;
-    }
-    return [{ result: true }];
-  };
+  });
 
   await popup.api.refreshKeywordHighlights(7, {
     apiBase: "http://127.0.0.1:17864",
@@ -4193,14 +4166,27 @@ async function testPopupKeywordHighlightsClearOnFailureAndDesktopMode() {
   });
   assert.strictEqual(fetchCount, 1);
   assert.strictEqual(executeCount, 1);
+  assert.strictEqual(dom.card.querySelectorAll(".boss-local-keyword-highlight").length, 2);
+  assert.strictEqual(dom.card.querySelector(".boss-local-rating-badge").textContent, "1SSR");
+
+  failFetch = true;
+  await popup.api.refreshKeywordHighlights(7, {
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "web-token",
+    connectionMode: "web",
+  });
+  assert.strictEqual(fetchCount, 2);
+  assert.strictEqual(dom.card.querySelectorAll(".boss-local-keyword-highlight").length, 0);
+  assert.strictEqual(dom.card.querySelector(".boss-local-rating-badge").textContent, "1SSR");
 
   await popup.api.refreshKeywordHighlights(7, {
     apiBase: "http://127.0.0.1:19001",
     apiToken: "desktop-token",
     connectionMode: "desktop",
   });
-  assert.strictEqual(fetchCount, 1);
-  assert.strictEqual(executeCount, 2);
+  assert.strictEqual(fetchCount, 2);
+  assert.strictEqual(dom.card.querySelectorAll(".boss-local-keyword-highlight").length, 0);
+  assert.strictEqual(dom.card.querySelector(".boss-local-rating-badge").textContent, "1SSR");
 }
 
 async function main() {

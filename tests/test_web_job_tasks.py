@@ -992,37 +992,53 @@ class WebJobTaskFoundationTest(unittest.TestCase):
         self.assertEqual(current.status_code, 200, current.text)
         self.assertEqual(current.json()["badges"][0]["badge_text"], "1SSR")
 
-    def test_running_task_keyword_rules_are_versioned_and_available_to_plugin(self) -> None:
-        job = self._create_active_job()
+    def test_running_task_keyword_rules_are_bound_to_fixed_task_version(self) -> None:
+        created = self.client.post(
+            "/api/job-profiles",
+            json={
+                **self._job_payload(),
+                "evidence_policy": {"keyword_rules": {"must": [" Python ", "python", "量化"], "plus": ["React"]}},
+            },
+            headers=self.origin,
+        )
+        self.assertEqual(created.status_code, 200, created.text)
+        active = self.client.post(
+            f"/api/job-profiles/{created.json()['id']}/status",
+            json={"status": "active", "expected_version": created.json()["version"]},
+            headers=self.origin,
+        )
+        self.assertEqual(active.status_code, 200, active.text)
+        job = active.json()
         task = self._start_task(self._create_task(job))
 
-        empty = self.client.get(f"/api/recruitment-tasks/{task['id']}/keyword-rules", headers=self.origin)
-        self.assertEqual(empty.status_code, 200, empty.text)
-        self.assertEqual(empty.json()["keyword_rules"], {"must": [], "plus": [], "risk": [], "note": []})
+        rules = self.client.get(f"/api/recruitment-tasks/{task['id']}/keyword-rules", headers=self.origin)
+        self.assertEqual(rules.status_code, 200, rules.text)
+        self.assertEqual(rules.json()["job_profile_version"], task["profile_version"])
+        self.assertEqual(rules.json()["keyword_rules"]["must"], ["Python", "量化"])
+        self.assertEqual(rules.json()["keyword_rules"]["plus"], ["React"])
 
-        saved = self.client.put(
+        no_op = self.client.put(
             f"/api/recruitment-tasks/{task['id']}/keyword-rules",
             json={
                 "expected_version": task["profile_version"],
                 "keyword_rules": {
                     "must": [" Python ", "python", "量化"],
                     "plus": ["React"],
-                    "risk": ["外包"],
+                    "risk": [],
                     "note": [""],
                 },
             },
             headers=self.origin,
         )
-        self.assertEqual(saved.status_code, 200, saved.text)
-        payload = saved.json()
-        self.assertTrue(payload["changed"])
-        self.assertEqual(payload["job_profile_version"], task["profile_version"] + 1)
+        self.assertEqual(no_op.status_code, 200, no_op.text)
+        payload = no_op.json()
+        self.assertFalse(payload["changed"])
+        self.assertEqual(payload["job_profile_version"], task["profile_version"])
         self.assertEqual(payload["keyword_rules"]["must"], ["Python", "量化"])
-        self.assertEqual(payload["keyword_rules"]["risk"], ["外包"])
-        self.assertNotIn(self.token, saved.text)
-        self.assertNotIn("prompt_text", saved.text)
-        self.assertNotIn("provider", saved.text)
-        self.assertNotIn("raw_card_text", saved.text)
+        self.assertNotIn(self.token, no_op.text)
+        self.assertNotIn("prompt_text", no_op.text)
+        self.assertNotIn("provider", no_op.text)
+        self.assertNotIn("raw_card_text", no_op.text)
 
         selected = self.client.put("/api/plugin-context", json={"recruitment_task_id": task["id"]}, headers=self.origin)
         self.assertEqual(selected.status_code, 200, selected.text)
@@ -1030,6 +1046,17 @@ class WebJobTaskFoundationTest(unittest.TestCase):
         self.assertEqual(plugin_rules.status_code, 200, plugin_rules.text)
         self.assertEqual(plugin_rules.json()["keyword_rules"]["must"], ["Python", "量化"])
         self.assertEqual(plugin_rules.json()["keyword_rules"]["plus"], ["React"])
+
+        rejected = self.client.put(
+            f"/api/recruitment-tasks/{task['id']}/keyword-rules",
+            json={"expected_version": task["profile_version"], "keyword_rules": {"must": ["新规则"]}},
+            headers=self.origin,
+        )
+        self.assertEqual(rejected.status_code, 409, rejected.text)
+        self.assertEqual(rejected.json()["error"]["code"], "job_profile_version_conflict")
+        self.assertIn("固定引用", rejected.json()["error"]["message"])
+        unchanged_task = self.client.get(f"/api/recruitment-tasks/{task['id']}").json()
+        self.assertEqual(unchanged_task["profile_version"], task["profile_version"])
 
     def test_keyword_rules_reject_non_running_and_context_unavailable(self) -> None:
         job = self._create_active_job()
@@ -1052,15 +1079,20 @@ class WebJobTaskFoundationTest(unittest.TestCase):
         self.assertEqual(no_context.json()["error"]["code"], "context_unavailable")
 
     def test_keyword_rules_do_not_leak_across_context_or_future_profile_versions(self) -> None:
-        job = self._create_active_job()
-        task_a = self._start_task(self._create_task(job))
-        saved = self.client.put(
-            f"/api/recruitment-tasks/{task_a['id']}/keyword-rules",
-            json={"expected_version": task_a["profile_version"], "keyword_rules": {"must": ["Python"], "risk": ["外包"]}},
+        created = self.client.post(
+            "/api/job-profiles",
+            json={**self._job_payload(), "evidence_policy": {"keyword_rules": {"must": ["Python"], "risk": ["外包"]}}},
             headers=self.origin,
         )
-        self.assertEqual(saved.status_code, 200, saved.text)
-        task_a_after = self.client.get(f"/api/recruitment-tasks/{task_a['id']}").json()
+        self.assertEqual(created.status_code, 200, created.text)
+        active = self.client.post(
+            f"/api/job-profiles/{created.json()['id']}/status",
+            json={"status": "active", "expected_version": created.json()["version"]},
+            headers=self.origin,
+        )
+        self.assertEqual(active.status_code, 200, active.text)
+        job = active.json()
+        task_a = self._start_task(self._create_task(job))
 
         future = self.client.put(
             f"/api/job-profiles/{job['id']}",
@@ -1068,11 +1100,13 @@ class WebJobTaskFoundationTest(unittest.TestCase):
                 **self._job_payload(),
                 "target_hires": 3,
                 "evidence_policy": {"keyword_rules": {"must": ["未来版本"]}},
-                "expected_version": task_a_after["profile_version"],
+                "expected_version": job["version"],
             },
             headers=self.origin,
         )
         self.assertEqual(future.status_code, 200, future.text)
+        task_a_after = self.client.get(f"/api/recruitment-tasks/{task_a['id']}").json()
+        self.assertEqual(task_a_after["profile_version"], task_a["profile_version"])
         task_a_rules = self.client.get(f"/api/recruitment-tasks/{task_a['id']}/keyword-rules", headers=self.origin)
         self.assertEqual(task_a_rules.json()["keyword_rules"]["must"], ["Python"])
 

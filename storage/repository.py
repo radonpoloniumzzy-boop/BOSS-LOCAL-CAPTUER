@@ -2275,111 +2275,36 @@ class CandidateRepository:
         expected_version: int,
     ) -> dict[str, object]:
         normalized_rules = self.normalize_keyword_rules(rules)
-        connection = self.db.get_connection()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            task = connection.execute(
-                "SELECT * FROM recruitment_tasks WHERE id = ?",
-                (task_id,),
-            ).fetchone()
-            if task is None:
-                connection.rollback()
-                raise ValueError("招聘任务不存在")
-            if str(task["status"] or "") != "running":
-                connection.rollback()
-                raise InvalidRecruitmentTaskStatusTransitionError("只有执行中的招聘任务可以保存关键词规则")
-            role_id = int(task["role_id"])
-            task_version = int(task["profile_version"])
-            if int(expected_version) != task_version:
-                connection.rollback()
-                raise JobProfileVersionConflictError("关键词规则基于的岗位版本已变化，请刷新后再保存。")
-            row = connection.execute(
-                "SELECT * FROM screening_profiles WHERE id = ?",
-                (role_id,),
-            ).fetchone()
-            if row is None:
-                connection.rollback()
-                raise ValueError("岗位档案不存在")
-            current = self._decode_screening_profile(row)
-            current_version = int(current.get("version") or 0)
-            if current_version != task_version:
-                connection.rollback()
-                raise JobProfileVersionConflictError("岗位档案已有新版本，请刷新后再保存关键词规则。")
-            evidence_policy = dict(current.get("evidence_policy") or {})
-            current_rules = self.normalize_keyword_rules(evidence_policy.get("keyword_rules"))
-            if current_rules == normalized_rules:
-                connection.commit()
-                return {
-                    "task_id": int(task["id"]),
-                    "job_profile_id": role_id,
-                    "job_profile_version": task_version,
-                    "task_status": str(task["status"] or ""),
-                    "keyword_rules": normalized_rules,
-                    "changed": False,
-                }
+        task = self.get_recruitment_task(task_id)
+        if task is None:
+            raise ValueError("招聘任务不存在")
+        if str(task["status"] or "") != "running":
+            raise InvalidRecruitmentTaskStatusTransitionError("只有执行中的招聘任务可以保存关键词规则")
 
-            evidence_policy["keyword_rules"] = normalized_rules
-            profile = ScreeningProfile(
-                **{
-                    key: current.get(key)
-                    for key in ScreeningProfile.__dataclass_fields__
-                    if key in current
-                }
+        role_id = int(task["role_id"])
+        task_version = int(task["profile_version"])
+        if int(expected_version) != task_version:
+            raise JobProfileVersionConflictError("关键词规则基于的岗位版本已变化，请刷新后再保存。")
+
+        version = self.get_job_profile_version(role_id, task_version)
+        if version is None:
+            raise ValueError("招聘任务绑定的岗位版本不存在")
+        evidence_policy = version.get("evidence_policy") if isinstance(version.get("evidence_policy"), dict) else {}
+        current_rules = self.normalize_keyword_rules(
+            evidence_policy.get("keyword_rules") if isinstance(evidence_policy, dict) else {}
+        )
+        if current_rules != normalized_rules:
+            raise JobProfileVersionConflictError(
+                "关键词规则属于岗位版本快照；当前招聘任务已固定引用该版本。请更新岗位档案后新建任务。"
             )
-            profile.evidence_policy = evidence_policy
-            profile.version = current_version + 1
-            profile.updated_at = now_iso()
-            values = self._job_profile_sql_values(profile)
-            cursor = connection.execute(
-                """
-                UPDATE screening_profiles
-                SET job_title = ?, department = ?, hiring_manager = ?, location = ?,
-                    employment_type = ?, experience_requirement = ?,
-                    education_requirement = ?, target_hires = ?, recruitment_deadline = ?,
-                    priority = ?, status = ?, jd_text = ?, prompt_text = ?, prompt_source = ?,
-                    must_have_json = ?, nice_to_have_json = ?, risk_flags_json = ?,
-                    exclusions_json = ?, interview_checks_json = ?, evidence_policy_json = ?,
-                    version = ?, parent_profile_id = ?, updated_at = ?
-                WHERE id = ? AND version = ?
-                """,
-                (*values, profile.version, profile.parent_profile_id, profile.updated_at, role_id, current_version),
-            )
-            if cursor.rowcount != 1:
-                connection.rollback()
-                raise JobProfileVersionConflictError("岗位档案已被更新，请刷新后再保存关键词规则。")
-            connection.execute(
-                """
-                INSERT INTO job_profile_versions(profile_id, version, snapshot_json, created_at)
-                VALUES (?, ?, ?, ?)
-                """,
-                (
-                    role_id,
-                    int(profile.version),
-                    json.dumps(profile.to_dict(), ensure_ascii=False, sort_keys=True),
-                    profile.updated_at,
-                ),
-            )
-            connection.execute(
-                """
-                UPDATE recruitment_tasks
-                SET profile_version = ?, updated_at = ?
-                WHERE id = ?
-                """,
-                (int(profile.version), profile.updated_at, int(task["id"])),
-            )
-            connection.commit()
-            return {
-                "task_id": int(task["id"]),
-                "job_profile_id": role_id,
-                "job_profile_version": int(profile.version),
-                "task_status": str(task["status"] or ""),
-                "keyword_rules": normalized_rules,
-                "changed": True,
-            }
-        except Exception:
-            if connection.in_transaction:
-                connection.rollback()
-            raise
+        return {
+            "task_id": int(task["id"]),
+            "job_profile_id": role_id,
+            "job_profile_version": task_version,
+            "task_status": str(task["status"] or ""),
+            "keyword_rules": normalized_rules,
+            "changed": False,
+        }
 
     @staticmethod
     def _decode_screening_profile(row: sqlite3.Row) -> dict[str, object]:
