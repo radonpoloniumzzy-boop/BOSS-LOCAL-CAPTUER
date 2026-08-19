@@ -32,6 +32,7 @@ export type CandidateRow = {
   latest_batch_id: number;
   latest_capture_time: string;
   latest_ingest_status: string;
+  latest_rating: string;
   latest_batch_role_id: number | null;
   has_role_binding: boolean | number;
   batch_count: number;
@@ -91,6 +92,7 @@ export type BatchCandidateRow = {
   capture_time: string;
   raw_card_text: string;
   ingest_status: string;
+  latest_rating: string;
   has_role_binding: boolean | number;
 };
 
@@ -172,6 +174,27 @@ export type PluginTaskContext = {
   source_url: string;
   task_status: string;
   context_updated_at: string;
+};
+
+export type ExternalRatingImportRow = {
+  line: number;
+  candidate_id: number | null;
+  name: string;
+  rating: string;
+  status: "imported" | "unmatched" | "ambiguous" | "invalid";
+  message: string;
+};
+
+export type ExternalRatingImportResult = {
+  task_id: number;
+  run_id: number;
+  status: string;
+  received: number;
+  imported: number;
+  unmatched: number;
+  ambiguous: number;
+  invalid: number;
+  rows: ExternalRatingImportRow[];
 };
 
 type ApiError = { error?: { code?: string; message?: string } };

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import csv
+import io
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import quote, urlencode
@@ -27,7 +29,12 @@ from web.backend.runtime import WebRuntime
 
 
 SERVICE_NAME = "recruiting-talent-workbench"
-WEB_CAPABILITIES = ["phase2c_pairing", "batch_markdown_export", "m2a_job_task_foundation"]
+WEB_CAPABILITIES = [
+    "phase2c_pairing",
+    "batch_markdown_export",
+    "m2a_job_task_foundation",
+    "m2b_external_rating_badges",
+]
 
 
 class ApiError(RuntimeError):
@@ -111,6 +118,14 @@ class PluginContextPayload(BaseModel):
     recruitment_task_id: int | None = None
 
 
+class ExternalRatingsImportRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    text: str = ""
+    rows: list[dict[str, object]] = Field(default_factory=list)
+    source_note: str = ""
+
+
 _CANDIDATE_LIST_FIELDS = (
     "id",
     "name",
@@ -120,6 +135,7 @@ _CANDIDATE_LIST_FIELDS = (
     "latest_batch_id",
     "latest_capture_time",
     "latest_ingest_status",
+    "latest_rating",
     "latest_batch_role_id",
     "has_role_binding",
     "batch_count",
@@ -134,6 +150,7 @@ _CANDIDATE_DETAIL_FIELDS = (
     "latest_batch_id",
     "latest_capture_time",
     "latest_ingest_status",
+    "latest_rating",
     "latest_batch_role_id",
     "has_role_binding",
     "batch_count",
@@ -256,6 +273,46 @@ def _project_recruitment_task(row: dict[str, object]) -> dict[str, object]:
     return {field: row.get(field) for field in _RECRUITMENT_TASK_FIELDS}
 
 
+def _parse_external_rating_rows(payload: ExternalRatingsImportRequest) -> list[dict[str, object]]:
+    if payload.rows:
+        return [dict(row) for row in payload.rows]
+    text = payload.text.strip()
+    if not text:
+        return []
+    sample = text[:4096]
+    delimiter = "\t" if "\t" in sample else ","
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=",\t")
+        delimiter = dialect.delimiter
+    except csv.Error:
+        pass
+    reader = csv.reader(io.StringIO(text), delimiter=delimiter)
+    raw_rows = [[cell.strip() for cell in row] for row in reader if any(cell.strip() for cell in row)]
+    if not raw_rows:
+        return []
+    headers = [cell.strip().lower() for cell in raw_rows[0]]
+    known_headers = {"candidate_id", "id", "name", "candidate name", "candidate_name", "rating", "batch_id", "source_platform", "source_job_title", "job_title"}
+    has_header = any(header in known_headers for header in headers)
+    body = raw_rows[1:] if has_header else raw_rows
+    rows: list[dict[str, object]] = []
+    for raw in body:
+        if has_header:
+            mapped = {headers[index]: value for index, value in enumerate(raw) if index < len(headers)}
+            rows.append(
+                {
+                    "candidate_id": mapped.get("candidate_id") or mapped.get("id") or "",
+                    "name": mapped.get("name") or mapped.get("candidate name") or mapped.get("candidate_name") or "",
+                    "rating": mapped.get("rating") or "",
+                    "batch_id": mapped.get("batch_id") or "",
+                    "source_platform": mapped.get("source_platform") or "",
+                    "source_job_title": mapped.get("source_job_title") or mapped.get("job_title") or "",
+                }
+            )
+        else:
+            rows.append({"name": raw[0] if len(raw) > 0 else "", "rating": raw[1] if len(raw) > 1 else ""})
+    return rows
+
+
 def _job_payload_to_profile(payload: JobProfilePayload, *, profile_id: int | None = None) -> ScreeningProfile:
     return ScreeningProfile(
         id=profile_id,
@@ -321,6 +378,7 @@ def create_web_app(
             "/api/plugin/pair",
             "/api/plugin/connection/check",
             "/api/plugin/context",
+            "/api/plugin/ratings/badges",
         }
         extension_allowed = request.url.path in extension_paths or (
             request.url.path.startswith("/api/capture-batches/")
@@ -671,6 +729,77 @@ def create_web_app(
             raise ApiError(400, "invalid_request", str(exc)) from exc
         return _project_recruitment_task(runtime.repository.get_recruitment_task_summary(int(saved.id)))
 
+    @app.post("/api/recruitment-tasks/{task_id}/external-ratings/import")
+    def import_external_ratings(task_id: int, payload: ExternalRatingsImportRequest) -> dict[str, object]:
+        if runtime.repository is None:
+            raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。")
+        rows = _parse_external_rating_rows(payload)
+        if not rows:
+            raise ApiError(400, "external_rating_empty", "请粘贴至少一条候选人姓名和外部评级。")
+        try:
+            return runtime.repository.import_external_ratings(
+                task_id,
+                rows,
+                source_note=payload.source_note,
+            )
+        except InvalidRecruitmentTaskStatusTransitionError as exc:
+            raise ApiError(409, "external_rating_task_not_running", str(exc)) from exc
+        except ValueError as exc:
+            raise ApiError(404, "recruitment_task_not_found", str(exc)) from exc
+
+    @app.get("/api/recruitment-tasks/{task_id}/external-ratings/latest")
+    def get_latest_external_ratings(task_id: int) -> dict[str, object]:
+        if runtime.repository is None:
+            raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。")
+        latest = runtime.repository.get_latest_external_rating_import(task_id)
+        if latest is None:
+            return {"run": None, "rows": []}
+        run = latest["run"] if isinstance(latest.get("run"), dict) else {}
+        return {
+            "run": {
+                "id": run.get("id"),
+                "task_id": run.get("task_id"),
+                "profile_id": run.get("profile_id"),
+                "profile_version": run.get("profile_version"),
+                "status": run.get("status"),
+                "total_candidates": run.get("total_candidates"),
+                "completed_candidates": run.get("completed_candidates"),
+                "failed_candidates": run.get("failed_candidates"),
+                "started_at": run.get("started_at"),
+                "completed_at": run.get("completed_at"),
+                "origin": run.get("origin"),
+            },
+            "rows": [
+                {
+                    "candidate_id": row.get("candidate_id"),
+                    "name": row.get("name"),
+                    "rating": row.get("rating"),
+                    "status": row.get("status"),
+                    "created_at": row.get("created_at"),
+                }
+                for row in latest.get("rows", [])
+                if isinstance(row, dict)
+            ],
+        }
+
+    @app.get("/api/plugin/ratings/badges")
+    def get_plugin_rating_badges(_auth: None = Depends(require_local_api_token)) -> dict[str, object]:
+        if runtime.repository is None:
+            raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。")
+        try:
+            context = runtime.get_plugin_context()
+        except RuntimeError as exc:
+            raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。") from exc
+        if context is None:
+            raise ApiError(409, "context_unavailable", "当前未选择可用招聘任务。")
+        task_id = int(context["recruitment_task_id"])
+        return {
+            "task_id": task_id,
+            "job_profile_id": context["job_profile_id"],
+            "job_profile_version": context["job_profile_version"],
+            "badges": runtime.repository.list_plugin_rating_badges(task_id),
+        }
+
     @app.get("/api/candidates")
     def list_candidates(
         page: int = Query(default=1, ge=1),
@@ -678,6 +807,7 @@ def create_web_app(
         keyword: str = "",
         source_platform: str = "",
         unbound_only: bool = False,
+        rating: str = "",
         sort: str = "latest_capture_desc",
     ) -> dict[str, object]:
         if runtime.repository is None:
@@ -688,6 +818,7 @@ def create_web_app(
             keyword=keyword,
             source_platform=source_platform,
             unbound_only=unbound_only,
+            rating=rating,
             sort=sort,
         )
         result["rows"] = [_project_candidate_list_row(dict(row)) for row in result["rows"]]

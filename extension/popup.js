@@ -564,6 +564,11 @@ async function runCollection(autoScroll, options = {}) {
   const platform = detectCollectPlatform(tab.url);
   const settings = applyPlatformDefaults(baseSettings, platform);
   const webSettings = webMode ? await refreshPluginContext(settings) : settings;
+  if (webMode) {
+    await refreshRatingBadges(tab.id, webSettings);
+  } else {
+    await clearRatingBadges(tab.id);
+  }
   await resetScrollPause(tab.id);
   setStatus(
     autoScroll
@@ -644,6 +649,113 @@ async function runCollection(autoScroll, options = {}) {
   } catch (error) {
     setStatus(`${webMode ? "发送到网页工作台失败" : "导入本地程序失败"}。\n${formatWebIntakeError(error)}`);
   }
+}
+
+async function refreshRatingBadges(tabId, settings) {
+  if (!isWebWorkbenchMode(settings) || !settings.apiToken) {
+    await clearRatingBadges(tabId);
+    return;
+  }
+  try {
+    const apiBase = BossLocalWebIntake.deriveWebApiBase(settings);
+    const response = await fetch(`${apiBase}/api/plugin/ratings/badges`, {
+      headers: { "X-Boss-Local-Token": settings.apiToken || "" },
+    });
+    if (!response.ok) {
+      await clearRatingBadges(tabId);
+      return;
+    }
+    const payload = await response.json();
+    await applyRatingBadges(tabId, Array.isArray(payload?.badges) ? payload.badges : []);
+  } catch (_error) {
+    await clearRatingBadges(tabId);
+  }
+}
+
+async function clearRatingBadges(tabId) {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      func: () => {
+        document.querySelectorAll(".boss-local-rating-badge").forEach((node) => node.remove());
+      },
+    });
+  } catch (_error) {}
+}
+
+async function applyRatingBadges(tabId, badges) {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      args: [badges],
+      func: (badgeRows) => {
+        const ratingClass = (rating) => `boss-local-rating-${String(rating || "").toLowerCase()}`;
+        const candidateSelectors = [
+          ".candidate-card-wrap",
+          ".candidate-card",
+          ".geek-card",
+          "[data-testid='candidate-card']",
+          "[class*='card'][class*='candidate']",
+        ];
+        const cards = Array.from(document.querySelectorAll(candidateSelectors.join(",")));
+        const normalize = (value) => String(value || "").trim();
+        const firstAttr = (node, attrs) => {
+          for (const attr of attrs) {
+            const value = normalize(node.getAttribute(attr));
+            if (value) return value;
+          }
+          return "";
+        };
+        const firstHref = (node) => {
+          const link = node.querySelector("a[href*='geek'], a[href*='candidate'], a[href*='zhipin.com']");
+          return normalize(link?.href || link?.getAttribute?.("href") || "");
+        };
+        const sameBadge = (card, badge) => {
+          const platformUid = firstAttr(card, ["data-geek-id", "data-candidate-id", "data-user-id"]);
+          const sourceId = firstAttr(card, ["data-id", "data-geek-id", "data-candidate-id", "data-user-id"]);
+          const href = firstHref(card);
+          if (badge.platform_uid && platformUid && badge.platform_uid === platformUid) return true;
+          if (badge.source_candidate_id && sourceId && badge.source_candidate_id === sourceId) return true;
+          if (badge.detail_url && href && badge.detail_url === href) return true;
+          return false;
+        };
+        const rows = (Array.isArray(badgeRows) ? badgeRows : []).filter((badge) =>
+          ["UR", "SSR", "SR", "R", "N"].includes(String(badge?.rating || "")),
+        );
+        document.querySelectorAll(".boss-local-rating-badge").forEach((node) => node.remove());
+        for (const card of cards) {
+          const badge = rows.find((item) => sameBadge(card, item));
+          if (!badge) continue;
+          const node = document.createElement("span");
+          node.className = `boss-local-rating-badge ${ratingClass(badge.rating)}`;
+          node.textContent = String(badge.badge_text || `1${badge.rating}`);
+          node.setAttribute("data-boss-local-rating", String(badge.rating));
+          const palette = {
+            UR: ["#fef3c7", "#7c3aed", "#c4b5fd"],
+            SSR: ["#f5f3ff", "#6d28d9", "#ddd6fe"],
+            SR: ["#fff7ed", "#c2410c", "#fed7aa"],
+            R: ["#eff6ff", "#1d4ed8", "#bfdbfe"],
+            N: ["#f8fafc", "#475569", "#e2e8f0"],
+          }[String(badge.rating)] || ["#f8fafc", "#475569", "#e2e8f0"];
+          node.style.cssText = [
+            "display:inline-flex",
+            "align-items:center",
+            "margin-right:6px",
+            "padding:2px 7px",
+            "border-radius:999px",
+            "font-size:12px",
+            "font-weight:700",
+            "line-height:1.4",
+            `background:${palette[0]}`,
+            `color:${palette[1]}`,
+            `border:1px solid ${palette[2]}`,
+          ].join(";");
+          const target = card.querySelector(".name, .geek-name, .candidate-name, [class*='name']") || card;
+          target.insertAdjacentElement("afterbegin", node);
+        }
+      },
+    });
+  } catch (_error) {}
 }
 
 function updateBatchDownloadButton() {
@@ -1325,6 +1437,8 @@ globalThis.BossLocalPopup = {
   downloadCurrentBatch,
   refreshWebIntakeStatus,
   refreshPluginContext,
+  refreshRatingBadges,
+  clearRatingBadges,
   queueAndSendWebBatch,
   collectSettings,
   isWebWorkbenchMode,

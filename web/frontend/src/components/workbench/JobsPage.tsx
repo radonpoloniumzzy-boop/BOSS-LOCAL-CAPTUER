@@ -3,6 +3,7 @@ import { Plus } from "lucide-react";
 
 import {
   ApiRequestError,
+  ExternalRatingImportResult,
   JobProfileDetail,
   JobProfileRow,
   JobProfileVersionRow,
@@ -198,6 +199,27 @@ export function JobsPage({ active }: { active: boolean }) {
     }
   };
 
+  const importExternalRatings = async (task: RecruitmentTaskRow, text: string): Promise<ExternalRatingImportResult> => {
+    setSaving(true);
+    setError("");
+    try {
+      const result = await requestJson<ExternalRatingImportResult>(`/api/recruitment-tasks/${task.id}/external-ratings/import`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text, source_note: "web_paste" }),
+      });
+      setNotice(`外部评级导入完成：成功 ${result.imported}，未匹配 ${result.unmatched}，歧义 ${result.ambiguous}，无效 ${result.invalid}。`);
+      await load();
+      return result;
+    } catch (err) {
+      const message = err instanceof ApiRequestError ? err.message : "外部评级导入失败，请检查名单后重试。";
+      setError(message);
+      throw new Error(message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
     <div className="page-content page-enter">
       <div className="page-heading">
@@ -272,6 +294,7 @@ export function JobsPage({ active }: { active: boolean }) {
           saving={saving}
           onStatusChange={setTaskStatus}
           onAssignContext={assignPluginContext}
+          onImportRatings={importExternalRatings}
         />
       </div>
 

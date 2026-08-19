@@ -66,8 +66,8 @@ class WebJobTaskFoundationTest(unittest.TestCase):
             "evidence_policy": {"required": ["项目"]},
         }
 
-    def _create_active_job(self) -> dict[str, object]:
-        created = self.client.post("/api/job-profiles", json=self._job_payload(), headers=self.origin)
+    def _create_active_job(self, title: str = "量化研究员") -> dict[str, object]:
+        created = self.client.post("/api/job-profiles", json=self._job_payload(title), headers=self.origin)
         self.assertEqual(created.status_code, 200, created.text)
         active = self.client.post(
             f"/api/job-profiles/{created.json()['id']}/status",
@@ -92,6 +92,47 @@ class WebJobTaskFoundationTest(unittest.TestCase):
         )
         self.assertEqual(created.status_code, 200, created.text)
         return created.json()
+
+    def _start_task(self, task: dict[str, object]) -> dict[str, object]:
+        started = self.client.post(
+            f"/api/recruitment-tasks/{task['id']}/status",
+            json={"status": "running"},
+            headers=self.origin,
+        )
+        self.assertEqual(started.status_code, 200, started.text)
+        return started.json()
+
+    def _intake_candidate(
+        self,
+        *,
+        job: dict[str, object],
+        task: dict[str, object],
+        name: str,
+        source_id: str,
+        key: str,
+        source_job_title: str = "量化研究员",
+    ) -> int:
+        response = self.client.post(
+            "/api/intake/candidates",
+            json={
+                "source_platform": "boss",
+                "source_job_title": source_job_title,
+                "job_profile_id": job["id"],
+                "recruitment_task_id": task["id"],
+                "idempotency_key": key,
+                "candidates": [
+                    {
+                        "name": name,
+                        "source_candidate_id": source_id,
+                        "raw_card_text": f"{name} raw card",
+                    }
+                ],
+            },
+            headers=self.extension,
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        rows = self.client.get("/api/candidates?page=1&page_size=100").json()["rows"]
+        return int(next(row["id"] for row in rows if row["name"] == name))
 
     def _direct_repository(self) -> tuple[DatabaseManager, CandidateRepository]:
         db = DatabaseManager(self.data_dir / "boss_local_tool.db")
@@ -712,6 +753,140 @@ class WebJobTaskFoundationTest(unittest.TestCase):
         self.client = TestClient(self.app, base_url="http://127.0.0.1:17864")
         self.client.__enter__()
         self.assertIsNone(self.client.get("/api/plugin-context", headers=self.origin).json()["context"])
+
+    def test_external_rating_import_updates_role_matches_and_uses_external_origin(self) -> None:
+        job = self._create_active_job()
+        task = self._start_task(self._create_task(job))
+        alice_id = self._intake_candidate(job=job, task=task, name="Alice", source_id="alice-1", key="rating-alice")
+        self._intake_candidate(job=job, task=task, name="Bob", source_id="bob-1", key="rating-bob")
+
+        response = self.client.post(
+            f"/api/recruitment-tasks/{task['id']}/external-ratings/import",
+            json={"text": f"candidate_id,name,rating\n{alice_id},Alice,SSR\n,Bob,R"},
+            headers=self.origin,
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["imported"], 2)
+        self.assertEqual(payload["unmatched"], 0)
+        self.assertEqual(payload["ambiguous"], 0)
+        self.assertEqual(payload["invalid"], 0)
+        self.assertNotIn("prompt_text", response.text)
+        self.assertNotIn("provider", response.text)
+        self.assertNotIn(self.token, response.text)
+
+        listed = self.client.get("/api/candidates?page=1&page_size=100&rating=SSR")
+        self.assertEqual(listed.status_code, 200, listed.text)
+        self.assertEqual([row["name"] for row in listed.json()["rows"]], ["Alice"])
+        self.assertEqual(listed.json()["rows"][0]["latest_rating"], "SSR")
+        detail = self.client.get(f"/api/candidates/{alice_id}")
+        self.assertEqual(detail.json()["latest_rating"], "SSR")
+        batch_id = self.client.get("/api/capture-batches?page=1&page_size=20").json()["rows"][0]["id"]
+        batch_rows = self.client.get(f"/api/capture-batches/{batch_id}/candidates").json()["rows"]
+        self.assertTrue(any(row["latest_rating"] in {"SSR", "R"} for row in batch_rows))
+
+        latest = self.client.get(f"/api/recruitment-tasks/{task['id']}/external-ratings/latest")
+        self.assertEqual(latest.status_code, 200, latest.text)
+        self.assertEqual(latest.json()["run"]["origin"], "external_rating_import")
+        self.assertNotIn("model", latest.text)
+        self.assertNotIn("raw_response", latest.text)
+
+        db, repository = self._direct_repository()
+        try:
+            run = repository.get_screening_run(int(payload["run_id"]))
+            self.assertEqual(run["origin"], "external_rating_import")
+            self.assertEqual(run["provider"], "external_rating_import")
+            self.assertEqual(run["model"], "external_rating_import")
+        finally:
+            db.close_thread_connection()
+
+    def test_external_rating_import_rejects_invalid_non_running_and_wrong_candidate_scope(self) -> None:
+        job = self._create_active_job()
+        task = self._create_task(job)
+        running_task = self._start_task(task)
+        candidate_id = self._intake_candidate(job=job, task=task, name="Carol", source_id="carol-1", key="rating-carol")
+        paused = self.client.post(
+            f"/api/recruitment-tasks/{running_task['id']}/status",
+            json={"status": "paused"},
+            headers=self.origin,
+        )
+        self.assertEqual(paused.status_code, 200, paused.text)
+
+        not_running = self.client.post(
+            f"/api/recruitment-tasks/{task['id']}/external-ratings/import",
+            json={"text": "Carol,SSR"},
+            headers=self.origin,
+        )
+        self.assertEqual(not_running.status_code, 409, not_running.text)
+        self.assertEqual(not_running.json()["error"]["code"], "external_rating_task_not_running")
+
+        running = self._start_task(task)
+        invalid = self.client.post(
+            f"/api/recruitment-tasks/{running['id']}/external-ratings/import",
+            json={"rows": [{"candidate_id": candidate_id, "name": "Carol", "rating": "A+"}]},
+            headers=self.origin,
+        )
+        self.assertEqual(invalid.status_code, 200, invalid.text)
+        self.assertEqual(invalid.json()["invalid"], 1)
+
+        other_job = self._create_active_job("跨岗位测试")
+        other_task = self._start_task(self._create_task(other_job))
+        wrong_scope = self.client.post(
+            f"/api/recruitment-tasks/{other_task['id']}/external-ratings/import",
+            json={"rows": [{"candidate_id": candidate_id, "name": "Carol", "rating": "SSR"}]},
+            headers=self.origin,
+        )
+        self.assertEqual(wrong_scope.status_code, 200, wrong_scope.text)
+        self.assertEqual(wrong_scope.json()["unmatched"], 1)
+
+    def test_external_rating_import_marks_ambiguous_and_unmatched_without_guessing(self) -> None:
+        job = self._create_active_job()
+        task = self._start_task(self._create_task(job))
+        self._intake_candidate(job=job, task=task, name="张伟", source_id="zw-1", key="rating-zw-1")
+        self._intake_candidate(job=job, task=task, name="张伟", source_id="zw-2", key="rating-zw-2")
+
+        response = self.client.post(
+            f"/api/recruitment-tasks/{task['id']}/external-ratings/import",
+            json={"text": "name,rating\n张伟,UR\nNobody,SR"},
+            headers=self.origin,
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["ambiguous"], 1)
+        self.assertEqual(payload["unmatched"], 1)
+        self.assertEqual(payload["imported"], 0)
+        self.assertTrue(any(row["status"] == "ambiguous" for row in payload["rows"]))
+        self.assertNotIn("张伟 raw card", response.text)
+
+    def test_plugin_rating_badges_require_web_context_and_token(self) -> None:
+        job = self._create_active_job()
+        task = self._start_task(self._create_task(job))
+        candidate_id = self._intake_candidate(job=job, task=task, name="Dora", source_id="dora-1", key="rating-dora")
+        imported = self.client.post(
+            f"/api/recruitment-tasks/{task['id']}/external-ratings/import",
+            json={"rows": [{"candidate_id": candidate_id, "name": "Dora", "rating": "SR"}]},
+            headers=self.origin,
+        )
+        self.assertEqual(imported.status_code, 200, imported.text)
+
+        no_context = self.client.get("/api/plugin/ratings/badges", headers=self.extension)
+        self.assertEqual(no_context.status_code, 409, no_context.text)
+
+        selected = self.client.put("/api/plugin-context", json={"recruitment_task_id": task["id"]}, headers=self.origin)
+        self.assertEqual(selected.status_code, 200, selected.text)
+        missing_token = self.client.get(
+            "/api/plugin/ratings/badges",
+            headers={"Origin": "chrome-extension://unit-test"},
+        )
+        self.assertEqual(missing_token.status_code, 401, missing_token.text)
+
+        badges = self.client.get("/api/plugin/ratings/badges", headers=self.extension)
+        self.assertEqual(badges.status_code, 200, badges.text)
+        self.assertEqual(badges.json()["badges"][0]["badge_text"], "1SR")
+        self.assertNotIn(self.token, badges.text)
+        self.assertNotIn("prompt_text", badges.text)
 
 
 if __name__ == "__main__":

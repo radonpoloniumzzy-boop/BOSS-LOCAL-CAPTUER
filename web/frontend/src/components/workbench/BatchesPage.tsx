@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowLeft, Download, X } from "lucide-react";
 import { ApiRequestError, BatchCandidateRow, CaptureBatchRow, downloadBatchMarkdown, PagedResponse, requestJson } from "../../api";
 import { Drawer } from "./Drawer";
-import { formatDate, Loadable, Pager, RefreshButton, StatusBadge, TableState } from "./common";
+import { formatDate, Loadable, Pager, RatingBadge, RefreshButton, StatusBadge, TableState } from "./common";
 import { SnapshotTextBlock } from "./SnapshotTextBlock";
 
 const emptyBatches: Loadable<CaptureBatchRow> = { rows: [], total: 0, page: 1, page_size: 20, loading: false, error: "" };
@@ -390,6 +390,7 @@ function BatchDetail({
                   <th>候选人</th>
                   <th>来源岗位</th>
                   <th>本次结果</th>
+                  <th>外部评级</th>
                   <th>本次正式岗位</th>
                   <th>采集时间</th>
                   <th>快照</th>
@@ -407,6 +408,7 @@ function BatchDetail({
                       </span>
                     </td>
                     <td><StatusBadge tone={row.ingest_status === "updated" ? "info" : "success"}>{row.ingest_status === "updated" ? "更新" : "新增"}</StatusBadge></td>
+                    <td><RatingBadge rating={row.latest_rating} /></td>
                     <td><StatusBadge tone={batch.role_id !== null ? "success" : "muted"}>{batch.role_id !== null ? `岗位档案 #${batch.role_id}` : "未提供正式岗位"}</StatusBadge></td>
                     <td className="numeric">{formatDate(row.capture_time)}</td>
                     <td><button className="secondary-button" onClick={() => setSnapshotIndex(index)}>查看原始快照</button></td>
@@ -442,6 +444,7 @@ function BatchDetail({
           </header>
           <div className="detail-chip-row">
             <StatusBadge tone={snapshot.ingest_status === "updated" ? "info" : "success"}>{snapshot.ingest_status === "updated" ? "更新" : "新增"}</StatusBadge>
+            <RatingBadge rating={snapshot.latest_rating} />
           </div>
           <SnapshotTextBlock text={snapshot.raw_card_text || ""} />
           <div className="snapshot-pagination">

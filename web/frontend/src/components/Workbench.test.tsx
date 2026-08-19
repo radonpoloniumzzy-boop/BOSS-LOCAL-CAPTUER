@@ -714,6 +714,89 @@ describe("workbench candidate intake views", () => {
     expect(await screen.findByText("任务状态已更新。")).toBeInTheDocument();
   });
 
+  it("previews and imports external ratings for running recruitment tasks", async () => {
+    let importAttempts = 0;
+    const fetchMock = vi.fn((input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/job-profiles") && !init?.method) {
+        return response({ rows: [] });
+      }
+      if (url.endsWith("/api/recruitment-tasks") && !init?.method) {
+        return response({
+          rows: [{
+            id: 11,
+            name: "Boss 推荐流",
+            role_id: 7,
+            role_title: "量化研究员",
+            profile_version: 2,
+            platform: "boss",
+            source_url: "https://www.zhipin.com/web/geek/recommend",
+            target_candidates: 20,
+            status: "running",
+            current_step: "采集与筛选",
+            latest_message: "",
+            batch_count: 1,
+            candidate_count: 2,
+            run_count: 0,
+            export_count: 0,
+            created_at: "2026-08-19T09:00:00",
+            updated_at: "2026-08-19T09:00:00",
+          }],
+        });
+      }
+      if (url.endsWith("/api/plugin-context") && !init?.method) {
+        return response({ context: null });
+      }
+      if (url.endsWith("/api/recruitment-tasks/11/external-ratings/import") && init?.method === "POST") {
+        importAttempts += 1;
+        if (importAttempts === 1) {
+          return errorResponse("外部评级导入失败，请稍后重试。");
+        }
+        return response({
+          task_id: 11,
+          run_id: 32,
+          status: "partial",
+          received: 3,
+          imported: 1,
+          unmatched: 1,
+          ambiguous: 0,
+          invalid: 1,
+          rows: [
+            { line: 1, candidate_id: 7, name: "Alice", rating: "SSR", status: "imported", message: "已导入外部评级。" },
+            { line: 2, candidate_id: null, name: "Nobody", rating: "SR", status: "unmatched", message: "未在当前招聘任务的岗位关系中找到唯一候选人。" },
+            { line: 3, candidate_id: null, name: "Broken", rating: "A+", status: "invalid", message: "评级只能是 UR、SSR、SR、R、N。" },
+          ],
+        });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    render(<Workbench status={status} />);
+
+    await user.click(screen.getByRole("button", { name: "岗位" }));
+    await screen.findByText("Boss 推荐流");
+    await user.click(screen.getByRole("button", { name: "导入外部评级" }));
+    const dialog = await screen.findByRole("dialog", { name: "导入外部评级" });
+    await user.type(within(dialog).getByLabelText("粘贴评级名单"), "name,rating\nAlice,SSR\nNobody,SR\nBroken,A+");
+    expect(within(dialog).getByText("解析 3 行")).toBeInTheDocument();
+    expect(within(dialog).getByText("可导入 2 行")).toBeInTheDocument();
+    expect(within(dialog).getByText("格式待修正 1 行")).toBeInTheDocument();
+    expect(within(dialog).getByText("1SSR")).toBeInTheDocument();
+    expect(within(dialog).getByText("评级无效")).toBeInTheDocument();
+
+    await user.click(within(dialog).getByRole("button", { name: "确认导入外部评级" }));
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("外部评级导入失败，请稍后重试。");
+    expect(within(dialog).getByLabelText("粘贴评级名单")).toHaveValue("name,rating\nAlice,SSR\nNobody,SR\nBroken,A+");
+    await user.click(within(dialog).getByRole("button", { name: "确认导入外部评级" }));
+    expect(await within(dialog).findByRole("status")).toHaveTextContent("成功 1");
+    expect(within(dialog).getByText("未匹配 1")).toBeInTheDocument();
+    expect(within(dialog).getByText("无效 1")).toBeInTheDocument();
+    const importCall = fetchMock.mock.calls.find(([url]) => String(url).endsWith("/api/recruitment-tasks/11/external-ratings/import"));
+    expect(importCall?.[1]?.body).toContain("Alice,SSR");
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/api/recruitment-tasks/11/external-ratings/import"))).toHaveLength(2);
+  });
+
   it("generates and copies a one-time plugin pairing code without exposing a token", async () => {
     const fetchMock = vi.fn((input: string | URL, init?: RequestInit) => {
       const url = String(input);
@@ -1168,6 +1251,7 @@ describe("workbench candidate intake views", () => {
               latest_batch_id: 11,
               latest_capture_time: "2026-08-11T10:30:00",
               latest_ingest_status: "updated",
+              latest_rating: "SSR",
               latest_batch_role_id: null,
               has_role_binding: 0,
             }],
@@ -1188,6 +1272,7 @@ describe("workbench candidate intake views", () => {
           latest_batch_id: 11,
           latest_capture_time: "2026-08-11T10:30:00",
           latest_ingest_status: "updated",
+          latest_rating: "SSR",
           latest_batch_role_id: null,
           has_role_binding: 0,
           job_title: "量化研究员",
@@ -1252,10 +1337,16 @@ describe("workbench candidate intake views", () => {
     await user.type(screen.getByLabelText("候选人搜索"), "原始卡片");
     await user.click(screen.getByRole("button", { name: "搜索" }));
     expect(await screen.findByText("Bob Li")).toBeInTheDocument();
+    expect(screen.getAllByText("1SSR").length).toBeGreaterThanOrEqual(1);
+    await user.selectOptions(screen.getByLabelText("外部评级"), "SSR");
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.some(([url]) => String(url).includes("rating=SSR"))).toBe(true);
+    });
 
     await user.click(screen.getByRole("button", { name: "查看详情" }));
     const detailDrawer = await screen.findByRole("dialog", { name: "候选人详情" });
     expect(within(detailDrawer).getAllByText("量化研究员").length).toBeGreaterThan(0);
+    expect(within(detailDrawer).getByText("1SSR")).toBeInTheDocument();
     expect(screen.getByText("原始卡片关键词与快照")).toBeInTheDocument();
 
     await user.click(within(detailDrawer).getByRole("button", { name: "打开最近批次 #11" }));

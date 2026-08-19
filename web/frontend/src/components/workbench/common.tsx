@@ -19,6 +19,14 @@ export function StatusBadge({ tone = "neutral", children }: { tone?: string; chi
   return <span className={`status-badge ${tone}`}>{children}</span>;
 }
 
+export function RatingBadge({ rating }: { rating?: string | null }) {
+  const normalized = String(rating || "").trim().toUpperCase();
+  if (!["UR", "SSR", "SR", "R", "N"].includes(normalized)) {
+    return <span className="rating-badge unrated">未评级</span>;
+  }
+  return <span className={`rating-badge rating-${normalized.toLowerCase()}`}>1{normalized}</span>;
+}
+
 export function TableState({ loading, error, empty, emptyText = "还没有采集批次。" }: { loading: boolean; error: string; empty: boolean; emptyText?: string }) {
   if (loading) return <div className="table-state skeleton-state"><span />正在读取本地数据…</div>;
   if (error) return <div className="table-state error-table-state">{error}</div>;

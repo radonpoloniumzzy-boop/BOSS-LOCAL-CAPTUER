@@ -1088,6 +1088,7 @@ class CandidateRepository:
         batch_id: int | None = None,
         source_platform: str = "",
         unbound_only: bool = False,
+        rating: str = "",
         city: str = "",
         years_min: int | str | None = None,
         years_max: int | str | None = None,
@@ -1106,6 +1107,7 @@ class CandidateRepository:
             batch_id=batch_id,
             source_platform=source_platform,
             unbound_only=unbound_only,
+            rating=rating,
             city=city,
             years_min=years_min,
             years_max=years_max,
@@ -1295,6 +1297,7 @@ class CandidateRepository:
         batch_id: int | None = None,
         source_platform: str = "",
         unbound_only: bool = False,
+        rating: str = "",
         city: str = "",
         years_min: int | str | None = None,
         years_max: int | str | None = None,
@@ -1318,6 +1321,19 @@ class CandidateRepository:
             filters.append(
                 "NOT EXISTS (SELECT 1 FROM candidate_role_matches mx WHERE mx.candidate_id = c.id)"
             )
+        normalized_rating = str(rating or "").strip().upper()
+        if normalized_rating == "UNRATED":
+            filters.append(
+                "NOT EXISTS ("
+                "SELECT 1 FROM candidate_role_matches mr "
+                "WHERE mr.candidate_id = c.id AND TRIM(COALESCE(mr.latest_rating, '')) <> ''"
+                ")"
+            )
+        elif normalized_rating in {"UR", "SSR", "SR", "R", "N"}:
+            filters.append(
+                "EXISTS (SELECT 1 FROM candidate_role_matches mr WHERE mr.candidate_id = c.id AND mr.latest_rating = ?)"
+            )
+            params.append(normalized_rating)
         if keyword:
             token = f"%{keyword}%"
             filters.append(
@@ -1649,6 +1665,7 @@ class CandidateRepository:
             SELECT
                 bi.*,
                 c.source_platform AS candidate_source_platform,
+                rm.latest_rating,
                 CASE
                     WHEN EXISTS (
                         SELECT 1 FROM candidate_role_matches m WHERE m.candidate_id = bi.candidate_id
@@ -1656,6 +1673,9 @@ class CandidateRepository:
                 END AS has_role_binding
             FROM capture_batch_items bi
             JOIN candidates c ON c.id = bi.candidate_id
+            LEFT JOIN capture_batches b ON b.id = bi.batch_id
+            LEFT JOIN candidate_role_matches rm ON rm.candidate_id = bi.candidate_id
+                AND rm.role_id = b.role_id
             WHERE bi.batch_id = ?
             ORDER BY bi.id ASC
             LIMIT ? OFFSET ?
@@ -3466,6 +3486,295 @@ class CandidateRepository:
             (status, completed, failed, now_iso(), note, run_id),
         )
         connection.commit()
+
+    def import_external_ratings(
+        self,
+        task_id: int,
+        rows: Iterable[dict[str, object]],
+        *,
+        source_note: str = "",
+    ) -> dict[str, object]:
+        connection = self.db.get_connection()
+        task = self.get_recruitment_task(task_id)
+        if task is None:
+            raise ValueError("招聘任务不存在")
+        if str(task["status"]) != "running":
+            raise InvalidRecruitmentTaskStatusTransitionError("只有执行中的招聘任务可以导入外部评级")
+        role_id = int(task["role_id"])
+        profile_version = int(task["profile_version"])
+        timestamp = now_iso()
+        prepared = [dict(row) for row in rows]
+        received = len(prepared)
+        result_rows: list[dict[str, object]] = []
+        imported = unmatched = ambiguous = invalid = 0
+
+        with connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO screening_runs(
+                    profile_id, profile_version, source_job_title, batch_id, provider, model,
+                    origin, task_id, status, total_candidates, completed_candidates,
+                    failed_candidates, started_at, completed_at, note
+                ) VALUES (?, ?, ?, NULL, 'external_rating_import', 'external_rating_import',
+                    'external_rating_import', ?, 'completed', ?, 0, 0, ?, ?, ?)
+                """,
+                (
+                    role_id,
+                    profile_version,
+                    str(task.get("name") or ""),
+                    task_id,
+                    received,
+                    timestamp,
+                    timestamp,
+                    source_note[:500],
+                ),
+            )
+            run_id = int(cursor.lastrowid)
+            for index, row in enumerate(prepared, start=1):
+                rating = str(row.get("rating") or "").strip().upper()
+                name = str(row.get("name") or row.get("candidate_name") or "").strip()
+                candidate_id = self._optional_int(row.get("candidate_id"))
+                if rating not in {"UR", "SSR", "SR", "R", "N"}:
+                    invalid += 1
+                    result_rows.append(
+                        {
+                            "line": index,
+                            "candidate_id": candidate_id,
+                            "name": name,
+                            "rating": rating,
+                            "status": "invalid",
+                            "message": "评级只能是 UR、SSR、SR、R、N。",
+                        }
+                    )
+                    continue
+                matches = self._match_external_rating_candidates(
+                    connection,
+                    role_id=role_id,
+                    candidate_id=candidate_id,
+                    name=name,
+                    batch_id=self._optional_int(row.get("batch_id")),
+                    source_platform=str(row.get("source_platform") or "").strip(),
+                    source_job_title=str(row.get("source_job_title") or row.get("job_title") or "").strip(),
+                )
+                if not matches:
+                    unmatched += 1
+                    result_rows.append(
+                        {
+                            "line": index,
+                            "candidate_id": candidate_id,
+                            "name": name,
+                            "rating": rating,
+                            "status": "unmatched",
+                            "message": "未在当前招聘任务的岗位关系中找到唯一候选人。",
+                        }
+                    )
+                    continue
+                if len(matches) > 1:
+                    ambiguous += 1
+                    result_rows.append(
+                        {
+                            "line": index,
+                            "candidate_id": candidate_id,
+                            "name": name,
+                            "rating": rating,
+                            "status": "ambiguous",
+                            "message": "同名候选人无法唯一确认，请补充 candidate_id 或批次信息。",
+                        }
+                    )
+                    continue
+                match = matches[0]
+                result_cursor = connection.execute(
+                    """
+                    INSERT INTO screening_results(
+                        run_id, candidate_id, rating, persona, status, raw_response, error,
+                        confidence, evidence_json, gap_json, risk_json, recommended_action, created_at
+                    ) VALUES (?, ?, ?, 'external_rating_import', 'success', '', '',
+                        'external', '[]', '[]', '[]', '', ?)
+                    """,
+                    (run_id, int(match["candidate_id"]), rating, timestamp),
+                )
+                result_id = int(result_cursor.lastrowid)
+                connection.execute(
+                    """
+                    UPDATE candidate_role_matches
+                    SET latest_rating = ?,
+                        latest_confidence = 'external',
+                        screening_result_id = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (rating, result_id, timestamp, int(match["match_id"])),
+                )
+                imported += 1
+                result_rows.append(
+                    {
+                        "line": index,
+                        "candidate_id": int(match["candidate_id"]),
+                        "name": str(match["name"] or ""),
+                        "rating": rating,
+                        "status": "imported",
+                        "message": "已导入外部评级。",
+                    }
+                )
+            failed = unmatched + ambiguous + invalid
+            run_status = "completed" if failed == 0 else ("failed" if imported == 0 else "partial")
+            connection.execute(
+                """
+                UPDATE screening_runs
+                SET status = ?, completed_candidates = ?, failed_candidates = ?, completed_at = ?, note = ?
+                WHERE id = ?
+                """,
+                (
+                    run_status,
+                    imported,
+                    failed,
+                    timestamp,
+                    "external_rating_import",
+                    run_id,
+                ),
+            )
+        return {
+            "task_id": task_id,
+            "run_id": run_id,
+            "status": run_status,
+            "received": received,
+            "imported": imported,
+            "unmatched": unmatched,
+            "ambiguous": ambiguous,
+            "invalid": invalid,
+            "rows": result_rows,
+        }
+
+    def _match_external_rating_candidates(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        role_id: int,
+        candidate_id: int | None,
+        name: str,
+        batch_id: int | None,
+        source_platform: str,
+        source_job_title: str,
+    ) -> list[sqlite3.Row]:
+        if candidate_id is not None:
+            row = connection.execute(
+                """
+                SELECT m.id AS match_id, c.id AS candidate_id, c.name
+                FROM candidate_role_matches m
+                JOIN candidates c ON c.id = m.candidate_id
+                WHERE m.role_id = ? AND m.candidate_id = ?
+                """,
+                (role_id, candidate_id),
+            ).fetchone()
+            return [row] if row is not None else []
+        if not name:
+            return []
+        filters = ["m.role_id = ?", "c.name = ?"]
+        params: list[object] = [role_id, name]
+        joins = ""
+        if batch_id is not None or source_platform or source_job_title:
+            joins += " JOIN capture_batch_items bi ON bi.candidate_id = c.id "
+        if batch_id is not None:
+            filters.append("bi.batch_id = ?")
+            params.append(batch_id)
+        if source_platform:
+            filters.append("bi.source_platform = ?")
+            params.append(source_platform)
+        if source_job_title:
+            filters.append("bi.job_title = ?")
+            params.append(source_job_title)
+        return list(
+            connection.execute(
+                f"""
+                SELECT DISTINCT m.id AS match_id, c.id AS candidate_id, c.name
+                FROM candidate_role_matches m
+                JOIN candidates c ON c.id = m.candidate_id
+                {joins}
+                WHERE {' AND '.join(filters)}
+                ORDER BY c.id
+                """,
+                params,
+            ).fetchall()
+        )
+
+    def get_latest_external_rating_import(self, task_id: int) -> dict[str, object] | None:
+        connection = self.db.get_connection()
+        run = connection.execute(
+            """
+            SELECT id, task_id, profile_id, profile_version, status, total_candidates,
+                   completed_candidates, failed_candidates, started_at, completed_at, origin
+            FROM screening_runs
+            WHERE task_id = ? AND origin = 'external_rating_import'
+            ORDER BY completed_at DESC, id DESC
+            LIMIT 1
+            """,
+            (task_id,),
+        ).fetchone()
+        if run is None:
+            return None
+        rows = connection.execute(
+            """
+            SELECT r.candidate_id, c.name, r.rating, r.status, r.created_at
+            FROM screening_results r
+            JOIN candidates c ON c.id = r.candidate_id
+            WHERE r.run_id = ?
+            ORDER BY r.id ASC
+            """,
+            (int(run["id"]),),
+        ).fetchall()
+        return {"run": dict(run), "rows": [dict(row) for row in rows]}
+
+    def list_plugin_rating_badges(self, task_id: int) -> list[dict[str, object]]:
+        task = self.get_recruitment_task(task_id)
+        if task is None or str(task["status"]) != "running":
+            return []
+        role_id = int(task["role_id"])
+        rows = self.db.get_connection().execute(
+            """
+            SELECT
+                c.id AS candidate_id,
+                c.name,
+                c.platform_uid,
+                c.detail_url,
+                c.source_platform,
+                c.candidate_key,
+                m.latest_rating AS rating,
+                lbi.platform_uid AS latest_platform_uid,
+                lbi.detail_url AS latest_detail_url
+            FROM candidate_role_matches m
+            JOIN candidates c ON c.id = m.candidate_id
+            LEFT JOIN capture_batch_items lbi ON lbi.id = (
+                SELECT bi.id
+                FROM capture_batch_items bi
+                WHERE bi.candidate_id = c.id
+                ORDER BY bi.capture_time DESC, bi.id DESC
+                LIMIT 1
+            )
+            WHERE m.role_id = ?
+              AND m.latest_rating IN ('UR', 'SSR', 'SR', 'R', 'N')
+            ORDER BY
+                CASE m.latest_rating
+                    WHEN 'UR' THEN 1 WHEN 'SSR' THEN 2 WHEN 'SR' THEN 3
+                    WHEN 'R' THEN 4 WHEN 'N' THEN 5 ELSE 6
+                END,
+                m.updated_at DESC,
+                m.id DESC
+            """,
+            (role_id,),
+        ).fetchall()
+        return [
+            {
+                "candidate_id": int(row["candidate_id"]),
+                "name": str(row["name"] or ""),
+                "source_platform": str(row["source_platform"] or ""),
+                "source_candidate_id": "",
+                "platform_uid": str(row["latest_platform_uid"] or row["platform_uid"] or ""),
+                "detail_url": str(row["latest_detail_url"] or row["detail_url"] or ""),
+                "rating": str(row["rating"] or ""),
+                "badge_text": f"1{str(row['rating'] or '')}",
+            }
+            for row in rows
+        ]
 
     def list_screening_candidates(
         self,
