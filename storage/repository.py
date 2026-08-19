@@ -3729,47 +3729,39 @@ class CandidateRepository:
         if task is None or str(task["status"]) != "running":
             return []
         role_id = int(task["role_id"])
+        profile_version = int(task["profile_version"])
         rows = self.db.get_connection().execute(
             """
             SELECT
                 c.id AS candidate_id,
-                c.name,
                 c.platform_uid,
-                c.detail_url,
                 c.source_platform,
-                c.candidate_key,
-                m.latest_rating AS rating,
-                lbi.platform_uid AS latest_platform_uid,
-                lbi.detail_url AS latest_detail_url
+                r.rating
             FROM candidate_role_matches m
             JOIN candidates c ON c.id = m.candidate_id
-            LEFT JOIN capture_batch_items lbi ON lbi.id = (
-                SELECT bi.id
-                FROM capture_batch_items bi
-                WHERE bi.candidate_id = c.id
-                ORDER BY bi.capture_time DESC, bi.id DESC
-                LIMIT 1
-            )
+            JOIN screening_results r ON r.id = m.screening_result_id
+            JOIN screening_runs sr ON sr.id = r.run_id
             WHERE m.role_id = ?
-              AND m.latest_rating IN ('UR', 'SSR', 'SR', 'R', 'N')
+              AND sr.task_id = ?
+              AND sr.profile_id = ?
+              AND sr.profile_version = ?
+              AND sr.origin = 'external_rating_import'
+              AND r.rating IN ('UR', 'SSR', 'SR', 'R', 'N')
             ORDER BY
-                CASE m.latest_rating
+                CASE r.rating
                     WHEN 'UR' THEN 1 WHEN 'SSR' THEN 2 WHEN 'SR' THEN 3
                     WHEN 'R' THEN 4 WHEN 'N' THEN 5 ELSE 6
                 END,
-                m.updated_at DESC,
-                m.id DESC
+                r.created_at DESC,
+                r.id DESC
             """,
-            (role_id,),
+            (role_id, task_id, role_id, profile_version),
         ).fetchall()
         return [
             {
                 "candidate_id": int(row["candidate_id"]),
-                "name": str(row["name"] or ""),
                 "source_platform": str(row["source_platform"] or ""),
-                "source_candidate_id": "",
-                "platform_uid": str(row["latest_platform_uid"] or row["platform_uid"] or ""),
-                "detail_url": str(row["latest_detail_url"] or row["detail_url"] or ""),
+                "platform_uid": str(row["platform_uid"] or ""),
                 "rating": str(row["rating"] or ""),
                 "badge_text": f"1{str(row['rating'] or '')}",
             }

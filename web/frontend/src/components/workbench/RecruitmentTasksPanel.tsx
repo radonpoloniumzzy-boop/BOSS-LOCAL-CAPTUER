@@ -260,18 +260,31 @@ function isValidRating(value: string) {
 }
 
 function parseRatingPreview(text: string) {
-  return text
+  const lines = text
     .split(/\r?\n/)
     .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line, index) => {
-      const parts = line.split(/\t|,/).map((value) => value.trim());
-      if (index === 0 && parts.some((part) => /^(name|candidate_name|rating)$/i.test(part))) {
-        return null;
-      }
-      return { name: parts[0] || "", rating: (parts[1] || "").toUpperCase() };
-    })
-    .filter((row): row is { name: string; rating: string } => row !== null);
+    .filter(Boolean);
+  if (lines.length === 0) return [];
+  const delimiter = lines[0].includes("\t") ? "\t" : ",";
+  const splitLine = (line: string) => line.split(delimiter).map((value) => value.trim());
+  const first = splitLine(lines[0]);
+  const normalizeHeader = (value: string) => value.trim().toLowerCase().replace(/\s+/g, "_");
+  const headers = first.map(normalizeHeader);
+  const hasHeader = headers.some((header) =>
+    ["candidate_id", "id", "name", "candidate_name", "rating"].includes(header),
+  );
+  const nameIndex = hasHeader
+    ? headers.findIndex((header) => ["name", "candidate_name"].includes(header))
+    : 0;
+  const ratingIndex = hasHeader ? headers.findIndex((header) => header === "rating") : 1;
+  const rows = hasHeader ? lines.slice(1) : lines;
+  return rows.map((line) => {
+    const parts = splitLine(line);
+    return {
+      name: nameIndex >= 0 ? parts[nameIndex] || "" : "",
+      rating: (ratingIndex >= 0 ? parts[ratingIndex] || "" : "").toUpperCase(),
+    };
+  });
 }
 
 function ratingStatusLabel(status: string) {

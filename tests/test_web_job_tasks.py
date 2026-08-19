@@ -884,9 +884,113 @@ class WebJobTaskFoundationTest(unittest.TestCase):
 
         badges = self.client.get("/api/plugin/ratings/badges", headers=self.extension)
         self.assertEqual(badges.status_code, 200, badges.text)
-        self.assertEqual(badges.json()["badges"][0]["badge_text"], "1SR")
+        badge = badges.json()["badges"][0]
+        self.assertEqual(badge["badge_text"], "1SR")
+        self.assertEqual(badge["platform_uid"], "boss:dora-1")
+        self.assertEqual(set(badge.keys()), {"candidate_id", "source_platform", "platform_uid", "rating", "badge_text"})
         self.assertNotIn(self.token, badges.text)
         self.assertNotIn("prompt_text", badges.text)
+        self.assertNotIn("provider", badges.text)
+        self.assertNotIn("model", badges.text)
+        self.assertNotIn("detail_url", badges.text)
+        self.assertNotIn("raw_card_text", badges.text)
+
+    def test_plugin_rating_badges_are_bound_to_current_task(self) -> None:
+        job = self._create_active_job()
+        task_a = self._start_task(self._create_task(job))
+        candidate_id = self._intake_candidate(job=job, task=task_a, name="Eve", source_id="eve-1", key="rating-eve")
+        imported = self.client.post(
+            f"/api/recruitment-tasks/{task_a['id']}/external-ratings/import",
+            json={"rows": [{"candidate_id": candidate_id, "name": "Eve", "rating": "SSR"}]},
+            headers=self.origin,
+        )
+        self.assertEqual(imported.status_code, 200, imported.text)
+
+        task_b = self._start_task(self._create_task(job))
+        selected = self.client.put("/api/plugin-context", json={"recruitment_task_id": task_b["id"]}, headers=self.origin)
+        self.assertEqual(selected.status_code, 200, selected.text)
+
+        badges = self.client.get("/api/plugin/ratings/badges", headers=self.extension)
+        self.assertEqual(badges.status_code, 200, badges.text)
+        self.assertEqual(badges.json()["badges"], [])
+
+    def test_plugin_rating_badges_ignore_other_profile_versions_and_origins(self) -> None:
+        job = self._create_active_job()
+        task_v1 = self._start_task(self._create_task(job))
+        candidate_id = self._intake_candidate(job=job, task=task_v1, name="Frank", source_id="frank-1", key="rating-frank")
+        imported = self.client.post(
+            f"/api/recruitment-tasks/{task_v1['id']}/external-ratings/import",
+            json={"rows": [{"candidate_id": candidate_id, "name": "Frank", "rating": "SR"}]},
+            headers=self.origin,
+        )
+        self.assertEqual(imported.status_code, 200, imported.text)
+        updated_job = self.client.put(
+            f"/api/job-profiles/{job['id']}",
+            json={**self._job_payload(), "target_hires": 3, "expected_version": job["version"]},
+            headers=self.origin,
+        )
+        self.assertEqual(updated_job.status_code, 200, updated_job.text)
+        task_v2 = self._start_task(self._create_task(updated_job.json()))
+        selected = self.client.put("/api/plugin-context", json={"recruitment_task_id": task_v2["id"]}, headers=self.origin)
+        self.assertEqual(selected.status_code, 200, selected.text)
+        badges = self.client.get("/api/plugin/ratings/badges", headers=self.extension)
+        self.assertEqual(badges.status_code, 200, badges.text)
+        self.assertEqual(badges.json()["badges"], [])
+
+        db, _repository = self._direct_repository()
+        try:
+            connection = db.get_connection()
+            match = connection.execute(
+                "SELECT id FROM candidate_role_matches WHERE candidate_id = ? AND role_id = ?",
+                (candidate_id, job["id"]),
+            ).fetchone()
+            cursor = connection.execute(
+                """
+                INSERT INTO screening_runs(
+                    profile_id, profile_version, source_job_title, batch_id, provider, model,
+                    origin, task_id, status, total_candidates, completed_candidates,
+                    failed_candidates, started_at, completed_at, note
+                ) VALUES (?, ?, '', NULL, 'local_ai', 'local_model', 'automation', ?,
+                    'completed', 1, 1, 0, '2026-08-19T10:00:00', '2026-08-19T10:00:00', '')
+                """,
+                (job["id"], updated_job.json()["version"], task_v2["id"]),
+            )
+            run_id = int(cursor.lastrowid)
+            result_cursor = connection.execute(
+                """
+                INSERT INTO screening_results(
+                    run_id, candidate_id, rating, persona, status, raw_response, error,
+                    confidence, evidence_json, gap_json, risk_json, recommended_action, created_at
+                ) VALUES (?, ?, 'UR', 'automation', 'success', '', '',
+                    'ai', '[]', '[]', '[]', '', '2026-08-19T10:00:00')
+                """,
+                (run_id, candidate_id),
+            )
+            connection.execute(
+                """
+                UPDATE candidate_role_matches
+                SET latest_rating = 'UR', screening_result_id = ?, updated_at = '2026-08-19T10:00:00'
+                WHERE id = ?
+                """,
+                (int(result_cursor.lastrowid), int(match["id"])),
+            )
+            connection.commit()
+        finally:
+            db.close_thread_connection()
+
+        hidden = self.client.get("/api/plugin/ratings/badges", headers=self.extension)
+        self.assertEqual(hidden.status_code, 200, hidden.text)
+        self.assertEqual(hidden.json()["badges"], [])
+
+        imported_current = self.client.post(
+            f"/api/recruitment-tasks/{task_v2['id']}/external-ratings/import",
+            json={"rows": [{"candidate_id": candidate_id, "name": "Frank", "rating": "SSR"}]},
+            headers=self.origin,
+        )
+        self.assertEqual(imported_current.status_code, 200, imported_current.text)
+        current = self.client.get("/api/plugin/ratings/badges", headers=self.extension)
+        self.assertEqual(current.status_code, 200, current.text)
+        self.assertEqual(current.json()["badges"][0]["badge_text"], "1SSR")
 
 
 if __name__ == "__main__":

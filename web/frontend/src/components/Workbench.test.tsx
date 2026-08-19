@@ -778,7 +778,7 @@ describe("workbench candidate intake views", () => {
     await screen.findByText("Boss 推荐流");
     await user.click(screen.getByRole("button", { name: "导入外部评级" }));
     const dialog = await screen.findByRole("dialog", { name: "导入外部评级" });
-    await user.type(within(dialog).getByLabelText("粘贴评级名单"), "name,rating\nAlice,SSR\nNobody,SR\nBroken,A+");
+    await user.type(within(dialog).getByLabelText("粘贴评级名单"), "candidate_id,name,rating\n7,Alice,SSR\n,Nobody,SR\n,Broken,A+");
     expect(within(dialog).getByText("解析 3 行")).toBeInTheDocument();
     expect(within(dialog).getByText("可导入 2 行")).toBeInTheDocument();
     expect(within(dialog).getByText("格式待修正 1 行")).toBeInTheDocument();
@@ -787,14 +787,63 @@ describe("workbench candidate intake views", () => {
 
     await user.click(within(dialog).getByRole("button", { name: "确认导入外部评级" }));
     expect(await within(dialog).findByRole("alert")).toHaveTextContent("外部评级导入失败，请稍后重试。");
-    expect(within(dialog).getByLabelText("粘贴评级名单")).toHaveValue("name,rating\nAlice,SSR\nNobody,SR\nBroken,A+");
+    expect(within(dialog).getByLabelText("粘贴评级名单")).toHaveValue("candidate_id,name,rating\n7,Alice,SSR\n,Nobody,SR\n,Broken,A+");
     await user.click(within(dialog).getByRole("button", { name: "确认导入外部评级" }));
     expect(await within(dialog).findByRole("status")).toHaveTextContent("成功 1");
     expect(within(dialog).getByText("未匹配 1")).toBeInTheDocument();
     expect(within(dialog).getByText("无效 1")).toBeInTheDocument();
     const importCall = fetchMock.mock.calls.find(([url]) => String(url).endsWith("/api/recruitment-tasks/11/external-ratings/import"));
-    expect(importCall?.[1]?.body).toContain("Alice,SSR");
+    expect(importCall?.[1]?.body).toContain("candidate_id,name,rating");
+    expect(importCall?.[1]?.body).toContain("7,Alice,SSR");
     expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/api/recruitment-tasks/11/external-ratings/import"))).toHaveLength(2);
+  });
+
+  it("previews TSV external rating headers without disabling import", async () => {
+    const fetchMock = vi.fn((input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/job-profiles") && !init?.method) return response({ rows: [] });
+      if (url.endsWith("/api/recruitment-tasks") && !init?.method) {
+        return response({
+          rows: [{
+            id: 11,
+            name: "Boss 推荐流",
+            role_id: 7,
+            role_title: "量化研究员",
+            profile_version: 2,
+            platform: "boss",
+            source_url: "https://www.zhipin.com/web/geek/recommend",
+            target_candidates: 20,
+            status: "running",
+            current_step: "采集与筛选",
+            latest_message: "",
+            batch_count: 1,
+            candidate_count: 2,
+            run_count: 0,
+            export_count: 0,
+            created_at: "2026-08-19T09:00:00",
+            updated_at: "2026-08-19T09:00:00",
+          }],
+        });
+      }
+      if (url.endsWith("/api/plugin-context") && !init?.method) return response({ context: null });
+      throw new Error(`unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    render(<Workbench status={status} />);
+
+    await user.click(screen.getByRole("button", { name: "岗位" }));
+    await screen.findByText("Boss 推荐流");
+    await user.click(screen.getByRole("button", { name: "导入外部评级" }));
+    const dialog = await screen.findByRole("dialog", { name: "导入外部评级" });
+    await user.click(within(dialog).getByLabelText("粘贴评级名单"));
+    await user.paste("id\tcandidate_name\trating\n8\tBob\tSR");
+
+    expect(within(dialog).getByText("解析 1 行")).toBeInTheDocument();
+    expect(within(dialog).getByText("可导入 1 行")).toBeInTheDocument();
+    expect(within(dialog).getByText("Bob")).toBeInTheDocument();
+    expect(within(dialog).getByText("1SR")).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "确认导入外部评级" })).toBeEnabled();
   });
 
   it("generates and copies a one-time plugin pairing code without exposing a token", async () => {

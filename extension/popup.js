@@ -706,17 +706,9 @@ async function applyRatingBadges(tabId, badges) {
           }
           return "";
         };
-        const firstHref = (node) => {
-          const link = node.querySelector("a[href*='geek'], a[href*='candidate'], a[href*='zhipin.com']");
-          return normalize(link?.href || link?.getAttribute?.("href") || "");
-        };
         const sameBadge = (card, badge) => {
           const platformUid = firstAttr(card, ["data-geek-id", "data-candidate-id", "data-user-id"]);
-          const sourceId = firstAttr(card, ["data-id", "data-geek-id", "data-candidate-id", "data-user-id"]);
-          const href = firstHref(card);
           if (badge.platform_uid && platformUid && badge.platform_uid === platformUid) return true;
-          if (badge.source_candidate_id && sourceId && badge.source_candidate_id === sourceId) return true;
-          if (badge.detail_url && href && badge.detail_url === href) return true;
           return false;
         };
         const rows = (Array.isArray(badgeRows) ? badgeRows : []).filter((badge) =>
