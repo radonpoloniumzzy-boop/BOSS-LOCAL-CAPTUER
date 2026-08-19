@@ -194,6 +194,10 @@ function VersionSnapshot({ version }: { version: JobProfileVersionRow }) {
         <span>{formatDate(version.created_at)}</span>
       </summary>
       <dl className="snapshot-grid">
+        <div><dt>岗位 ID</dt><dd className="tabular">#{missing(snapshot.id)}</dd></div>
+        <div><dt>岗位版本</dt><dd className="tabular">v{missing(snapshot.version)}</dd></div>
+        <div><dt>岗位创建时间</dt><dd className="tabular">{snapshot.created_at ? formatDate(snapshot.created_at) : "未提供"}</dd></div>
+        <div><dt>岗位更新时间</dt><dd className="tabular">{snapshot.updated_at ? formatDate(snapshot.updated_at) : "未提供"}</dd></div>
         <div><dt>岗位名称</dt><dd>{missing(snapshot.job_title)}</dd></div>
         <div><dt>部门</dt><dd>{missing(snapshot.department)}</dd></div>
         <div><dt>负责人</dt><dd>{missing(snapshot.hiring_manager)}</dd></div>
@@ -230,12 +234,14 @@ export function JobEditorDrawer({
   const [formError, setFormError] = useState("");
   const [taskForm, setTaskForm] = useState<TaskFormState | null>(selected ? defaultTaskForm(selected) : null);
   const [confirmClose, setConfirmClose] = useState(false);
+  const [confirmCloseError, setConfirmCloseError] = useState("");
 
   useEffect(() => {
     setForm(jobToForm(selected));
     setTaskForm(selected ? defaultTaskForm(selected) : null);
     setFormError("");
     setConfirmClose(false);
+    setConfirmCloseError("");
   }, [selected]);
 
   const save = async (event: FormEvent) => {
@@ -261,6 +267,15 @@ export function JobEditorDrawer({
       await onCreateTask(taskForm);
     } catch (err) {
       setFormError(err instanceof Error ? err.message : "招聘任务创建失败。");
+    }
+  };
+
+  const changeStatus = async (job: JobProfileDetail, status: string) => {
+    setFormError("");
+    try {
+      await onStatusChange(job, status);
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : "岗位状态更新失败。");
     }
   };
 
@@ -299,10 +314,10 @@ export function JobEditorDrawer({
           {formError && <div className="form-error" role="alert">{formError}</div>}
           <div className="button-row">
             <button className="primary-button" disabled={saving} type="submit"><BriefcaseBusiness size={15} />保存岗位</button>
-            {selected?.status === "draft" && <button type="button" className="secondary-button" disabled={saving} onClick={() => void onStatusChange(selected, "active")}>开启招聘</button>}
-            {selected?.status === "active" && <button type="button" className="secondary-button" disabled={saving} onClick={() => void onStatusChange(selected, "paused")}>暂停岗位</button>}
-            {selected?.status === "paused" && <button type="button" className="secondary-button" disabled={saving} onClick={() => void onStatusChange(selected, "active")}>恢复岗位</button>}
-            {selected && selected.status !== "closed" && <button type="button" className="secondary-button danger" disabled={saving} onClick={() => setConfirmClose(true)}>关闭岗位</button>}
+            {selected?.status === "draft" && <button type="button" className="secondary-button" disabled={saving} onClick={() => void changeStatus(selected, "active")}>开启招聘</button>}
+            {selected?.status === "active" && <button type="button" className="secondary-button" disabled={saving} onClick={() => void changeStatus(selected, "paused")}>暂停岗位</button>}
+            {selected?.status === "paused" && <button type="button" className="secondary-button" disabled={saving} onClick={() => void changeStatus(selected, "active")}>恢复岗位</button>}
+            {selected && selected.status !== "closed" && <button type="button" className="secondary-button danger" disabled={saving} onClick={() => { setConfirmCloseError(""); setConfirmClose(true); }}>关闭岗位</button>}
           </div>
         </form>
 
@@ -343,13 +358,14 @@ export function JobEditorDrawer({
             <button className="icon-button" onClick={() => setConfirmClose(false)} aria-label="关闭确认">×</button>
           </div>
           <p>关闭岗位后，该岗位下未终结的招聘任务会统一取消，插件当前任务也会失效。这个操作不可直接撤销。</p>
+          {confirmCloseError && <div className="form-error" role="alert">{confirmCloseError}</div>}
           <div className="button-row">
             <button className="secondary-button" onClick={() => setConfirmClose(false)}>先不关闭</button>
             <button
               className="primary-button danger"
               disabled={saving}
               onClick={() => void onStatusChange(selected, "closed").then(() => setConfirmClose(false)).catch((err: unknown) => {
-                setFormError(err instanceof Error ? err.message : "岗位关闭失败。");
+                setConfirmCloseError(err instanceof Error ? err.message : "岗位关闭失败。");
               })}
             >
               确认关闭岗位

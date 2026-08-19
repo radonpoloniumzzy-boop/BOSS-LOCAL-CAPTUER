@@ -23,6 +23,16 @@ export function RecruitmentTasksPanel({
 }: RecruitmentTasksPanelProps) {
   const [cancelTarget, setCancelTarget] = useState<RecruitmentTaskRow | null>(null);
   const [confirmError, setConfirmError] = useState("");
+  const [panelError, setPanelError] = useState("");
+
+  const changeStatus = async (task: RecruitmentTaskRow, status: string) => {
+    setPanelError("");
+    try {
+      await onStatusChange(task, status);
+    } catch (err) {
+      setPanelError(err instanceof Error ? err.message : "任务状态更新失败。");
+    }
+  };
 
   const confirmCancel = async () => {
     if (!cancelTarget) return;
@@ -60,6 +70,7 @@ export function RecruitmentTasksPanel({
         <div className="table-state">还没有招聘任务。先打开一个招聘中的岗位创建任务。</div>
       ) : (
         <div className="recruitment-list">
+          {panelError && <div className="form-error" role="alert">{panelError}</div>}
           {tasks.map((task) => {
             const isCurrent = currentContext?.recruitment_task_id === task.id;
             return (
@@ -78,16 +89,16 @@ export function RecruitmentTasksPanel({
                   <div><dt>阶段</dt><dd>{task.current_step || "待启动"}</dd></div>
                 </dl>
                 <div className="button-row">
-                  {task.status === "ready" && <button className="secondary-button compact" disabled={saving} onClick={() => void onStatusChange(task, "running")}>启动</button>}
-                  {task.status === "running" && <button className="secondary-button compact" disabled={saving} onClick={() => void onStatusChange(task, "paused")}>暂停</button>}
-                  {task.status === "paused" && <button className="secondary-button compact" disabled={saving} onClick={() => void onStatusChange(task, "running")}>继续</button>}
+                  {task.status === "ready" && <button className="secondary-button compact" disabled={saving} onClick={() => void changeStatus(task, "running")}>启动</button>}
+                  {task.status === "running" && <button className="secondary-button compact" disabled={saving} onClick={() => void changeStatus(task, "paused")}>暂停</button>}
+                  {task.status === "paused" && <button className="secondary-button compact" disabled={saving} onClick={() => void changeStatus(task, "running")}>继续</button>}
                   {task.status === "running" && (
                     <button className="primary-button compact" disabled={saving || isCurrent} onClick={() => void onAssignContext(task)}>
                       <Link2 size={14} />设为插件当前任务
                     </button>
                   )}
                   {["ready", "running", "waiting_user", "paused"].includes(task.status) && (
-                    <button className="secondary-button compact danger" disabled={saving} onClick={() => setCancelTarget(task)}>取消</button>
+                    <button className="secondary-button compact danger" disabled={saving} onClick={() => { setConfirmError(""); setCancelTarget(task); }}>取消</button>
                   )}
                 </div>
               </article>
@@ -107,7 +118,7 @@ export function RecruitmentTasksPanel({
           <p>取消后该招聘任务不能继续作为插件当前采集任务；已有批次和候选人快照不会被删除。</p>
           {confirmError && <div className="form-error" role="alert">{confirmError}</div>}
           <div className="button-row">
-            <button className="secondary-button" onClick={() => setCancelTarget(null)}>先不取消</button>
+            <button className="secondary-button" onClick={() => { setConfirmError(""); setCancelTarget(null); }}>先不取消</button>
             <button
               className="primary-button danger"
               disabled={saving}

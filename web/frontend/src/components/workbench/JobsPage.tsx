@@ -124,7 +124,9 @@ export function JobsPage({ active }: { active: boolean }) {
       await load();
       await refreshSelected(updated.id);
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "岗位状态更新失败。");
+      const message = err instanceof ApiRequestError ? err.message : "岗位状态更新失败。";
+      setError(message);
+      throw new Error(message);
     } finally {
       setSaving(false);
     }
@@ -169,7 +171,9 @@ export function JobsPage({ active }: { active: boolean }) {
       setNotice("任务状态已更新。");
       await load();
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "任务状态更新失败。");
+      const message = err instanceof ApiRequestError ? err.message : "任务状态更新失败。";
+      setError(message);
+      throw new Error(message);
     } finally {
       setSaving(false);
     }

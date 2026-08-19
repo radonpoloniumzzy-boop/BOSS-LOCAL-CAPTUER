@@ -1950,6 +1950,12 @@ class CandidateRepository:
                     timestamp,
                 ),
             )
+            if existing is not None and profile.status == "closed":
+                self._cancel_non_terminal_recruitment_tasks_for_closed_role(
+                    connection,
+                    int(profile.id),
+                    timestamp,
+                )
         return profile
 
     def save_web_job_profile(
@@ -2270,24 +2276,14 @@ class CandidateRepository:
                 status,
                 expected_version=int(expected_version),
             )
-        source = self.get_job_profile(profile_id)
-        if source is None:
-            raise ValueError("岗位档案不存在")
-        values = {
-            key: source.get(key)
-            for key in ScreeningProfile.__dataclass_fields__
-            if key in source
-        }
-        profile = ScreeningProfile(**values)
-        profile.status = status
-        return self.save_job_profile(profile)
+        return self._set_job_profile_status_atomic(profile_id, status, expected_version=None)
 
     def _set_job_profile_status_atomic(
         self,
         profile_id: int,
         status: str,
         *,
-        expected_version: int,
+        expected_version: int | None,
     ) -> ScreeningProfile:
         connection = self.db.get_connection()
         try:
@@ -2300,7 +2296,8 @@ class CandidateRepository:
                 connection.rollback()
                 raise ValueError("岗位档案不存在")
             current = self._decode_screening_profile(row)
-            if int(current.get("version") or 0) != expected_version:
+            current_version = int(current.get("version") or 0)
+            if expected_version is not None and current_version != expected_version:
                 connection.rollback()
                 raise JobProfileVersionConflictError("岗位档案已被更新，请刷新后再操作。")
             self._validate_job_profile_status_transition(str(current.get("status") or "draft"), status)
@@ -2321,24 +2318,40 @@ class CandidateRepository:
             }
             profile = ScreeningProfile(**values)
             profile.status = status
-            profile.version = expected_version + 1
+            profile.version = current_version + 1
             timestamp = now_iso()
             profile.updated_at = timestamp
             sql_values = self._job_profile_sql_values(profile)
-            cursor = connection.execute(
-                """
-                UPDATE screening_profiles
-                SET job_title = ?, department = ?, hiring_manager = ?, location = ?,
-                    employment_type = ?, experience_requirement = ?,
-                    education_requirement = ?, target_hires = ?, recruitment_deadline = ?,
-                    priority = ?, status = ?, jd_text = ?, prompt_text = ?, prompt_source = ?,
-                    must_have_json = ?, nice_to_have_json = ?, risk_flags_json = ?,
-                    exclusions_json = ?, interview_checks_json = ?, evidence_policy_json = ?,
-                    version = ?, parent_profile_id = ?, updated_at = ?
-                WHERE id = ? AND version = ?
-                """,
-                (*sql_values, profile.version, profile.parent_profile_id, timestamp, profile_id, expected_version),
-            )
+            if expected_version is None:
+                cursor = connection.execute(
+                    """
+                    UPDATE screening_profiles
+                    SET job_title = ?, department = ?, hiring_manager = ?, location = ?,
+                        employment_type = ?, experience_requirement = ?,
+                        education_requirement = ?, target_hires = ?, recruitment_deadline = ?,
+                        priority = ?, status = ?, jd_text = ?, prompt_text = ?, prompt_source = ?,
+                        must_have_json = ?, nice_to_have_json = ?, risk_flags_json = ?,
+                        exclusions_json = ?, interview_checks_json = ?, evidence_policy_json = ?,
+                        version = ?, parent_profile_id = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (*sql_values, profile.version, profile.parent_profile_id, timestamp, profile_id),
+                )
+            else:
+                cursor = connection.execute(
+                    """
+                    UPDATE screening_profiles
+                    SET job_title = ?, department = ?, hiring_manager = ?, location = ?,
+                        employment_type = ?, experience_requirement = ?,
+                        education_requirement = ?, target_hires = ?, recruitment_deadline = ?,
+                        priority = ?, status = ?, jd_text = ?, prompt_text = ?, prompt_source = ?,
+                        must_have_json = ?, nice_to_have_json = ?, risk_flags_json = ?,
+                        exclusions_json = ?, interview_checks_json = ?, evidence_policy_json = ?,
+                        version = ?, parent_profile_id = ?, updated_at = ?
+                    WHERE id = ? AND version = ?
+                    """,
+                    (*sql_values, profile.version, profile.parent_profile_id, timestamp, profile_id, expected_version),
+                )
             if cursor.rowcount != 1:
                 connection.rollback()
                 raise JobProfileVersionConflictError("岗位档案已被更新，请刷新后再操作。")
@@ -2355,24 +2368,10 @@ class CandidateRepository:
                 ),
             )
             if status == "closed":
-                connection.execute(
-                    """
-                    UPDATE recruitment_tasks
-                    SET status = ?, current_step = ?, latest_message = ?, updated_at = ?
-                    WHERE role_id = ? AND status IN (?, ?, ?, ?, ?)
-                    """,
-                    (
-                        "cancelled",
-                        "已取消",
-                        "岗位已关闭，招聘任务自动取消。",
-                        timestamp,
-                        profile_id,
-                        "ready",
-                        "running",
-                        "waiting_user",
-                        "paused",
-                        "failed",
-                    ),
+                self._cancel_non_terminal_recruitment_tasks_for_closed_role(
+                    connection,
+                    profile_id,
+                    timestamp,
                 )
             connection.commit()
             return profile
@@ -2380,6 +2379,32 @@ class CandidateRepository:
             if connection.in_transaction:
                 connection.rollback()
             raise
+
+    @staticmethod
+    def _cancel_non_terminal_recruitment_tasks_for_closed_role(
+        connection: sqlite3.Connection,
+        profile_id: int,
+        timestamp: str,
+    ) -> None:
+        connection.execute(
+            """
+            UPDATE recruitment_tasks
+            SET status = ?, current_step = ?, latest_message = ?, updated_at = ?
+            WHERE role_id = ? AND status IN (?, ?, ?, ?, ?)
+            """,
+            (
+                "cancelled",
+                "已取消",
+                "岗位已关闭，招聘任务自动取消。",
+                timestamp,
+                profile_id,
+                "ready",
+                "running",
+                "waiting_user",
+                "paused",
+                "failed",
+            ),
+        )
 
     @staticmethod
     def _validate_job_profile_status_transition(current: str, target: str) -> None:

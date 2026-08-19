@@ -28,6 +28,13 @@ const status = {
 const response = (body: unknown) =>
   Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) } as Response);
 
+const errorResponse = (message: string, statusCode = 409) =>
+  Promise.resolve({
+    ok: false,
+    status: statusCode,
+    json: () => Promise.resolve({ error: { code: "request_failed", message } }),
+  } as Response);
+
 afterEach(() => vi.restoreAllMocks());
 
 function DrawerHarness({
@@ -436,8 +443,8 @@ describe("workbench candidate intake views", () => {
                 priority: "high",
                 status: "draft",
                 version: 1,
-                updated_at: "2026-08-19T09:00:00",
-                created_at: "2026-08-19T09:00:00",
+                updated_at: "2026-08-18T11:00:00",
+                created_at: "2026-08-18T09:00:00",
                 experience_requirement: "3 年以上",
                 education_requirement: "本科",
                 recruitment_deadline: "2026-10-01",
@@ -508,9 +515,20 @@ describe("workbench candidate intake views", () => {
     expect(screen.getAllByText("v2").length).toBeGreaterThanOrEqual(1);
     const latestVersionCard = document.querySelector(".version-card") as HTMLElement;
     expect(latestVersionCard).toBeTruthy();
-    await user.click(within(latestVersionCard).getByText("v2"));
+    await user.click(latestVersionCard.querySelector("summary") as HTMLElement);
+    expect(within(latestVersionCard).getByText("岗位 ID")).toBeInTheDocument();
+    expect(within(latestVersionCard).getByText("#7")).toBeInTheDocument();
+    expect(within(latestVersionCard).getByText("岗位版本")).toBeInTheDocument();
+    expect(within(latestVersionCard).getByText("岗位创建时间")).toBeInTheDocument();
+    expect(within(latestVersionCard).getByText("2026/8/19 09:00:00")).toBeInTheDocument();
+    expect(within(latestVersionCard).getByText("岗位更新时间")).toBeInTheDocument();
+    expect(within(latestVersionCard).getAllByText("2026/8/19 10:00:00").length).toBeGreaterThanOrEqual(1);
     expect(within(latestVersionCard).getByText("证据要求")).toBeInTheDocument();
     expect(within(latestVersionCard).getByText(/required/)).toBeInTheDocument();
+    const firstVersionCard = document.querySelectorAll(".version-card")[1] as HTMLElement;
+    await user.click(firstVersionCard.querySelector("summary") as HTMLElement);
+    expect(within(firstVersionCard).getByText("2026/8/18 09:00:00")).toBeInTheDocument();
+    expect(within(firstVersionCard).getByText("2026/8/18 11:00:00")).toBeInTheDocument();
 
     expect(screen.queryByRole("button", { name: /设为插件当前任务/ })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "启动" }));
@@ -519,6 +537,181 @@ describe("workbench candidate intake views", () => {
     const contextCall = fetchMock.mock.calls.find(([url, init]) => String(url).endsWith("/api/plugin-context") && init?.method === "PUT");
     expect(contextCall?.[1]?.body).toBe(JSON.stringify({ recruitment_task_id: 11 }));
     expect(fetchMock.mock.calls.map(([url]) => String(url)).join("|")).not.toContain("prompt_text");
+  });
+
+  it("keeps dangerous confirmation drawers open on failure and retries safely", async () => {
+    let closeAttempts = 0;
+    let cancelAttempts = 0;
+    let taskStatus = "running";
+    const fetchMock = vi.fn((input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/job-profiles") && !init?.method) {
+        return response({
+          rows: [{
+            id: 7,
+            job_title: "关闭测试岗位",
+            department: "投研",
+            location: "上海",
+            employment_type: "全职",
+            target_hires: 2,
+            priority: "high",
+            status: closeAttempts >= 2 ? "closed" : "active",
+            version: closeAttempts >= 2 ? 3 : 2,
+            updated_at: "2026-08-19T10:00:00",
+          }],
+        });
+      }
+      if (url.endsWith("/api/recruitment-tasks") && !init?.method) {
+        return response({
+          rows: [{
+            id: 11,
+            name: "待取消任务",
+            role_id: 7,
+            role_title: "关闭测试岗位",
+            profile_version: 2,
+            platform: "boss",
+            source_url: "https://www.zhipin.com/web/geek/recommend",
+            target_candidates: 20,
+            status: taskStatus,
+            current_step: taskStatus === "cancelled" ? "已取消" : "采集与筛选",
+            latest_message: "",
+            batch_count: 0,
+            candidate_count: 0,
+            run_count: 0,
+            export_count: 0,
+            created_at: "2026-08-19T09:00:00",
+            updated_at: "2026-08-19T09:00:00",
+          }],
+        });
+      }
+      if (url.endsWith("/api/plugin-context") && !init?.method) {
+        return response({ context: null });
+      }
+      if (url.endsWith("/api/job-profiles/7") && !url.endsWith("/versions")) {
+        return response({
+          id: 7,
+          job_title: "关闭测试岗位",
+          department: "投研",
+          hiring_manager: "招聘经理",
+          location: "上海",
+          employment_type: "全职",
+          target_hires: 2,
+          priority: "high",
+          status: closeAttempts >= 2 ? "closed" : "active",
+          version: closeAttempts >= 2 ? 3 : 2,
+          updated_at: "2026-08-19T10:00:00",
+          created_at: "2026-08-19T09:00:00",
+          experience_requirement: "",
+          education_requirement: "",
+          recruitment_deadline: "",
+          jd_text: "JD",
+          must_have: [],
+          nice_to_have: [],
+          risk_flags: [],
+          exclusions: [],
+          interview_checks: [],
+          evidence_policy: {},
+        });
+      }
+      if (url.endsWith("/api/job-profiles/7/versions")) {
+        return response({ rows: [] });
+      }
+      if (url.endsWith("/api/job-profiles/7/status") && init?.method === "POST") {
+        closeAttempts += 1;
+        if (closeAttempts === 1) {
+          return errorResponse("岗位关闭失败，请稍后重试。");
+        }
+        return response({
+          id: 7,
+          job_title: "关闭测试岗位",
+          department: "投研",
+          hiring_manager: "招聘经理",
+          location: "上海",
+          employment_type: "全职",
+          target_hires: 2,
+          priority: "high",
+          status: "closed",
+          version: 3,
+          updated_at: "2026-08-19T10:10:00",
+          created_at: "2026-08-19T09:00:00",
+          experience_requirement: "",
+          education_requirement: "",
+          recruitment_deadline: "",
+          jd_text: "JD",
+          must_have: [],
+          nice_to_have: [],
+          risk_flags: [],
+          exclusions: [],
+          interview_checks: [],
+          evidence_policy: {},
+        });
+      }
+      if (url.endsWith("/api/recruitment-tasks/11/status") && init?.method === "POST") {
+        cancelAttempts += 1;
+        if (cancelAttempts === 1) {
+          return errorResponse("招聘任务取消失败，请稍后重试。");
+        }
+        taskStatus = "cancelled";
+        return response({
+          id: 11,
+          name: "待取消任务",
+          role_id: 7,
+          role_title: "关闭测试岗位",
+          profile_version: 2,
+          platform: "boss",
+          source_url: "https://www.zhipin.com/web/geek/recommend",
+          target_candidates: 20,
+          status: "cancelled",
+          current_step: "已取消",
+          latest_message: "",
+          batch_count: 0,
+          candidate_count: 0,
+          run_count: 0,
+          export_count: 0,
+          created_at: "2026-08-19T09:00:00",
+          updated_at: "2026-08-19T10:10:00",
+        });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    render(<Workbench status={status} />);
+
+    await user.click(screen.getByRole("button", { name: "岗位" }));
+    await user.click(await screen.findByRole("button", { name: "查看" }));
+    await screen.findByRole("dialog", { name: "岗位档案详情" });
+    await user.click(screen.getByRole("button", { name: "关闭岗位" }));
+    const closeDialog = await screen.findByRole("dialog", { name: "确认关闭岗位" });
+    await user.click(within(closeDialog).getByRole("button", { name: "先不关闭" }));
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/api/job-profiles/7/status"))).toHaveLength(0);
+
+    await user.click(screen.getByRole("button", { name: "关闭岗位" }));
+    const failingCloseDialog = await screen.findByRole("dialog", { name: "确认关闭岗位" });
+    await user.click(within(failingCloseDialog).getByRole("button", { name: "确认关闭岗位" }));
+    expect(await within(failingCloseDialog).findByRole("alert")).toHaveTextContent("岗位关闭失败，请稍后重试。");
+    expect(screen.queryByText("岗位状态已更新。")).not.toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "确认关闭岗位" })).toBeInTheDocument();
+    await user.click(within(failingCloseDialog).getByRole("button", { name: "确认关闭岗位" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "确认关闭岗位" })).not.toBeInTheDocument());
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/api/job-profiles/7/status"))).toHaveLength(2);
+    expect(await screen.findByText("岗位状态已更新。")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "取消" }));
+    const cancelDialog = await screen.findByRole("dialog", { name: "确认取消招聘任务" });
+    await user.click(within(cancelDialog).getByRole("button", { name: "先不取消" }));
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/api/recruitment-tasks/11/status"))).toHaveLength(0);
+
+    await user.click(screen.getByRole("button", { name: "取消" }));
+    const failingCancelDialog = await screen.findByRole("dialog", { name: "确认取消招聘任务" });
+    await user.click(within(failingCancelDialog).getByRole("button", { name: "确认取消任务" }));
+    expect(await within(failingCancelDialog).findByRole("alert")).toHaveTextContent("招聘任务取消失败，请稍后重试。");
+    expect(screen.queryByText("任务状态已更新。")).not.toBeInTheDocument();
+    expect(screen.getByText("待取消任务")).toBeInTheDocument();
+    await user.click(within(failingCancelDialog).getByRole("button", { name: "确认取消任务" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "确认取消招聘任务" })).not.toBeInTheDocument());
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/api/recruitment-tasks/11/status"))).toHaveLength(2);
+    expect(await screen.findByText("任务状态已更新。")).toBeInTheDocument();
   });
 
   it("generates and copies a one-time plugin pairing code without exposing a token", async () => {
