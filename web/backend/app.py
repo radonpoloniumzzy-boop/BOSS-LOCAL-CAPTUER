@@ -285,14 +285,15 @@ def _project_recruitment_task(row: dict[str, object]) -> dict[str, object]:
 _STANDARD_RATINGS = ("UR", "SSR", "SR", "R", "N")
 _HEADER_ALIASES = {
     "candidate_id": {"candidate_id", "id"},
-    "name": {"name", "candidate_name", "candidate name", "candidate", "姓名", "候选人"},
-    "rating": {"rating", "grade", "评级", "等级"},
-    "track": {"track", "category", "方向", "定位"},
-    "reason": {"reason", "note", "rationale", "理由", "说明", "摘要", "评价"},
+    "name": {"name", "candidate_name", "candidate name", "candidate", "姓名", "候选人", "候选人姓名"},
+    "rating": {"rating", "current rating", "current_rating", "grade", "评级", "当前评级", "外部评级", "候选人评级", "等级", "当前等级"},
+    "track": {"track", "category", "direction", "方向", "推荐方向", "最值得看的方向", "适合方向", "定位"},
+    "reason": {"reason", "note", "rationale", "comment", "assessment", "判断", "理由", "说明", "摘要", "评价", "评语", "结论"},
     "batch_id": {"batch_id"},
     "source_platform": {"source_platform"},
     "source_job_title": {"source_job_title", "job_title"},
 }
+_IGNORED_EXTERNAL_HEADERS = {"排名", "序号", "编号", "rank", "no", "number", "#"}
 
 
 def _clean_external_cell(value: object) -> str:
@@ -308,13 +309,16 @@ def _clean_external_cell(value: object) -> str:
 
 
 def _normalize_external_header(value: object) -> str:
-    return _clean_external_cell(value).strip().lower().replace(" ", "_")
+    text = _clean_external_cell(value).strip().lower()
+    return re.sub(r"[\s_-]+", "_", text)
 
 
 def _canonical_external_field(header: object) -> str | None:
     normalized = _normalize_external_header(header)
+    if normalized in {_normalize_external_header(alias) for alias in _IGNORED_EXTERNAL_HEADERS}:
+        return None
     for field, aliases in _HEADER_ALIASES.items():
-        if normalized in {alias.lower().replace(" ", "_") for alias in aliases}:
+        if normalized in {_normalize_external_header(alias) for alias in aliases}:
             return field
     return None
 
@@ -322,7 +326,10 @@ def _canonical_external_field(header: object) -> str | None:
 def _is_markdown_separator_row(cells: list[str]) -> bool:
     if not cells:
         return False
-    return all(bool(re.fullmatch(r":?-{3,}:?", cell.strip())) for cell in cells if cell.strip())
+    non_empty = [cell.strip().replace(" ", "") for cell in cells if cell.strip()]
+    if not non_empty:
+        return False
+    return all(bool(re.fullmatch(r":?-{2,}:?", cell)) for cell in non_empty)
 
 
 def _split_markdown_row(line: str) -> list[str]:
@@ -405,7 +412,7 @@ def _parse_external_rating_rows(payload: ExternalRatingsImportRequest) -> list[d
     if not raw_rows:
         return []
     headers = [_canonical_external_field(cell) for cell in raw_rows[0]]
-    has_header = any(headers)
+    has_header = "name" in headers and "rating" in headers
     body = raw_rows[1:] if has_header else raw_rows
     rows: list[dict[str, object]] = []
     for line_number, raw in enumerate(body, start=2 if has_header else 1):

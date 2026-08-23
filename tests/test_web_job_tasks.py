@@ -809,11 +809,15 @@ class WebJobTaskFoundationTest(unittest.TestCase):
 
         text = "\n".join(
             [
-                "| 序号 | 姓名 | 评级 | 方向 | 理由 |",
-                "| --- | --- | --- | --- | --- |",
-                "| 1 | **测试甲** | 强SR | Alpha / 多因子 | 外部模型理由一 |",
-                "| 2 | __测试乙__ | SSR- / 强SR | Beta | 外部模型理由二 |",
-                "| 3 | 测试丙 | A+ | Gamma | 外部模型理由三 |",
+                "| 排名 | 候选人 | 当前评级 | 最值得看的方向 | 判断 |",
+                "| -- | ------- | -------------- | ----------- | ----- |",
+                "| 1 | **测试甲** | **SSR- / 强SR** | 高频 / ML量化 | 测试理由甲 |",
+                "| 2 | **测试乙** | **SSR- / 强SR** | Alpha / 多因子 | 测试理由乙 |",
+                "| 3 | **测试丙** | **强SR** | Alpha / 多因子 | 测试理由丙 |",
+                "| 4 | **测试丁** | **强SR** | 高频储备 | 测试理由丁 |",
+                "| 5 | **测试戊** | **强SR** | CTA | 测试理由戊 |",
+                "| 6 | **测试己** | **SR** | 策略研究 | 测试理由己 |",
+                "| 7 | **测试庚** | **SR** | 数据工程 | 测试理由庚 |",
             ]
         )
 
@@ -833,19 +837,31 @@ class WebJobTaskFoundationTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200, response.text)
         payload = response.json()
-        self.assertEqual(payload["received"], 3)
-        first, second, third = payload["rows"]
+        self.assertEqual(payload["received"], 7)
+        rows = payload["rows"]
+        self.assertEqual(sum(1 for row in rows if row["rating_status"] == "needs_confirmation"), 2)
+        self.assertEqual(sum(1 for row in rows if row["rating_status"] == "normalized"), 3)
+        self.assertEqual(sum(1 for row in rows if row["rating_status"] == "exact"), 2)
+        self.assertEqual(sum(1 for row in rows if row["rating_status"] == "invalid"), 0)
+        first, second, third = rows[:3]
         self.assertEqual(first["name"], "测试甲")
-        self.assertEqual(first["rating"], "SR")
-        self.assertEqual(first["original_rating"], "强SR")
-        self.assertEqual(first["rating_status"], "normalized")
-        self.assertEqual(first["track"], "Alpha / 多因子")
-        self.assertEqual(first["reason"], "外部模型理由一")
+        self.assertEqual(first["rating"], "")
+        self.assertEqual(first["original_rating"], "SSR- / 强SR")
+        self.assertEqual(first["rating_status"], "needs_confirmation")
+        self.assertEqual(first["track"], "高频 / ML量化")
+        self.assertEqual(first["reason"], "测试理由甲")
         self.assertEqual(second["name"], "测试乙")
         self.assertEqual(second["rating"], "")
         self.assertEqual(second["original_rating"], "SSR- / 强SR")
         self.assertEqual(second["rating_status"], "needs_confirmation")
-        self.assertEqual(third["rating_status"], "invalid")
+        self.assertEqual(second["track"], "Alpha / 多因子")
+        self.assertEqual(second["reason"], "测试理由乙")
+        self.assertEqual(third["rating"], "SR")
+        self.assertEqual(third["original_rating"], "强SR")
+        self.assertEqual(third["rating_status"], "normalized")
+        self.assertEqual(rows[5]["rating_status"], "exact")
+        self.assertEqual(rows[6]["rating_status"], "exact")
+        self.assertFalse(any(row["name"].startswith("--") or row["name"].startswith("---") for row in rows))
         self.assertNotIn("prompt_text", response.text)
         self.assertNotIn("provider", response.text)
         self.assertNotIn("raw_response", response.text)
@@ -860,6 +876,40 @@ class WebJobTaskFoundationTest(unittest.TestCase):
             db.close_thread_connection()
         self.assertEqual(after_runs, before_runs)
         self.assertEqual(after_results, before_results)
+
+    def test_external_rating_preview_ignores_unknown_columns_and_never_reclassifies_data_rows_as_header(self) -> None:
+        job = self._create_active_job()
+        task = self._start_task(self._create_task(job))
+
+        markdown = "\n".join(
+            [
+                "| 编号 | 候选人姓名 | 外部评级 | 未知列 | 推荐方向 | 评语 |",
+                "| :-- | ---: | :---: | --- | --- | --- |",
+                "| 1 | 测试辛 | SR | 可忽略 | 数据平台 | 理由里提到评级和方向但不是表头 |",
+            ]
+        )
+        response = self.client.post(
+            f"/api/recruitment-tasks/{task['id']}/external-ratings/preview",
+            json={"text": markdown},
+            headers=self.origin,
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["received"], 1)
+        row = response.json()["rows"][0]
+        self.assertEqual(row["name"], "测试辛")
+        self.assertEqual(row["rating"], "SR")
+        self.assertEqual(row["track"], "数据平台")
+        self.assertEqual(row["reason"], "理由里提到评级和方向但不是表头")
+
+        no_header = self.client.post(
+            f"/api/recruitment-tasks/{task['id']}/external-ratings/preview",
+            json={"text": "测试壬,SR,这行理由提到评级和方向"},
+            headers=self.origin,
+        )
+        self.assertEqual(no_header.status_code, 200, no_header.text)
+        self.assertEqual(no_header.json()["received"], 1)
+        self.assertEqual(no_header.json()["rows"][0]["name"], "测试壬")
+        self.assertEqual(no_header.json()["rows"][0]["rating"], "SR")
 
     def test_external_rating_preview_keeps_csv_tsv_and_modifier_compatibility(self) -> None:
         job = self._create_active_job()

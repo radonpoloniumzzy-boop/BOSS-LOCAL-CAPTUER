@@ -750,17 +750,17 @@ describe("workbench candidate intake views", () => {
       if (url.endsWith("/api/recruitment-tasks/11/external-ratings/preview") && init?.method === "POST") {
         return response({
           task_id: 11,
-          received: 3,
+          received: 7,
           rows: [
             {
               line: 3,
               candidate_id: "",
               name: "测试甲",
-              rating: "SR",
-              original_rating: "强SR",
-              rating_status: "normalized",
-              track: "Alpha",
-              reason: "外部模型理由一",
+              rating: "",
+              original_rating: "SSR- / 强SR",
+              rating_status: "needs_confirmation",
+              track: "高频 / ML量化",
+              reason: "测试理由甲",
               batch_id: "",
               source_platform: "",
               source_job_title: "",
@@ -772,8 +772,8 @@ describe("workbench candidate intake views", () => {
               rating: "",
               original_rating: "SSR- / 强SR",
               rating_status: "needs_confirmation",
-              track: "Beta",
-              reason: "外部模型理由二",
+              track: "Alpha / 多因子",
+              reason: "测试理由乙",
               batch_id: "",
               source_platform: "",
               source_job_title: "",
@@ -782,11 +782,63 @@ describe("workbench candidate intake views", () => {
               line: 5,
               candidate_id: "",
               name: "测试丙",
-              rating: "",
-              original_rating: "A+",
-              rating_status: "invalid",
-              track: "Gamma",
-              reason: "外部模型理由三",
+              rating: "SR",
+              original_rating: "强SR",
+              rating_status: "normalized",
+              track: "Alpha / 多因子",
+              reason: "测试理由丙",
+              batch_id: "",
+              source_platform: "",
+              source_job_title: "",
+            },
+            {
+              line: 6,
+              candidate_id: "",
+              name: "测试丁",
+              rating: "SR",
+              original_rating: "强SR",
+              rating_status: "normalized",
+              track: "高频储备",
+              reason: "测试理由丁",
+              batch_id: "",
+              source_platform: "",
+              source_job_title: "",
+            },
+            {
+              line: 7,
+              candidate_id: "",
+              name: "测试戊",
+              rating: "SR",
+              original_rating: "强SR",
+              rating_status: "normalized",
+              track: "CTA",
+              reason: "测试理由戊",
+              batch_id: "",
+              source_platform: "",
+              source_job_title: "",
+            },
+            {
+              line: 8,
+              candidate_id: "",
+              name: "测试己",
+              rating: "SR",
+              original_rating: "SR",
+              rating_status: "exact",
+              track: "策略研究",
+              reason: "测试理由己",
+              batch_id: "",
+              source_platform: "",
+              source_job_title: "",
+            },
+            {
+              line: 9,
+              candidate_id: "",
+              name: "测试庚",
+              rating: "SR",
+              original_rating: "SR",
+              rating_status: "exact",
+              track: "数据工程",
+              reason: "测试理由庚",
               batch_id: "",
               source_platform: "",
               source_job_title: "",
@@ -825,35 +877,37 @@ describe("workbench candidate intake views", () => {
     await screen.findByText("Boss 推荐流");
     await user.click(screen.getByRole("button", { name: "导入外部评级" }));
     const dialog = await screen.findByRole("dialog", { name: "导入外部评级" });
-    const pastedTable = "| 序号 | 姓名 | 评级 | 方向 | 理由 |\n| --- | --- | --- | --- | --- |\n| 1 | **测试甲** | 强SR | Alpha | 外部模型理由一 |\n| 2 | 测试乙 | SSR- / 强SR | Beta | 外部模型理由二 |\n| 3 | 测试丙 | A+ | Gamma | 外部模型理由三 |";
+    const pastedTable = "| 排名 | 候选人     | 当前评级           | 最值得看的方向     | 判断    |\n| -- | ------- | -------------- | ----------- | ----- |\n| 1  | **测试甲** | **SSR- / 强SR** | 高频 / ML量化   | 测试理由甲 |\n| 2  | **测试乙** | **SSR- / 强SR** | Alpha / 多因子 | 测试理由乙 |\n| 3  | **测试丙** | **强SR**        | Alpha / 多因子 | 测试理由丙 |\n| 4  | **测试丁** | **强SR**        | 高频储备        | 测试理由丁 |\n| 5  | **测试戊** | **强SR**        | CTA         | 测试理由戊 |\n| 6  | **测试己** | **SR**         | 策略研究        | 测试理由己 |\n| 7  | **测试庚** | **SR**         | 数据工程        | 测试理由庚 |";
     await user.click(within(dialog).getByLabelText("粘贴评级名单"));
     await user.paste(pastedTable);
-    expect(await within(dialog).findByText("解析 3 行")).toBeInTheDocument();
-    expect(within(dialog).getByText("可导入 1 行")).toBeInTheDocument();
+    expect(await within(dialog).findByText("解析 7 行")).toBeInTheDocument();
+    expect(within(dialog).getByText("可导入 5 行")).toBeInTheDocument();
     expect(within(dialog).getByText("格式待修正 2 行")).toBeInTheDocument();
-    expect(within(dialog).getByText("1SR")).toBeInTheDocument();
-    expect(within(dialog).getByText("已自动归一")).toBeInTheDocument();
-    expect(within(dialog).getByText("需要确认")).toBeInTheDocument();
-    expect(within(dialog).getByText("无法识别")).toBeInTheDocument();
-    expect(within(dialog).getByText("外部模型理由二")).toBeInTheDocument();
+    expect(within(dialog).getAllByText("1SR")).toHaveLength(5);
+    expect(within(dialog).getAllByText("已自动归一")).toHaveLength(3);
+    expect(within(dialog).getAllByText("需要确认")).toHaveLength(2);
+    expect(within(dialog).getAllByText("已识别")).toHaveLength(2);
+    expect(within(dialog).queryByText(/^-+$/)).not.toBeInTheDocument();
+    expect(within(dialog).getAllByText("Alpha / 多因子")).toHaveLength(2);
+    expect(within(dialog).getByText("测试理由乙")).toBeInTheDocument();
     expect(within(dialog).getByRole("button", { name: "确认导入外部评级" })).toBeDisabled();
 
     await user.selectOptions(within(dialog).getByLabelText("第 4 行标准评级"), "SSR");
-    await user.selectOptions(within(dialog).getByLabelText("第 5 行标准评级"), "N");
+    await user.selectOptions(within(dialog).getByLabelText("第 3 行标准评级"), "SR");
     expect(within(dialog).getByRole("button", { name: "确认导入外部评级" })).toBeEnabled();
 
     await user.click(within(dialog).getByRole("button", { name: "确认导入外部评级" }));
     expect(await within(dialog).findByRole("alert")).toHaveTextContent("外部评级导入失败，请稍后重试。");
     expect(within(dialog).getByLabelText("粘贴评级名单")).toHaveValue(pastedTable);
+    expect(within(dialog).getByLabelText("第 3 行标准评级")).toHaveValue("SR");
     expect(within(dialog).getByLabelText("第 4 行标准评级")).toHaveValue("SSR");
-    expect(within(dialog).getByLabelText("第 5 行标准评级")).toHaveValue("N");
     await user.click(within(dialog).getByRole("button", { name: "确认导入外部评级" }));
     expect(await within(dialog).findByRole("status")).toHaveTextContent("成功 1");
     expect(within(dialog).getByText("未匹配 1")).toBeInTheDocument();
     expect(within(dialog).getByText("无效 1")).toBeInTheDocument();
     const importCall = fetchMock.mock.calls.find(([url]) => String(url).endsWith("/api/recruitment-tasks/11/external-ratings/import"));
     expect(importCall?.[1]?.body).toContain("SSR- / 强SR");
-    expect(importCall?.[1]?.body).toContain("外部模型理由二");
+    expect(importCall?.[1]?.body).toContain("测试理由乙");
     expect(importCall?.[1]?.body).toContain("\"rating\":\"SSR\"");
     expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/api/recruitment-tasks/11/external-ratings/import"))).toHaveLength(2);
   });
