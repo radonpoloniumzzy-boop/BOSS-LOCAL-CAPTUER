@@ -1137,6 +1137,101 @@ class WebJobTaskFoundationTest(unittest.TestCase):
         self.assertEqual(conflict.status_code, 409, conflict.text)
         self.assertEqual(conflict.json()["error"]["code"], "job_profile_version_conflict")
 
+    def test_keyword_rules_no_op_save_is_stable_under_concurrency(self) -> None:
+        created = self.client.post(
+            "/api/job-profiles",
+            json={
+                **self._job_payload(),
+                "evidence_policy": {
+                    "keyword_rules": {
+                        "must": ["Python", "量化"],
+                        "plus": ["React"],
+                        "risk": ["外包"],
+                        "note": [],
+                    }
+                },
+            },
+            headers=self.origin,
+        )
+        self.assertEqual(created.status_code, 200, created.text)
+        active = self.client.post(
+            f"/api/job-profiles/{created.json()['id']}/status",
+            json={"status": "active", "expected_version": created.json()["version"]},
+            headers=self.origin,
+        )
+        self.assertEqual(active.status_code, 200, active.text)
+        job = active.json()
+        task = self._start_task(self._create_task(job))
+        db_path = self.data_dir / "boss_local_tool.db"
+        base_db = DatabaseManager(db_path)
+        base_db.initialize_existing()
+        base_repo = CandidateRepository(base_db)
+        try:
+            profile_before = base_repo.get_job_profile(int(job["id"]))
+            versions_before = base_repo.list_job_profile_versions(int(job["id"]))
+            task_before = base_repo.get_recruitment_task(int(task["id"]))
+            snapshot_rules = versions_before[0]["snapshot"]["evidence_policy"]["keyword_rules"]
+        finally:
+            base_db.close_thread_connection()
+
+        self.assertEqual(task_before["profile_version"], task["profile_version"])
+        self.assertEqual(snapshot_rules["must"], ["Python", "量化"])
+        rules = {"must": [" Python ", "python", "量化"], "plus": ["React"], "risk": ["外包"], "note": [""]}
+
+        for _attempt in range(20):
+            barrier = threading.Barrier(2)
+            results: list[dict[str, object]] = []
+            errors: list[str] = []
+            lock = threading.Lock()
+
+            def save_same_rules() -> None:
+                db = DatabaseManager(db_path)
+                db.initialize_existing()
+                repo = CandidateRepository(db)
+                try:
+                    barrier.wait(timeout=5)
+                    result = repo.set_task_keyword_rules(
+                        int(task["id"]),
+                        rules,
+                        expected_version=int(task["profile_version"]),
+                    )
+                    with lock:
+                        results.append(result)
+                except Exception as exc:  # noqa: BLE001 - records unstable failures such as database locked.
+                    with lock:
+                        errors.append(f"{exc.__class__.__name__}: {exc}")
+                finally:
+                    db.close_thread_connection()
+
+            threads = [threading.Thread(target=save_same_rules), threading.Thread(target=save_same_rules)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=10)
+            self.assertFalse(any(thread.is_alive() for thread in threads))
+            self.assertEqual(errors, [])
+            self.assertEqual(len(results), 2)
+            self.assertTrue(all(result["changed"] is False for result in results))
+            self.assertTrue(all(result["job_profile_version"] == task["profile_version"] for result in results))
+
+        final_db = DatabaseManager(db_path)
+        final_db.initialize_existing()
+        final_repo = CandidateRepository(final_db)
+        try:
+            profile_after = final_repo.get_job_profile(int(job["id"]))
+            versions_after = final_repo.list_job_profile_versions(int(job["id"]))
+            task_after = final_repo.get_recruitment_task(int(task["id"]))
+        finally:
+            final_db.close_thread_connection()
+
+        self.assertEqual(len(versions_after), len(versions_before))
+        self.assertEqual(task_after["profile_version"], task_before["profile_version"])
+        self.assertEqual(profile_after["updated_at"], profile_before["updated_at"])
+        self.assertEqual(
+            versions_after[0]["snapshot"]["evidence_policy"]["keyword_rules"],
+            snapshot_rules,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -4025,11 +4025,24 @@ function createKeywordHighlightDom() {
       <head></head>
       <body>
         <main id="feed">
-          <article class="candidate-card" data-name="class-token">
+          <article class="candidate-card" data-name="class-token" style="display:flex">
             <span class="boss-local-rating-badge">1SSR</span>
             <span class="name" data-source="class-value">Alice Python 外包 React class</span>
             <a class="profile-link" href="https://example.test/class">候选人详情</a>
             <button type="button">Python button</button>
+            <span hidden>hidden</span>
+            <span aria-hidden="true">hidden</span>
+            <span style="display:none">hidden</span>
+            <span style="visibility:hidden">hidden</span>
+          </article>
+          <article class="candidate-card unmatched-card" style="display:grid">
+            <span class="boss-local-rating-badge">1SSR</span>
+            <span class="name">Bob 普通候选人</span>
+            <button type="button">Python button</button>
+            <span hidden>class hidden</span>
+          </article>
+          <article class="candidate-card block-card" style="display:block">
+            <span class="name">Carol 未命中</span>
           </article>
         </main>
       </body>
@@ -4039,6 +4052,8 @@ function createKeywordHighlightDom() {
     document: dom.window.document,
     window: dom.window,
     card: dom.window.document.querySelector(".candidate-card"),
+    unmatchedCard: dom.window.document.querySelector(".unmatched-card"),
+    blockCard: dom.window.document.querySelector(".block-card"),
   };
 }
 
@@ -4079,7 +4094,7 @@ async function testPopupWebModeRefreshesKeywordHighlights() {
         json: async () => ({
           task_id: 11,
           keyword_rules: {
-            must: ["python", "class"],
+            must: ["python", "class", "SSR", "hidden"],
             plus: ["React"],
             risk: ["外包"],
             note: [],
@@ -4106,10 +4121,14 @@ async function testPopupWebModeRefreshesKeywordHighlights() {
   assert.strictEqual(dom.card.querySelectorAll(".boss-local-keyword-highlight.risk").length, 1);
   assert.strictEqual(dom.card.querySelector(".boss-local-keyword-badge").textContent, "风险 1");
   assert.strictEqual(dom.document.querySelectorAll(".boss-local-keyword-filterbar").length, 1);
+  assert.strictEqual(dom.unmatchedCard.querySelectorAll(".boss-local-keyword-highlight").length, 0);
+  assert.strictEqual(dom.unmatchedCard.getAttribute("data-boss-local-keyword-groups"), null);
+  assert.strictEqual(dom.blockCard.querySelectorAll(".boss-local-keyword-highlight").length, 0);
   assert.strictEqual(dom.card.getAttribute("data-name"), "class-token");
   assert.strictEqual(dom.card.querySelector(".name").getAttribute("data-source"), "class-value");
   assert.strictEqual(dom.card.querySelector(".profile-link").getAttribute("href"), "https://example.test/class");
   assert.strictEqual(dom.card.querySelector("button .boss-local-keyword-highlight"), null);
+  assert.strictEqual(dom.card.textContent.includes("hidden"), true);
 
   await popup.api.refreshKeywordHighlights(7, {
     apiBase: "http://127.0.0.1:17864",
@@ -4119,6 +4138,20 @@ async function testPopupWebModeRefreshesKeywordHighlights() {
   assert.strictEqual(dom.card.querySelectorAll(".boss-local-keyword-highlight").length, 4);
   assert.strictEqual(dom.document.querySelectorAll(".boss-local-keyword-filterbar").length, 1);
   assert.strictEqual(dom.card.querySelectorAll(".boss-local-keyword-badge").length, 2);
+  assert.strictEqual(dom.unmatchedCard.querySelectorAll(".boss-local-keyword-highlight").length, 0);
+
+  const mustButton = Array.from(dom.document.querySelectorAll(".boss-local-keyword-filterbar button"))
+    .find((button) => button.textContent === "有必须");
+  const allButton = Array.from(dom.document.querySelectorAll(".boss-local-keyword-filterbar button"))
+    .find((button) => button.textContent === "全部");
+  mustButton.click();
+  assert.strictEqual(dom.card.style.display, "flex");
+  assert.strictEqual(dom.unmatchedCard.style.display, "none");
+  assert.strictEqual(dom.blockCard.style.display, "none");
+  allButton.click();
+  assert.strictEqual(dom.card.style.display, "flex");
+  assert.strictEqual(dom.unmatchedCard.style.display, "grid");
+  assert.strictEqual(dom.blockCard.style.display, "block");
 
   dom.card.querySelector(".boss-local-rating-badge").textContent = "1SR";
   await popup.api.refreshKeywordHighlights(7, {
@@ -4133,6 +4166,9 @@ async function testPopupWebModeRefreshesKeywordHighlights() {
   assert.strictEqual(dom.document.querySelectorAll(".boss-local-keyword-filterbar").length, 0);
   assert.strictEqual(dom.card.querySelector(".boss-local-rating-badge").textContent, "1SR");
   assert.strictEqual(dom.card.getAttribute("data-name"), "class-token");
+  assert.strictEqual(dom.card.style.display, "flex");
+  assert.strictEqual(dom.unmatchedCard.style.display, "grid");
+  assert.strictEqual(dom.blockCard.style.display, "block");
 }
 
 async function testPopupKeywordHighlightsClearOnFailureAndDesktopMode() {
@@ -4168,6 +4204,12 @@ async function testPopupKeywordHighlightsClearOnFailureAndDesktopMode() {
   assert.strictEqual(executeCount, 1);
   assert.strictEqual(dom.card.querySelectorAll(".boss-local-keyword-highlight").length, 2);
   assert.strictEqual(dom.card.querySelector(".boss-local-rating-badge").textContent, "1SSR");
+  const riskButton = Array.from(dom.document.querySelectorAll(".boss-local-keyword-filterbar button"))
+    .find((button) => button.textContent === "有风险");
+  riskButton.click();
+  assert.strictEqual(dom.card.style.display, "flex");
+  assert.strictEqual(dom.unmatchedCard.style.display, "none");
+  assert.strictEqual(dom.blockCard.style.display, "none");
 
   failFetch = true;
   await popup.api.refreshKeywordHighlights(7, {
@@ -4178,15 +4220,30 @@ async function testPopupKeywordHighlightsClearOnFailureAndDesktopMode() {
   assert.strictEqual(fetchCount, 2);
   assert.strictEqual(dom.card.querySelectorAll(".boss-local-keyword-highlight").length, 0);
   assert.strictEqual(dom.card.querySelector(".boss-local-rating-badge").textContent, "1SSR");
+  assert.strictEqual(dom.card.style.display, "flex");
+  assert.strictEqual(dom.unmatchedCard.style.display, "grid");
+  assert.strictEqual(dom.blockCard.style.display, "block");
 
+  failFetch = false;
+  await popup.api.refreshKeywordHighlights(7, {
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "web-token",
+    connectionMode: "web",
+  });
+  const restoredRiskButton = Array.from(dom.document.querySelectorAll(".boss-local-keyword-filterbar button"))
+    .find((button) => button.textContent === "有风险");
+  restoredRiskButton.click();
   await popup.api.refreshKeywordHighlights(7, {
     apiBase: "http://127.0.0.1:19001",
     apiToken: "desktop-token",
     connectionMode: "desktop",
   });
-  assert.strictEqual(fetchCount, 2);
+  assert.strictEqual(fetchCount, 3);
   assert.strictEqual(dom.card.querySelectorAll(".boss-local-keyword-highlight").length, 0);
   assert.strictEqual(dom.card.querySelector(".boss-local-rating-badge").textContent, "1SSR");
+  assert.strictEqual(dom.card.style.display, "flex");
+  assert.strictEqual(dom.unmatchedCard.style.display, "grid");
+  assert.strictEqual(dom.blockCard.style.display, "block");
 }
 
 async function main() {

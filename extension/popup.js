@@ -711,6 +711,22 @@ async function clearKeywordHighlights(tabId) {
     await chrome.scripting.executeScript({
       target: { tabId, allFrames: true },
       func: () => {
+        const displayStore = globalThis.__bossLocalKeywordDisplayStore || new WeakMap();
+        globalThis.__bossLocalKeywordDisplayStore = displayStore;
+        const candidateSelectors = [
+          ".candidate-card-wrap",
+          ".candidate-card",
+          ".geek-card",
+          "[data-testid='candidate-card']",
+          "[class*='card'][class*='candidate']",
+          "[data-boss-local-keyword-display-tracked]",
+        ];
+        const restoreDisplay = (card) => {
+          if (!card || card.nodeType !== 1) return;
+          card.style.display = displayStore.has(card) ? displayStore.get(card) : "";
+          card.removeAttribute("data-boss-local-keyword-groups");
+          card.removeAttribute("data-boss-local-keyword-display-tracked");
+        };
         document.querySelectorAll(".boss-local-keyword-filterbar").forEach((node) => node.remove());
         document.querySelectorAll(".boss-local-keyword-badge").forEach((node) => node.remove());
         document.querySelectorAll(".boss-local-keyword-highlight").forEach((node) => {
@@ -718,10 +734,7 @@ async function clearKeywordHighlights(tabId) {
           node.replaceWith(text);
           text.parentElement?.normalize?.();
         });
-        document.querySelectorAll("[data-boss-local-keyword-groups]").forEach((card) => {
-          card.removeAttribute("data-boss-local-keyword-groups");
-          card.style.display = "";
-        });
+        document.querySelectorAll(candidateSelectors.join(",")).forEach(restoreDisplay);
       },
     });
   } catch (_error) {}
@@ -759,6 +772,15 @@ async function applyKeywordHighlights(tabId, keywordRules) {
           "[class*='card'][class*='candidate']",
         ];
         const cards = Array.from(document.querySelectorAll(candidateSelectors.join(",")));
+        const displayStore = globalThis.__bossLocalKeywordDisplayStore || new WeakMap();
+        globalThis.__bossLocalKeywordDisplayStore = displayStore;
+        const rememberDisplay = (card) => {
+          if (!displayStore.has(card)) displayStore.set(card, card.style.display || "");
+          card.setAttribute("data-boss-local-keyword-display-tracked", "1");
+        };
+        const restoreDisplay = (card) => {
+          card.style.display = displayStore.has(card) ? displayStore.get(card) : "";
+        };
         const clearExisting = () => {
           document.querySelectorAll(".boss-local-keyword-filterbar").forEach((node) => node.remove());
           document.querySelectorAll(".boss-local-keyword-badge").forEach((node) => node.remove());
@@ -768,8 +790,9 @@ async function applyKeywordHighlights(tabId, keywordRules) {
             text.parentElement?.normalize?.();
           });
           cards.forEach((card) => {
+            rememberDisplay(card);
             card.removeAttribute("data-boss-local-keyword-groups");
-            card.style.display = "";
+            restoreDisplay(card);
           });
         };
         const rulesByGroup = normalizeRules(rules);
@@ -782,7 +805,7 @@ async function applyKeywordHighlights(tabId, keywordRules) {
           style.textContent = ".boss-local-keyword-badge{display:inline-flex;align-items:center;margin-right:6px;padding:2px 7px;border-radius:999px;font-size:12px;font-weight:700;line-height:1.4;border:1px solid #bfdbfe;background:#eff6ff;color:#1d4ed8}.boss-local-keyword-danger-badge{border-color:#fed7aa;background:#fff7ed;color:#c2410c}.boss-local-keyword-highlight{border-radius:4px;padding:0 2px;background:#e0f2fe;color:#0f172a}.boss-local-keyword-highlight.must{background:#dbeafe}.boss-local-keyword-highlight.plus{background:#dcfce7}.boss-local-keyword-highlight.risk{background:#ffedd5;color:#9a3412}.boss-local-keyword-highlight.note{background:#f1f5f9}.boss-local-keyword-filterbar{position:sticky;top:0;z-index:20;display:flex;flex-wrap:wrap;gap:6px;margin:8px 0;padding:8px;border:1px solid #dbe3ef;border-radius:10px;background:#fff}.boss-local-keyword-filterbar button{border:1px solid #dbe3ef;border-radius:999px;background:#f8fafc;color:#334155;padding:3px 9px;font-size:12px;cursor:pointer}";
           document.head.appendChild(style);
         }
-        const skipTags = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "INPUT", "TEXTAREA", "SELECT", "BUTTON"]);
+        const skipTags = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "INPUT", "TEXTAREA", "SELECT", "OPTION", "BUTTON"]);
         const skipClasses = [
           "boss-local-rating-badge",
           "boss-local-keyword-highlight",
@@ -792,6 +815,9 @@ async function applyKeywordHighlights(tabId, keywordRules) {
         const shouldSkipElement = (element) => {
           if (!element || element.nodeType !== 1) return false;
           if (skipTags.has(element.tagName)) return true;
+          if (element.hidden || element.getAttribute?.("hidden") !== null || element.getAttribute?.("aria-hidden") === "true") {
+            return true;
+          }
           if (skipClasses.some((className) => element.classList?.contains(className) || element.closest?.(`.${className}`))) {
             return true;
           }
@@ -865,7 +891,12 @@ async function applyKeywordHighlights(tabId, keywordRules) {
             const hitGroups = String(card.getAttribute("data-boss-local-keyword-groups") || "").split(",").filter(Boolean);
             const matched = hitGroups.length > 0;
             const visible = filter === "all" || (filter === "unmatched" && !matched) || hitGroups.includes(filter);
-            card.style.display = visible ? "" : "none";
+            if (visible) {
+              restoreDisplay(card);
+            } else {
+              rememberDisplay(card);
+              card.style.display = "none";
+            }
           }
         };
         const firstParent = cards[0]?.parentElement;
@@ -882,8 +913,9 @@ async function applyKeywordHighlights(tabId, keywordRules) {
           firstParent.insertBefore(bar, cards[0]);
         }
         for (const card of cards) {
-          const text = card.innerText || card.textContent || "";
-          const lowerText = text.toLocaleLowerCase();
+          rememberDisplay(card);
+          const textNodes = collectTextNodes(card);
+          const lowerText = textNodes.map((node) => String(node.nodeValue || "")).join("\n").toLocaleLowerCase();
           const hitGroups = [];
           const hitCount = { total: 0, risk: 0 };
           for (const group of groups) {
@@ -895,7 +927,7 @@ async function applyKeywordHighlights(tabId, keywordRules) {
           }
           if (!hitGroups.length) continue;
           card.setAttribute("data-boss-local-keyword-groups", hitGroups.join(","));
-          collectTextNodes(card).forEach(highlightTextNode);
+          textNodes.forEach(highlightTextNode);
           const badgeTarget = card.querySelector(".name, .geek-name, .candidate-name, [class*='name']") || card;
           const summary = document.createElement("span");
           summary.className = "boss-local-keyword-badge";
