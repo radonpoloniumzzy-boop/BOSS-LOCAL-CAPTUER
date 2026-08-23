@@ -365,10 +365,9 @@ function mergeRemoteFrameResults(frameResults) {
     roundsCompleted = Math.max(roundsCompleted, Number(result.meta?.rounds_completed || 0));
     stopRequested = stopRequested || Boolean(result.meta?.stop_requested);
     for (const card of cards) {
-      cardsByKey.set(
-        card.platform_uid || card.detail_url || card.raw_card_text || JSON.stringify(card),
-        card,
-      );
+      if (!cardsByKey.has(buildRemoteCardKey(card))) {
+        cardsByKey.set(buildRemoteCardKey(card), card);
+      }
     }
     debugLines.push(
       [result.frameUrl || frameResult.frameId || "frame", result.debug || "", `cards=${cards.length}`]
@@ -385,6 +384,21 @@ function mergeRemoteFrameResults(frameResults) {
     platform: platforms.size === 1 ? Array.from(platforms)[0] : "",
     debugSummary: debugLines.join(" || "),
   };
+}
+
+function buildRemoteCardKey(card) {
+  if (card?.platform_uid) {
+    return `identity:${card.platform_uid}`;
+  }
+  const fingerprint = [
+    card?.source_candidate_id,
+    card?.name,
+    card?.expected_salary,
+    card?.work_experience_text,
+    card?.education_text,
+    card?.raw_card_text,
+  ].map((value) => String(value || "").trim().toLowerCase()).filter(Boolean).join("||");
+  return `fingerprint:${fingerprint || JSON.stringify(card)}`;
 }
 
 async function importRemoteCards(settings, sourceUrl, merged, automationRequested) {

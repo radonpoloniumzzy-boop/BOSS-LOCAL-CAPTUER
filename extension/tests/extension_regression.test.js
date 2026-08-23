@@ -531,6 +531,36 @@ function loadCollectorForTest() {
   return context.BossLocalCollectorTest;
 }
 
+function loadCollectorForDom(dom, href = "https://www.zhipin.com/web/geek/recommend") {
+  const context = {
+    HTMLElement: dom.window.HTMLElement,
+    HTMLAnchorElement: dom.window.HTMLAnchorElement,
+    KeyboardEvent: dom.window.KeyboardEvent,
+    NodeFilter: dom.window.NodeFilter,
+    URL,
+    document: dom.window.document,
+    window: dom.window,
+    globalThis: {},
+    location: new URL(href),
+    getComputedStyle: dom.window.getComputedStyle.bind(dom.window),
+    setTimeout,
+    clearTimeout,
+    Date,
+    __bossLocalCollectorTestMode: true,
+  };
+  context.globalThis = context;
+  vm.runInNewContext(fs.readFileSync(path.join(EXTENSION_DIR, "collector.js"), "utf8"), context, {
+    filename: "collector.js",
+  });
+  return context.BossLocalCollectorTest;
+}
+
+function giveCardsLayout(dom) {
+  for (const node of dom.window.document.querySelectorAll(".candidate-card, .resume-card, .ad-card, .filter-card")) {
+    node.getBoundingClientRect = () => ({ width: 720, height: 180, top: 0, left: 0, right: 720, bottom: 180 });
+  }
+}
+
 async function testDownloadEndpointValidation() {
   const { api } = loadServiceWorker();
   const downloadUrl = "https://www.zhipin.com/wflow/zpgeek/download/preview4boss/abc123?d=1&id=xyz";
@@ -2692,6 +2722,197 @@ function testCollectorDoesNotPromoteGenericDataIdToPlatformUid() {
   assert.strictEqual(second.source_candidate_id, "same-data-id");
 }
 
+async function testCollectorAcceptsBossAndLiepinStableCardsOnly() {
+  const bossDom = new JSDOM(`
+    <main>
+      <article class="candidate-card" data-geek-id="boss-alpha">
+        <strong class="name">测试甲</strong>
+        <span class="salary">30K-45K</span>
+        <span class="experience">5年经验</span>
+        <span class="education">本科</span>
+        <p class="summary">高频交易系统经验</p>
+        <a href="/geek/detail/boss-alpha">详情</a>
+        <button>打招呼</button>
+      </article>
+      <article class="ad-card candidate-card">
+        <strong>广告位</strong>
+        <p>企业服务 首页 导航 筛选</p>
+      </article>
+      <article class="candidate-card" data-geek-id="hidden-alpha" style="display:none">
+        <strong class="name">隐藏候选人</strong>
+        <span class="salary">30K-45K</span>
+        <span class="experience">5年经验</span>
+        <span class="education">本科</span>
+        <button>打招呼</button>
+      </article>
+    </main>
+  `, { url: "https://www.zhipin.com/web/geek/recommend" });
+  giveCardsLayout(bossDom);
+  const bossCollector = loadCollectorForDom(bossDom);
+  const boss = bossCollector.platforms.find((platform) => platform.id === "boss");
+  const bossResult = await bossCollector.collectCards(boss, false, {});
+
+  assert.strictEqual(bossResult.cards.length, 1);
+  assert.strictEqual(bossResult.cards[0].name, "测试甲");
+  assert.strictEqual(bossResult.cards[0].platform_uid, "boss:boss-alpha");
+  assert.strictEqual(bossResult.cards[0].source_candidate_id, "boss-alpha");
+  assert(!bossResult.cards[0].raw_card_text.includes("打招呼"));
+  assert(bossResult.diagnostics.hidden >= 1);
+  assert(bossResult.diagnostics.missing_name >= 1 || bossResult.diagnostics.missing_candidate_structure >= 1);
+
+  const liepinDom = new JSDOM(`
+    <main>
+      <article class="resume-card" data-resume-id="lp-101">
+        <strong class="resume-name">测试乙</strong>
+        <span class="salary">40K-60K</span>
+        <span class="work-exp">8年经验</span>
+        <span class="degree">硕士</span>
+        <p class="summary">当前职位 量化研究员，求职状态开放</p>
+        <a href="/candidate/lp-101">查看简历</a>
+      </article>
+    </main>
+  `, { url: "https://lpt.liepin.com/recommend" });
+  giveCardsLayout(liepinDom);
+  const liepinCollector = loadCollectorForDom(liepinDom, "https://lpt.liepin.com/recommend");
+  const liepin = liepinCollector.platforms.find((platform) => platform.id === "liepin");
+  const liepinResult = await liepinCollector.collectCards(liepin, false, {});
+
+  assert.strictEqual(liepinResult.cards.length, 1);
+  assert.strictEqual(liepinResult.cards[0].name, "测试乙");
+  assert.strictEqual(liepinResult.cards[0].platform_uid, "liepin:lp-101");
+}
+
+async function testCollectorDedupesByStableUidButKeepsSameNameDifferentUid() {
+  const dom = new JSDOM(`
+    <main>
+      <article class="candidate-card" data-geek-id="same-uid">
+        <strong class="name">测试甲</strong>
+        <span class="salary">30K-45K</span>
+        <span class="experience">5年经验</span>
+        <span class="education">本科</span>
+        <p>Alpha</p>
+        <button>打招呼</button>
+      </article>
+      <article class="candidate-card" data-geek-id="same-uid">
+        <strong class="name">测试甲</strong>
+        <span class="salary">30K-45K</span>
+        <span class="experience">5年经验</span>
+        <span class="education">本科</span>
+        <p>Alpha duplicated</p>
+        <button>打招呼</button>
+      </article>
+      <article class="candidate-card" data-geek-id="unique-uid">
+        <strong class="name">测试甲</strong>
+        <span class="salary">32K-50K</span>
+        <span class="experience">6年经验</span>
+        <span class="education">硕士</span>
+        <p>Beta</p>
+        <button>打招呼</button>
+      </article>
+      <article class="candidate-card" data-id="generic-only">
+        <strong class="name">测试丙</strong>
+        <span class="salary">25K-35K</span>
+        <span class="experience">4年经验</span>
+        <span class="education">本科</span>
+        <p>无稳定 UID</p>
+        <button>打招呼</button>
+      </article>
+    </main>
+  `, { url: "https://www.zhipin.com/web/geek/recommend" });
+  giveCardsLayout(dom);
+  const collector = loadCollectorForDom(dom);
+  const boss = collector.platforms.find((platform) => platform.id === "boss");
+  const result = await collector.collectCards(boss, false, {});
+
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(result.cards.map((card) => card.platform_uid))), ["boss:same-uid", "boss:unique-uid", ""]);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(result.cards.map((card) => card.name))), ["测试甲", "测试甲", "测试丙"]);
+  assert.strictEqual(result.diagnostics.duplicate_identity, 1);
+  assert.strictEqual(result.diagnostics.missing_stable_identity, 1);
+}
+
+async function testCollectorRawCardTextIgnoresPluginBadgesAndKeywordMarkup() {
+  const dom = new JSDOM(`
+    <main>
+      <article class="candidate-card" data-geek-id="clean-uid">
+        <span class="boss-local-rating-badge">1SSR</span>
+        <strong class="name">测试丁</strong>
+        <span class="salary">35K-55K</span>
+        <span class="experience">7年经验</span>
+        <span class="education">硕士</span>
+        <p class="summary">熟悉<span class="boss-local-keyword-highlight must">Python</span>与交易系统</p>
+        <span class="boss-local-keyword-badge">关键词 3</span>
+        <div class="boss-local-keyword-filterbar"><button>风险 1</button></div>
+        <button>打招呼</button>
+      </article>
+    </main>
+  `, { url: "https://www.zhipin.com/web/geek/recommend" });
+  giveCardsLayout(dom);
+  const collector = loadCollectorForDom(dom);
+  const boss = collector.platforms.find((platform) => platform.id === "boss");
+  const payload = collector.extractCardPayload(dom.window.document.querySelector(".candidate-card"), boss);
+
+  assert.strictEqual(payload.platform_uid, "boss:clean-uid");
+  assert(payload.raw_card_text.includes("测试丁"));
+  assert(payload.raw_card_text.includes("Python"));
+  assert(!payload.raw_card_text.includes("1SSR"));
+  assert(!payload.raw_card_text.includes("关键词 3"));
+  assert(!payload.raw_card_text.includes("风险 1"));
+  assert(!payload.raw_card_text.includes("打招呼"));
+}
+
+async function testCollectorIgnoresDetachedNodesAndUsesFreshDomSnapshots() {
+  const dom = new JSDOM(`
+    <main>
+      <article class="candidate-card" data-geek-id="page-a">
+        <strong class="name">页面甲</strong>
+        <span class="salary">30K-45K</span>
+        <span class="experience">5年经验</span>
+        <span class="education">本科</span>
+        <p>第一页候选人</p>
+        <button>打招呼</button>
+      </article>
+    </main>
+  `, { url: "https://www.zhipin.com/web/geek/recommend" });
+  giveCardsLayout(dom);
+  const collector = loadCollectorForDom(dom);
+  const boss = collector.platforms.find((platform) => platform.id === "boss");
+  const first = await collector.collectCards(boss, false, {});
+  assert.strictEqual(first.cards.length, 1);
+  assert.strictEqual(first.cards[0].platform_uid, "boss:page-a");
+
+  const staleNode = dom.window.document.querySelector(".candidate-card");
+  staleNode.remove();
+  assert.strictEqual(collector.extractCardPayload(staleNode, boss).platform_uid, "boss:page-a");
+
+  dom.window.document.querySelector("main").innerHTML = `
+    <article class="candidate-card" data-geek-id="page-b">
+      <strong class="name">页面乙</strong>
+      <span class="salary">35K-55K</span>
+      <span class="experience">6年经验</span>
+      <span class="education">硕士</span>
+      <p>第二页候选人</p>
+      <button>打招呼</button>
+    </article>
+  `;
+  giveCardsLayout(dom);
+  const second = await collector.collectCards(boss, false, {});
+  assert.strictEqual(second.cards.length, 1);
+  assert.strictEqual(second.cards[0].platform_uid, "boss:page-b");
+  assert.strictEqual(second.cards[0].name, "页面乙");
+  assert(!second.cards.some((card) => card.platform_uid === "boss:page-a"));
+
+  const reused = dom.window.document.querySelector(".candidate-card");
+  reused.setAttribute("data-geek-id", "page-c");
+  reused.querySelector(".name").textContent = "页面丙";
+  reused.querySelector(".salary").textContent = "40K-60K";
+  reused.querySelector(".experience").textContent = "7年经验";
+  reused.querySelector(".education").textContent = "博士";
+  const third = await collector.collectCards(boss, false, {});
+  assert.strictEqual(third.cards.length, 1);
+  assert.strictEqual(third.cards[0].platform_uid, "boss:page-c");
+  assert.strictEqual(third.cards[0].name, "页面丙");
+}
+
 async function testWebIntakeStatusMatrixFollowsServerStatus() {
   const popup = createPopupTestContext({ apiBase: "http://127.0.0.1:17864", apiToken: "web-token" });
   const settings = { apiBase: "http://127.0.0.1:17864", apiToken: "web-token", jobTitle: "Boss ????" };
@@ -4334,6 +4555,10 @@ async function main() {
   await testDesktopModeOpenWorkbenchShowsReadableChinesePrompt();
   await testConnectionModeKeepsWebAndDesktopStateIsolated();
   testCollectorDoesNotPromoteGenericDataIdToPlatformUid();
+  await testCollectorAcceptsBossAndLiepinStableCardsOnly();
+  await testCollectorDedupesByStableUidButKeepsSameNameDifferentUid();
+  await testCollectorRawCardTextIgnoresPluginBadgesAndKeywordMarkup();
+  await testCollectorIgnoresDetachedNodesAndUsesFreshDomSnapshots();
   await testWebIntakeStatusMatrixFollowsServerStatus();
   await testPopupWebModeAutoShowsDesktopOnlyBoundary();
   await testPopupReopenRestoresWebBatchMarkdownExport();

@@ -594,6 +594,7 @@ async function runCollection(autoScroll, options = {}) {
         "页面中没有识别到候选人卡片。",
         `扫描 frame: ${merged.framesSeen}`,
         `命中 frame: ${merged.framesWithCards}`,
+        ...formatCaptureDiagnosticLines(merged.diagnostics),
         `调试信息: ${merged.debugSummary || "-"}`,
       ].join("\n"),
     );
@@ -616,6 +617,7 @@ async function runCollection(autoScroll, options = {}) {
           `本地去重卡片: ${merged.cards.length}`,
           `来源平台: ${platform.label}`,
           `命中 frame: ${merged.framesWithCards}/${merged.framesSeen}`,
+          ...formatCaptureDiagnosticLines(merged.diagnostics),
           `网页批次: ${resultStats.batch_id ?? "-"}`,
           `接收数: ${resultStats.received_count ?? 0}`,
           `新增数: ${resultStats.inserted_candidates ?? 0}`,
@@ -643,6 +645,7 @@ async function runCollection(autoScroll, options = {}) {
         `本地去重卡片: ${merged.cards.length}`,
         `来源平台: ${platform.label}`,
         `命中 frame: ${merged.framesWithCards}/${merged.framesSeen}`,
+        ...formatCaptureDiagnosticLines(merged.diagnostics),
         `导入批次: ${imported.batch_id ?? "-"}`,
         `解析卡片: ${imported.parsed_cards ?? 0}`,
         `写入批次快照: ${imported.total_batch_items ?? 0}`,
@@ -1348,6 +1351,7 @@ function mergeFrameResults(frameResults) {
   const cardsByKey = new Map();
   const debugLines = [];
   const platforms = new Set();
+  const diagnostics = createCaptureDiagnostics();
   let framesSeen = 0;
   let framesWithCards = 0;
   let maxRoundsCompleted = 0;
@@ -1365,9 +1369,15 @@ function mergeFrameResults(frameResults) {
     if (result.meta?.platform) {
       platforms.add(String(result.meta.platform));
     }
+    mergeCaptureDiagnostics(diagnostics, result.meta?.diagnostics);
     maxRoundsCompleted = Math.max(maxRoundsCompleted, Number(result.meta?.rounds_completed || 0));
     for (const card of cards) {
-      cardsByKey.set(buildKey(card), card);
+      const key = buildKey(card);
+      if (cardsByKey.has(key)) {
+        incrementCaptureDiagnostic(diagnostics, key.startsWith("fingerprint:") ? "duplicate_fingerprint" : "duplicate_identity");
+        continue;
+      }
+      cardsByKey.set(key, card);
     }
     debugLines.push(
       [result.frameUrl || frameResult.frameId || "frame", result.debug || "", `cards=${cards.length}`]
@@ -1382,6 +1392,7 @@ function mergeFrameResults(frameResults) {
     framesWithCards,
     roundsCompleted: maxRoundsCompleted,
     platform: platforms.size === 1 ? Array.from(platforms)[0] : "",
+    diagnostics,
     debugSummary: debugLines.join(" || "),
   };
 }
@@ -1657,7 +1668,73 @@ function translateBatchPhase(value) {
 }
 
 function buildKey(card) {
-  return card.platform_uid || card.detail_url || card.raw_card_text || JSON.stringify(card);
+  if (card?.platform_uid) {
+    return `identity:${card.platform_uid}`;
+  }
+  const fingerprint = [
+    card?.source_candidate_id,
+    card?.name,
+    card?.expected_salary,
+    card?.work_experience_text,
+    card?.education_text,
+    card?.raw_card_text,
+  ].map((value) => String(value || "").trim().toLowerCase()).filter(Boolean).join("||");
+  return `fingerprint:${fingerprint || JSON.stringify(card)}`;
+}
+
+function createCaptureDiagnostics() {
+  return {
+    scanned_nodes: 0,
+    accepted_cards: 0,
+    missing_name: 0,
+    missing_candidate_structure: 0,
+    hidden: 0,
+    detached: 0,
+    duplicate_identity: 0,
+    duplicate_fingerprint: 0,
+    unsupported_platform: 0,
+    invalid_card: 0,
+    plugin_owned_node: 0,
+    missing_stable_identity: 0,
+  };
+}
+
+function incrementCaptureDiagnostic(diagnostics, key) {
+  if (diagnostics && key) {
+    diagnostics[key] = Number(diagnostics[key] || 0) + 1;
+  }
+}
+
+function mergeCaptureDiagnostics(target, source) {
+  if (!target || !source || typeof source !== "object") return target;
+  for (const [key, value] of Object.entries(source)) {
+    if (typeof value === "number") {
+      target[key] = Number(target[key] || 0) + value;
+    }
+  }
+  return target;
+}
+
+function formatCaptureDiagnosticLines(diagnostics) {
+  if (!diagnostics) return [];
+  const labels = [
+    ["scanned_nodes", "扫描候选节点"],
+    ["accepted_cards", "接受卡片"],
+    ["duplicate_identity", "稳定身份重复跳过"],
+    ["duplicate_fingerprint", "批内指纹重复跳过"],
+    ["hidden", "隐藏卡片跳过"],
+    ["missing_name", "缺少姓名跳过"],
+    ["missing_candidate_structure", "结构不完整跳过"],
+    ["missing_stable_identity", "缺少稳定身份"],
+    ["plugin_owned_node", "插件控件跳过"],
+    ["detached", "陈旧节点跳过"],
+    ["unsupported_platform", "不支持平台跳过"],
+    ["invalid_card", "无效卡片跳过"],
+  ];
+  return labels
+    .map(([key, label]) => [label, Number(diagnostics[key] || 0)])
+    .filter(([, value]) => value > 0)
+    .map(([label, value]) => `${label}: ${value}`);
 }
 
 function trimTrailingSlash(value) {
