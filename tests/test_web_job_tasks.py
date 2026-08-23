@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import threading
 import unittest
@@ -800,6 +801,161 @@ class WebJobTaskFoundationTest(unittest.TestCase):
             self.assertEqual(run["model"], "external_rating_import")
         finally:
             db.close_thread_connection()
+
+    def test_external_rating_preview_parses_markdown_and_does_not_write_results(self) -> None:
+        job = self._create_active_job()
+        task = self._start_task(self._create_task(job))
+        self._intake_candidate(job=job, task=task, name="测试甲", source_id="preview-a", key="preview-a")
+
+        text = "\n".join(
+            [
+                "| 序号 | 姓名 | 评级 | 方向 | 理由 |",
+                "| --- | --- | --- | --- | --- |",
+                "| 1 | **测试甲** | 强SR | Alpha / 多因子 | 外部模型理由一 |",
+                "| 2 | __测试乙__ | SSR- / 强SR | Beta | 外部模型理由二 |",
+                "| 3 | 测试丙 | A+ | Gamma | 外部模型理由三 |",
+            ]
+        )
+
+        db, _repository = self._direct_repository()
+        try:
+            connection = db.get_connection()
+            before_runs = connection.execute("SELECT COUNT(*) FROM screening_runs").fetchone()[0]
+            before_results = connection.execute("SELECT COUNT(*) FROM screening_results").fetchone()[0]
+        finally:
+            db.close_thread_connection()
+
+        response = self.client.post(
+            f"/api/recruitment-tasks/{task['id']}/external-ratings/preview",
+            json={"text": text},
+            headers=self.origin,
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["received"], 3)
+        first, second, third = payload["rows"]
+        self.assertEqual(first["name"], "测试甲")
+        self.assertEqual(first["rating"], "SR")
+        self.assertEqual(first["original_rating"], "强SR")
+        self.assertEqual(first["rating_status"], "normalized")
+        self.assertEqual(first["track"], "Alpha / 多因子")
+        self.assertEqual(first["reason"], "外部模型理由一")
+        self.assertEqual(second["name"], "测试乙")
+        self.assertEqual(second["rating"], "")
+        self.assertEqual(second["original_rating"], "SSR- / 强SR")
+        self.assertEqual(second["rating_status"], "needs_confirmation")
+        self.assertEqual(third["rating_status"], "invalid")
+        self.assertNotIn("prompt_text", response.text)
+        self.assertNotIn("provider", response.text)
+        self.assertNotIn("raw_response", response.text)
+        self.assertNotIn(self.token, response.text)
+
+        db, _repository = self._direct_repository()
+        try:
+            connection = db.get_connection()
+            after_runs = connection.execute("SELECT COUNT(*) FROM screening_runs").fetchone()[0]
+            after_results = connection.execute("SELECT COUNT(*) FROM screening_results").fetchone()[0]
+        finally:
+            db.close_thread_connection()
+        self.assertEqual(after_runs, before_runs)
+        self.assertEqual(after_results, before_results)
+
+    def test_external_rating_preview_keeps_csv_tsv_and_modifier_compatibility(self) -> None:
+        job = self._create_active_job()
+        task = self._start_task(self._create_task(job))
+
+        csv_response = self.client.post(
+            f"/api/recruitment-tasks/{task['id']}/external-ratings/preview",
+            json={"text": "name,rating\n测试甲,SR+\n测试乙,SSR-\n测试丙,UR-\n测试丁,SR\n测试戊,SSR 或 SR"},
+            headers=self.origin,
+        )
+        self.assertEqual(csv_response.status_code, 200, csv_response.text)
+        csv_rows = csv_response.json()["rows"]
+        self.assertEqual([row["rating"] for row in csv_rows[:4]], ["SR", "SSR", "UR", "SR"])
+        self.assertEqual([row["rating_status"] for row in csv_rows[:4]], ["normalized", "normalized", "normalized", "exact"])
+        self.assertEqual(csv_rows[4]["rating_status"], "needs_confirmation")
+
+        tsv_response = self.client.post(
+            f"/api/recruitment-tasks/{task['id']}/external-ratings/preview",
+            json={"text": "candidate_name\trating\ttrack\treason\n测试己\tR+\tDelta\tTSV 理由"},
+            headers=self.origin,
+        )
+        self.assertEqual(tsv_response.status_code, 200, tsv_response.text)
+        tsv_row = tsv_response.json()["rows"][0]
+        self.assertEqual(tsv_row["name"], "测试己")
+        self.assertEqual(tsv_row["rating"], "R")
+        self.assertEqual(tsv_row["rating_status"], "normalized")
+        self.assertEqual(tsv_row["track"], "Delta")
+        self.assertEqual(tsv_row["reason"], "TSV 理由")
+
+    def test_external_rating_import_preserves_original_rating_track_and_reason(self) -> None:
+        job = self._create_active_job()
+        task = self._start_task(self._create_task(job))
+        candidate_id = self._intake_candidate(job=job, task=task, name="测试丁", source_id="rating-d", key="rating-d")
+
+        response = self.client.post(
+            f"/api/recruitment-tasks/{task['id']}/external-ratings/import",
+            json={
+                "text": "| 姓名 | 评级 | 方向 | 理由 |\n| --- | --- | --- | --- |\n| 测试丁 | SSR- / 强SR | Alpha | 需要人工确认后的理由 |",
+                "rows": [
+                    {
+                        "candidate_id": candidate_id,
+                        "name": "测试丁",
+                        "rating": "SSR",
+                        "original_rating": "SSR- / 强SR",
+                        "track": "Alpha",
+                        "reason": "需要人工确认后的理由",
+                    }
+                ],
+                "source_note": "web_paste",
+            },
+            headers=self.origin,
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["imported"], 1)
+        self.assertEqual(payload["rows"][0]["rating"], "SSR")
+        self.assertEqual(payload["rows"][0]["original_rating"], "SSR- / 强SR")
+        self.assertEqual(payload["rows"][0]["track"], "Alpha")
+        self.assertEqual(payload["rows"][0]["reason"], "需要人工确认后的理由")
+
+        db, _repository = self._direct_repository()
+        try:
+            connection = db.get_connection()
+            stored = connection.execute(
+                """
+                SELECT r.raw_response, r.evidence_json, sr.note
+                FROM screening_results r
+                JOIN screening_runs sr ON sr.id = r.run_id
+                WHERE r.candidate_id = ?
+                ORDER BY r.id DESC
+                LIMIT 1
+                """,
+                (candidate_id,),
+            ).fetchone()
+            self.assertIsNotNone(stored)
+            raw = json.loads(stored["raw_response"])
+            evidence = json.loads(stored["evidence_json"])
+            self.assertEqual(raw["original_rating"], "SSR- / 强SR")
+            self.assertEqual(raw["track"], "Alpha")
+            self.assertEqual(raw["reason"], "需要人工确认后的理由")
+            self.assertEqual(evidence[0]["type"], "external_rating")
+            self.assertEqual(evidence[0]["original_rating"], "SSR- / 强SR")
+            self.assertEqual(evidence[0]["track"], "Alpha")
+            self.assertEqual(evidence[0]["reason"], "需要人工确认后的理由")
+            self.assertEqual(stored["note"], "external_rating_import")
+        finally:
+            db.close_thread_connection()
+
+        latest = self.client.get(f"/api/recruitment-tasks/{task['id']}/external-ratings/latest")
+        self.assertEqual(latest.status_code, 200, latest.text)
+        latest_row = latest.json()["rows"][0]
+        self.assertEqual(latest_row["original_rating"], "SSR- / 强SR")
+        self.assertEqual(latest_row["track"], "Alpha")
+        self.assertEqual(latest_row["reason"], "需要人工确认后的理由")
+        self.assertNotIn("raw_response", latest.text)
 
     def test_external_rating_import_rejects_invalid_non_running_and_wrong_candidate_scope(self) -> None:
         job = self._create_active_job()

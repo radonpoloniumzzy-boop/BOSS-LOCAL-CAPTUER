@@ -1,7 +1,15 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link2, Search, Upload } from "lucide-react";
 
-import { ExternalRatingImportResult, KeywordRules, KeywordRulesResponse, PluginTaskContext, RecruitmentTaskRow } from "../../api";
+import {
+  ExternalRatingImportResult,
+  ExternalRatingPreviewResult,
+  ExternalRatingPreviewRow,
+  KeywordRules,
+  KeywordRulesResponse,
+  PluginTaskContext,
+  RecruitmentTaskRow,
+} from "../../api";
 import { Drawer } from "./Drawer";
 import { RatingBadge, StatusBadge } from "./common";
 import { statusLabel, toneForStatus } from "./JobEditorDrawer";
@@ -12,7 +20,8 @@ type RecruitmentTasksPanelProps = {
   saving: boolean;
   onStatusChange: (task: RecruitmentTaskRow, status: string) => Promise<void>;
   onAssignContext: (task: RecruitmentTaskRow | null) => Promise<void>;
-  onImportRatings: (task: RecruitmentTaskRow, text: string) => Promise<ExternalRatingImportResult>;
+  onPreviewRatings: (task: RecruitmentTaskRow, text: string) => Promise<ExternalRatingPreviewResult>;
+  onImportRatings: (task: RecruitmentTaskRow, text: string, rows: ExternalRatingPreviewRow[]) => Promise<ExternalRatingImportResult>;
   onLoadKeywordRules: (task: RecruitmentTaskRow) => Promise<KeywordRulesResponse>;
   onSaveKeywordRules: (task: RecruitmentTaskRow, rules: KeywordRules, expectedVersion: number) => Promise<KeywordRulesResponse>;
 };
@@ -23,6 +32,7 @@ export function RecruitmentTasksPanel({
   saving,
   onStatusChange,
   onAssignContext,
+  onPreviewRatings,
   onImportRatings,
   onLoadKeywordRules,
   onSaveKeywordRules,
@@ -32,6 +42,9 @@ export function RecruitmentTasksPanel({
   const [confirmError, setConfirmError] = useState("");
   const [importText, setImportText] = useState("");
   const [importError, setImportError] = useState("");
+  const [previewRows, setPreviewRows] = useState<ExternalRatingPreviewRow[]>([]);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [selectedRatings, setSelectedRatings] = useState<Record<number, string>>({});
   const [importResult, setImportResult] = useState<ExternalRatingImportResult | null>(null);
   const [keywordTarget, setKeywordTarget] = useState<RecruitmentTaskRow | null>(null);
   const [keywordVersion, setKeywordVersion] = useState(0);
@@ -61,8 +74,44 @@ export function RecruitmentTasksPanel({
     }
   };
 
-  const previewRows = parseRatingPreview(importText);
-  const previewCounts = previewRows.reduce(
+  useEffect(() => {
+    if (!importTarget || !importText.trim()) {
+      setPreviewRows([]);
+      setPreviewLoading(false);
+      return undefined;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      setPreviewLoading(true);
+      void onPreviewRatings(importTarget, importText)
+        .then((payload) => {
+          if (cancelled) return;
+          setPreviewRows(payload.rows);
+          setImportError("");
+        })
+        .catch((err) => {
+          if (cancelled) return;
+          setPreviewRows([]);
+          setImportError(err instanceof Error ? err.message : "外部评级预览失败，请检查名单格式。");
+        })
+        .finally(() => {
+          if (!cancelled) setPreviewLoading(false);
+        });
+    }, 120);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [importTarget, importText, onPreviewRatings]);
+
+  const resolvedPreviewRows = previewRows.map((row) => ({
+    ...row,
+    rating: selectedRatings[row.line] || row.rating,
+  }));
+  const unresolvedRows = resolvedPreviewRows.filter(
+    (row) => ["needs_confirmation", "invalid"].includes(row.rating_status) && !isValidRating(row.rating),
+  );
+  const previewCounts = resolvedPreviewRows.reduce(
     (acc, row) => {
       acc.total += 1;
       if (isValidRating(row.rating)) acc.valid += 1;
@@ -73,11 +122,11 @@ export function RecruitmentTasksPanel({
   );
 
   const confirmImport = async () => {
-    if (!importTarget || saving) return;
+    if (!importTarget || saving || unresolvedRows.length > 0 || previewCounts.valid === 0) return;
     setImportError("");
     setImportResult(null);
     try {
-      const result = await onImportRatings(importTarget, importText);
+      const result = await onImportRatings(importTarget, importText, resolvedPreviewRows);
       setImportResult(result);
     } catch (err) {
       setImportError(err instanceof Error ? err.message : "外部评级导入失败，请检查名单后重试。");
@@ -184,6 +233,8 @@ export function RecruitmentTasksPanel({
                         setImportTarget(task);
                         setImportText("");
                         setImportError("");
+                        setPreviewRows([]);
+                        setSelectedRatings({});
                         setImportResult(null);
                       }}
                     >
@@ -277,7 +328,7 @@ export function RecruitmentTasksPanel({
             <div>
               <p className="eyebrow">外部评级</p>
               <h2>导入到任务：{importTarget.name}</h2>
-              <p>支持 CSV / TSV / 粘贴文本，至少包含候选人姓名和评级；不会调用 AI。</p>
+              <p>支持 Markdown 表格、CSV、TSV 或 name,rating；不会调用 AI。</p>
             </div>
             <button className="icon-button" onClick={() => setImportTarget(null)} aria-label="关闭外部评级导入">×</button>
           </div>
@@ -289,26 +340,46 @@ export function RecruitmentTasksPanel({
               onChange={(event) => {
                 setImportText(event.target.value);
                 setImportError("");
+                setSelectedRatings({});
                 setImportResult(null);
               }}
-              placeholder={"name,rating\n张三,SSR\n李四,SR"}
+              placeholder={"| 姓名 | 评级 | 方向 | 理由 |\n| --- | --- | --- | --- |\n| 测试甲 | 强SR | Alpha | 外部评级理由 |"}
             />
           </label>
           <div className="rating-import-summary">
-            <span>解析 {previewCounts.total} 行</span>
+            <span>{previewLoading ? "正在解析..." : `解析 ${previewCounts.total} 行`}</span>
             <span>可导入 {previewCounts.valid} 行</span>
             <span>格式待修正 {previewCounts.invalid} 行</span>
           </div>
-          {previewRows.length > 0 && (
+          {unresolvedRows.length > 0 && (
+            <div className="form-error" role="alert">还有 {unresolvedRows.length} 行需要人工选择标准评级。</div>
+          )}
+          {resolvedPreviewRows.length > 0 && (
             <div className="table-scroll">
               <table className="workbench-table compact-table">
-                <thead><tr><th>候选人</th><th>外部评级</th><th>预览状态</th></tr></thead>
+                <thead><tr><th>行号</th><th>候选人</th><th>原始评级</th><th>标准评级</th><th>解析状态</th><th>方向</th><th>理由</th></tr></thead>
                 <tbody>
-                  {previewRows.slice(0, 8).map((row, index) => (
-                    <tr key={`${row.name}-${row.rating}-${index}`}>
+                  {resolvedPreviewRows.slice(0, 20).map((row) => (
+                    <tr key={`${row.line}-${row.name}-${row.original_rating}`}>
+                      <td className="mono">#{row.line}</td>
                       <td>{row.name || "未提供"}</td>
-                      <td><RatingBadge rating={row.rating} /></td>
-                      <td>{isValidRating(row.rating) ? "等待导入" : "评级无效"}</td>
+                      <td>{row.original_rating || "未提供"}</td>
+                      <td>
+                        <select
+                          aria-label={`第 ${row.line} 行标准评级`}
+                          value={row.rating}
+                          onChange={(event) => setSelectedRatings({ ...selectedRatings, [row.line]: event.target.value })}
+                        >
+                          <option value="">请选择</option>
+                          {["UR", "SSR", "SR", "R", "N"].map((rating) => (
+                            <option key={rating} value={rating}>{rating}</option>
+                          ))}
+                        </select>
+                        {isValidRating(row.rating) && <RatingBadge rating={row.rating} />}
+                      </td>
+                      <td>{ratingPreviewStatusLabel(row.rating_status)}</td>
+                      <td>{row.track || "未提供"}</td>
+                      <td>{row.reason || "未提供"}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -344,7 +415,7 @@ export function RecruitmentTasksPanel({
           ) : null}
           <div className="button-row">
             <button className="secondary-button" onClick={() => setImportTarget(null)}>关闭</button>
-            <button className="primary-button" disabled={saving || previewCounts.valid === 0} onClick={() => void confirmImport()}>
+            <button className="primary-button" disabled={saving || previewLoading || previewCounts.valid === 0 || unresolvedRows.length > 0} onClick={() => void confirmImport()}>
               确认导入外部评级
             </button>
           </div>
@@ -405,38 +476,18 @@ function keywordGroupLabel(group: "must" | "plus" | "risk" | "note") {
   }[group];
 }
 
-function parseRatingPreview(text: string) {
-  const lines = text
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-  if (lines.length === 0) return [];
-  const delimiter = lines[0].includes("\t") ? "\t" : ",";
-  const splitLine = (line: string) => line.split(delimiter).map((value) => value.trim());
-  const first = splitLine(lines[0]);
-  const normalizeHeader = (value: string) => value.trim().toLowerCase().replace(/\s+/g, "_");
-  const headers = first.map(normalizeHeader);
-  const hasHeader = headers.some((header) =>
-    ["candidate_id", "id", "name", "candidate_name", "rating"].includes(header),
-  );
-  const nameIndex = hasHeader
-    ? headers.findIndex((header) => ["name", "candidate_name"].includes(header))
-    : 0;
-  const ratingIndex = hasHeader ? headers.findIndex((header) => header === "rating") : 1;
-  const rows = hasHeader ? lines.slice(1) : lines;
-  return rows.map((line) => {
-    const parts = splitLine(line);
-    return {
-      name: nameIndex >= 0 ? parts[nameIndex] || "" : "",
-      rating: (ratingIndex >= 0 ? parts[ratingIndex] || "" : "").toUpperCase(),
-    };
-  });
-}
-
 function ratingStatusLabel(status: string) {
   if (status === "imported") return "已导入";
   if (status === "unmatched") return "未匹配";
   if (status === "ambiguous") return "同名歧义";
   if (status === "invalid") return "无效";
   return status;
+}
+
+function ratingPreviewStatusLabel(status: string) {
+  if (status === "exact") return "已识别";
+  if (status === "normalized") return "已自动归一";
+  if (status === "needs_confirmation") return "需要确认";
+  if (status === "invalid") return "无法识别";
+  return "待处理";
 }

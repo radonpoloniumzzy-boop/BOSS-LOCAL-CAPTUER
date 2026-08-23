@@ -4,6 +4,8 @@ import { Plus } from "lucide-react";
 import {
   ApiRequestError,
   ExternalRatingImportResult,
+  ExternalRatingPreviewResult,
+  ExternalRatingPreviewRow,
   JobProfileDetail,
   JobProfileRow,
   JobProfileVersionRow,
@@ -201,14 +203,26 @@ export function JobsPage({ active }: { active: boolean }) {
     }
   };
 
-  const importExternalRatings = async (task: RecruitmentTaskRow, text: string): Promise<ExternalRatingImportResult> => {
+  const previewExternalRatings = async (task: RecruitmentTaskRow, text: string): Promise<ExternalRatingPreviewResult> => {
+    return requestJson<ExternalRatingPreviewResult>(`/api/recruitment-tasks/${task.id}/external-ratings/preview`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, source_note: "web_paste" }),
+    });
+  };
+
+  const importExternalRatings = async (
+    task: RecruitmentTaskRow,
+    text: string,
+    rows: ExternalRatingPreviewRow[],
+  ): Promise<ExternalRatingImportResult> => {
     setSaving(true);
     setError("");
     try {
       const result = await requestJson<ExternalRatingImportResult>(`/api/recruitment-tasks/${task.id}/external-ratings/import`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, source_note: "web_paste" }),
+        body: JSON.stringify({ text, rows, source_note: "web_paste" }),
       });
       setNotice(`外部评级导入完成：成功 ${result.imported}，未匹配 ${result.unmatched}，歧义 ${result.ambiguous}，无效 ${result.invalid}。`);
       await load();
@@ -325,6 +339,7 @@ export function JobsPage({ active }: { active: boolean }) {
           saving={saving}
           onStatusChange={setTaskStatus}
           onAssignContext={assignPluginContext}
+          onPreviewRatings={previewExternalRatings}
           onImportRatings={importExternalRatings}
           onLoadKeywordRules={loadKeywordRules}
           onSaveKeywordRules={saveKeywordRules}

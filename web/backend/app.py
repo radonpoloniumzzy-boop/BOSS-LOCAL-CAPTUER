@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import io
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import quote, urlencode
@@ -281,12 +282,103 @@ def _project_recruitment_task(row: dict[str, object]) -> dict[str, object]:
     return {field: row.get(field) for field in _RECRUITMENT_TASK_FIELDS}
 
 
-def _parse_external_rating_rows(payload: ExternalRatingsImportRequest) -> list[dict[str, object]]:
-    if payload.rows:
-        return [dict(row) for row in payload.rows]
-    text = payload.text.strip()
-    if not text:
-        return []
+_STANDARD_RATINGS = ("UR", "SSR", "SR", "R", "N")
+_HEADER_ALIASES = {
+    "candidate_id": {"candidate_id", "id"},
+    "name": {"name", "candidate_name", "candidate name", "candidate", "姓名", "候选人"},
+    "rating": {"rating", "grade", "评级", "等级"},
+    "track": {"track", "category", "方向", "定位"},
+    "reason": {"reason", "note", "rationale", "理由", "说明", "摘要", "评价"},
+    "batch_id": {"batch_id"},
+    "source_platform": {"source_platform"},
+    "source_job_title": {"source_job_title", "job_title"},
+}
+
+
+def _clean_external_cell(value: object) -> str:
+    text = str(value or "").strip()
+    changed = True
+    while changed:
+        changed = False
+        for marker in ("**", "__"):
+            if text.startswith(marker) and text.endswith(marker) and len(text) >= len(marker) * 2:
+                text = text[len(marker) : -len(marker)].strip()
+                changed = True
+    return text
+
+
+def _normalize_external_header(value: object) -> str:
+    return _clean_external_cell(value).strip().lower().replace(" ", "_")
+
+
+def _canonical_external_field(header: object) -> str | None:
+    normalized = _normalize_external_header(header)
+    for field, aliases in _HEADER_ALIASES.items():
+        if normalized in {alias.lower().replace(" ", "_") for alias in aliases}:
+            return field
+    return None
+
+
+def _is_markdown_separator_row(cells: list[str]) -> bool:
+    if not cells:
+        return False
+    return all(bool(re.fullmatch(r":?-{3,}:?", cell.strip())) for cell in cells if cell.strip())
+
+
+def _split_markdown_row(line: str) -> list[str]:
+    stripped = line.strip()
+    if stripped.startswith("|"):
+        stripped = stripped[1:]
+    if stripped.endswith("|"):
+        stripped = stripped[:-1]
+    return [_clean_external_cell(cell) for cell in stripped.split("|")]
+
+
+def _normalize_external_rating(value: object) -> tuple[str, str, str]:
+    original = _clean_external_cell(value)
+    compact = re.sub(r"\s+", "", original.upper())
+    if not compact:
+        return "", original, "invalid"
+    if compact in _STANDARD_RATINGS:
+        return compact, original, "exact"
+    found = re.findall(r"(?<![A-Z])(SSR|UR|SR|R|N)(?![A-Z])", compact)
+    for token in re.findall(r"强(SSR|UR|SR|R|N)", compact):
+        found.append(token)
+    unique: list[str] = []
+    for rating in found:
+        if rating not in unique:
+            unique.append(rating)
+    if len(unique) > 1:
+        return "", original, "needs_confirmation"
+    if len(unique) == 1:
+        rating = unique[0]
+        if compact in {f"强{rating}", f"{rating}+", f"{rating}-"}:
+            return rating, original, "normalized"
+    return "", original, "invalid"
+
+
+def _finalize_external_rating_row(row: dict[str, object], *, line: int) -> dict[str, object]:
+    normalized, original, status = _normalize_external_rating(row.get("rating") or row.get("original_rating") or "")
+    explicit_rating = _clean_external_cell(row.get("rating"))
+    if explicit_rating.upper() in _STANDARD_RATINGS:
+        normalized = explicit_rating.upper()
+        status = "exact" if _clean_external_cell(row.get("original_rating")) in {"", normalized} else "normalized"
+    return {
+        "line": int(row.get("line") or line),
+        "candidate_id": _clean_external_cell(row.get("candidate_id")),
+        "name": _clean_external_cell(row.get("name") or row.get("candidate_name")),
+        "rating": normalized,
+        "original_rating": _clean_external_cell(row.get("original_rating")) or original or explicit_rating,
+        "rating_status": status,
+        "track": _clean_external_cell(row.get("track") or row.get("category")),
+        "reason": _clean_external_cell(row.get("reason") or row.get("note") or row.get("rationale")),
+        "batch_id": _clean_external_cell(row.get("batch_id")),
+        "source_platform": _clean_external_cell(row.get("source_platform")),
+        "source_job_title": _clean_external_cell(row.get("source_job_title") or row.get("job_title")),
+    }
+
+
+def _rows_from_delimited_text(text: str) -> list[list[str]]:
     sample = text[:4096]
     delimiter = "\t" if "\t" in sample else ","
     try:
@@ -295,29 +387,34 @@ def _parse_external_rating_rows(payload: ExternalRatingsImportRequest) -> list[d
     except csv.Error:
         pass
     reader = csv.reader(io.StringIO(text), delimiter=delimiter)
-    raw_rows = [[cell.strip() for cell in row] for row in reader if any(cell.strip() for cell in row)]
+    return [[_clean_external_cell(cell) for cell in row] for row in reader if any(str(cell).strip() for cell in row)]
+
+
+def _parse_external_rating_rows(payload: ExternalRatingsImportRequest) -> list[dict[str, object]]:
+    if payload.rows:
+        return [_finalize_external_rating_row(dict(row), line=index) for index, row in enumerate(payload.rows, start=1)]
+    text = payload.text.strip()
+    if not text:
+        return []
+    non_empty_lines = [line for line in text.splitlines() if line.strip()]
+    if non_empty_lines and non_empty_lines[0].strip().startswith("|"):
+        raw_rows = [_split_markdown_row(line) for line in non_empty_lines if "|" in line]
+        raw_rows = [row for row in raw_rows if not _is_markdown_separator_row(row)]
+    else:
+        raw_rows = _rows_from_delimited_text(text)
     if not raw_rows:
         return []
-    headers = [cell.strip().lower() for cell in raw_rows[0]]
-    known_headers = {"candidate_id", "id", "name", "candidate name", "candidate_name", "rating", "batch_id", "source_platform", "source_job_title", "job_title"}
-    has_header = any(header in known_headers for header in headers)
+    headers = [_canonical_external_field(cell) for cell in raw_rows[0]]
+    has_header = any(headers)
     body = raw_rows[1:] if has_header else raw_rows
     rows: list[dict[str, object]] = []
-    for raw in body:
+    for line_number, raw in enumerate(body, start=2 if has_header else 1):
         if has_header:
-            mapped = {headers[index]: value for index, value in enumerate(raw) if index < len(headers)}
-            rows.append(
-                {
-                    "candidate_id": mapped.get("candidate_id") or mapped.get("id") or "",
-                    "name": mapped.get("name") or mapped.get("candidate name") or mapped.get("candidate_name") or "",
-                    "rating": mapped.get("rating") or "",
-                    "batch_id": mapped.get("batch_id") or "",
-                    "source_platform": mapped.get("source_platform") or "",
-                    "source_job_title": mapped.get("source_job_title") or mapped.get("job_title") or "",
-                }
-            )
+            mapped = {field: raw[index] for index, field in enumerate(headers) if field and index < len(raw)}
+            mapped["line"] = line_number
+            rows.append(_finalize_external_rating_row(mapped, line=line_number))
         else:
-            rows.append({"name": raw[0] if len(raw) > 0 else "", "rating": raw[1] if len(raw) > 1 else ""})
+            rows.append(_finalize_external_rating_row({"name": raw[0] if len(raw) > 0 else "", "rating": raw[1] if len(raw) > 1 else ""}, line=line_number))
     return rows
 
 
@@ -785,6 +882,37 @@ def create_web_app(
         except ValueError as exc:
             raise ApiError(404, "recruitment_task_not_found", str(exc)) from exc
 
+    @app.post("/api/recruitment-tasks/{task_id}/external-ratings/preview")
+    def preview_external_ratings(task_id: int, payload: ExternalRatingsImportRequest) -> dict[str, object]:
+        if runtime.repository is None:
+            raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。")
+        task = runtime.repository.get_recruitment_task(task_id)
+        if task is None:
+            raise ApiError(404, "recruitment_task_not_found", "招聘任务不存在")
+        if str(task["status"]) != "running":
+            raise ApiError(409, "external_rating_task_not_running", "只有执行中的招聘任务可以导入外部评级")
+        rows = _parse_external_rating_rows(payload)
+        return {
+            "task_id": task_id,
+            "received": len(rows),
+            "rows": [
+                {
+                    "line": row.get("line"),
+                    "candidate_id": row.get("candidate_id"),
+                    "name": row.get("name"),
+                    "rating": row.get("rating"),
+                    "original_rating": row.get("original_rating"),
+                    "rating_status": row.get("rating_status"),
+                    "track": row.get("track"),
+                    "reason": row.get("reason"),
+                    "batch_id": row.get("batch_id"),
+                    "source_platform": row.get("source_platform"),
+                    "source_job_title": row.get("source_job_title"),
+                }
+                for row in rows
+            ],
+        }
+
     @app.post("/api/recruitment-tasks/{task_id}/external-ratings/import")
     def import_external_ratings(task_id: int, payload: ExternalRatingsImportRequest) -> dict[str, object]:
         if runtime.repository is None:
@@ -830,6 +958,9 @@ def create_web_app(
                     "candidate_id": row.get("candidate_id"),
                     "name": row.get("name"),
                     "rating": row.get("rating"),
+                    "original_rating": row.get("original_rating"),
+                    "track": row.get("track"),
+                    "reason": row.get("reason"),
                     "status": row.get("status"),
                     "created_at": row.get("created_at"),
                 }

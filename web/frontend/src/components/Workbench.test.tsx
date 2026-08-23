@@ -747,6 +747,53 @@ describe("workbench candidate intake views", () => {
       if (url.endsWith("/api/plugin-context") && !init?.method) {
         return response({ context: null });
       }
+      if (url.endsWith("/api/recruitment-tasks/11/external-ratings/preview") && init?.method === "POST") {
+        return response({
+          task_id: 11,
+          received: 3,
+          rows: [
+            {
+              line: 3,
+              candidate_id: "",
+              name: "测试甲",
+              rating: "SR",
+              original_rating: "强SR",
+              rating_status: "normalized",
+              track: "Alpha",
+              reason: "外部模型理由一",
+              batch_id: "",
+              source_platform: "",
+              source_job_title: "",
+            },
+            {
+              line: 4,
+              candidate_id: "",
+              name: "测试乙",
+              rating: "",
+              original_rating: "SSR- / 强SR",
+              rating_status: "needs_confirmation",
+              track: "Beta",
+              reason: "外部模型理由二",
+              batch_id: "",
+              source_platform: "",
+              source_job_title: "",
+            },
+            {
+              line: 5,
+              candidate_id: "",
+              name: "测试丙",
+              rating: "",
+              original_rating: "A+",
+              rating_status: "invalid",
+              track: "Gamma",
+              reason: "外部模型理由三",
+              batch_id: "",
+              source_platform: "",
+              source_job_title: "",
+            },
+          ],
+        });
+      }
       if (url.endsWith("/api/recruitment-tasks/11/external-ratings/import") && init?.method === "POST") {
         importAttempts += 1;
         if (importAttempts === 1) {
@@ -778,23 +825,36 @@ describe("workbench candidate intake views", () => {
     await screen.findByText("Boss 推荐流");
     await user.click(screen.getByRole("button", { name: "导入外部评级" }));
     const dialog = await screen.findByRole("dialog", { name: "导入外部评级" });
-    await user.type(within(dialog).getByLabelText("粘贴评级名单"), "candidate_id,name,rating\n7,Alice,SSR\n,Nobody,SR\n,Broken,A+");
-    expect(within(dialog).getByText("解析 3 行")).toBeInTheDocument();
-    expect(within(dialog).getByText("可导入 2 行")).toBeInTheDocument();
-    expect(within(dialog).getByText("格式待修正 1 行")).toBeInTheDocument();
-    expect(within(dialog).getByText("1SSR")).toBeInTheDocument();
-    expect(within(dialog).getByText("评级无效")).toBeInTheDocument();
+    const pastedTable = "| 序号 | 姓名 | 评级 | 方向 | 理由 |\n| --- | --- | --- | --- | --- |\n| 1 | **测试甲** | 强SR | Alpha | 外部模型理由一 |\n| 2 | 测试乙 | SSR- / 强SR | Beta | 外部模型理由二 |\n| 3 | 测试丙 | A+ | Gamma | 外部模型理由三 |";
+    await user.click(within(dialog).getByLabelText("粘贴评级名单"));
+    await user.paste(pastedTable);
+    expect(await within(dialog).findByText("解析 3 行")).toBeInTheDocument();
+    expect(within(dialog).getByText("可导入 1 行")).toBeInTheDocument();
+    expect(within(dialog).getByText("格式待修正 2 行")).toBeInTheDocument();
+    expect(within(dialog).getByText("1SR")).toBeInTheDocument();
+    expect(within(dialog).getByText("已自动归一")).toBeInTheDocument();
+    expect(within(dialog).getByText("需要确认")).toBeInTheDocument();
+    expect(within(dialog).getByText("无法识别")).toBeInTheDocument();
+    expect(within(dialog).getByText("外部模型理由二")).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "确认导入外部评级" })).toBeDisabled();
+
+    await user.selectOptions(within(dialog).getByLabelText("第 4 行标准评级"), "SSR");
+    await user.selectOptions(within(dialog).getByLabelText("第 5 行标准评级"), "N");
+    expect(within(dialog).getByRole("button", { name: "确认导入外部评级" })).toBeEnabled();
 
     await user.click(within(dialog).getByRole("button", { name: "确认导入外部评级" }));
     expect(await within(dialog).findByRole("alert")).toHaveTextContent("外部评级导入失败，请稍后重试。");
-    expect(within(dialog).getByLabelText("粘贴评级名单")).toHaveValue("candidate_id,name,rating\n7,Alice,SSR\n,Nobody,SR\n,Broken,A+");
+    expect(within(dialog).getByLabelText("粘贴评级名单")).toHaveValue(pastedTable);
+    expect(within(dialog).getByLabelText("第 4 行标准评级")).toHaveValue("SSR");
+    expect(within(dialog).getByLabelText("第 5 行标准评级")).toHaveValue("N");
     await user.click(within(dialog).getByRole("button", { name: "确认导入外部评级" }));
     expect(await within(dialog).findByRole("status")).toHaveTextContent("成功 1");
     expect(within(dialog).getByText("未匹配 1")).toBeInTheDocument();
     expect(within(dialog).getByText("无效 1")).toBeInTheDocument();
     const importCall = fetchMock.mock.calls.find(([url]) => String(url).endsWith("/api/recruitment-tasks/11/external-ratings/import"));
-    expect(importCall?.[1]?.body).toContain("candidate_id,name,rating");
-    expect(importCall?.[1]?.body).toContain("7,Alice,SSR");
+    expect(importCall?.[1]?.body).toContain("SSR- / 强SR");
+    expect(importCall?.[1]?.body).toContain("外部模型理由二");
+    expect(importCall?.[1]?.body).toContain("\"rating\":\"SSR\"");
     expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/api/recruitment-tasks/11/external-ratings/import"))).toHaveLength(2);
   });
 
@@ -826,6 +886,25 @@ describe("workbench candidate intake views", () => {
         });
       }
       if (url.endsWith("/api/plugin-context") && !init?.method) return response({ context: null });
+      if (url.endsWith("/api/recruitment-tasks/11/external-ratings/preview") && init?.method === "POST") {
+        return response({
+          task_id: 11,
+          received: 1,
+          rows: [{
+            line: 2,
+            candidate_id: "8",
+            name: "Bob",
+            rating: "SR",
+            original_rating: "SR",
+            rating_status: "exact",
+            track: "",
+            reason: "",
+            batch_id: "",
+            source_platform: "",
+            source_job_title: "",
+          }],
+        });
+      }
       throw new Error(`unexpected request: ${url}`);
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -839,7 +918,7 @@ describe("workbench candidate intake views", () => {
     await user.click(within(dialog).getByLabelText("粘贴评级名单"));
     await user.paste("id\tcandidate_name\trating\n8\tBob\tSR");
 
-    expect(within(dialog).getByText("解析 1 行")).toBeInTheDocument();
+    expect(await within(dialog).findByText("解析 1 行")).toBeInTheDocument();
     expect(within(dialog).getByText("可导入 1 行")).toBeInTheDocument();
     expect(within(dialog).getByText("Bob")).toBeInTheDocument();
     expect(within(dialog).getByText("1SR")).toBeInTheDocument();

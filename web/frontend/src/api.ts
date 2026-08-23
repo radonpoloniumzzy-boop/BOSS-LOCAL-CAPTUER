@@ -181,8 +181,31 @@ export type ExternalRatingImportRow = {
   candidate_id: number | null;
   name: string;
   rating: string;
+  original_rating?: string;
+  track?: string;
+  reason?: string;
   status: "imported" | "unmatched" | "ambiguous" | "invalid";
   message: string;
+};
+
+export type ExternalRatingPreviewRow = {
+  line: number;
+  candidate_id: string | number | null;
+  name: string;
+  rating: string;
+  original_rating: string;
+  rating_status: "exact" | "normalized" | "needs_confirmation" | "invalid";
+  track: string;
+  reason: string;
+  batch_id: string | number | null;
+  source_platform: string;
+  source_job_title: string;
+};
+
+export type ExternalRatingPreviewResult = {
+  task_id: number;
+  received: number;
+  rows: ExternalRatingPreviewRow[];
 };
 
 export type ExternalRatingImportResult = {

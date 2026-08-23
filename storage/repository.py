@@ -3615,14 +3615,18 @@ class CandidateRepository:
             )
             run_id = int(cursor.lastrowid)
             for index, row in enumerate(prepared, start=1):
+                result_line = int(row.get("line") or index)
                 rating = str(row.get("rating") or "").strip().upper()
+                original_rating = str(row.get("original_rating") or row.get("rating") or "").strip()
+                track = str(row.get("track") or row.get("category") or "").strip()
+                reason = str(row.get("reason") or row.get("note") or row.get("rationale") or "").strip()
                 name = str(row.get("name") or row.get("candidate_name") or "").strip()
                 candidate_id = self._optional_int(row.get("candidate_id"))
                 if rating not in {"UR", "SSR", "SR", "R", "N"}:
                     invalid += 1
                     result_rows.append(
                         {
-                            "line": index,
+                            "line": result_line,
                             "candidate_id": candidate_id,
                             "name": name,
                             "rating": rating,
@@ -3644,7 +3648,7 @@ class CandidateRepository:
                     unmatched += 1
                     result_rows.append(
                         {
-                            "line": index,
+                            "line": result_line,
                             "candidate_id": candidate_id,
                             "name": name,
                             "rating": rating,
@@ -3657,7 +3661,7 @@ class CandidateRepository:
                     ambiguous += 1
                     result_rows.append(
                         {
-                            "line": index,
+                            "line": result_line,
                             "candidate_id": candidate_id,
                             "name": name,
                             "rating": rating,
@@ -3667,15 +3671,43 @@ class CandidateRepository:
                     )
                     continue
                 match = matches[0]
+                raw_response = json.dumps(
+                    {
+                        "line": int(row.get("line") or index),
+                        "candidate_id": candidate_id,
+                        "name": name,
+                        "rating": rating,
+                        "original_rating": original_rating,
+                        "track": track,
+                        "reason": reason,
+                        "batch_id": self._optional_int(row.get("batch_id")),
+                        "source_platform": str(row.get("source_platform") or "").strip(),
+                        "source_job_title": str(row.get("source_job_title") or row.get("job_title") or "").strip(),
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                evidence_json = json.dumps(
+                    [
+                        {
+                            "type": "external_rating",
+                            "original_rating": original_rating,
+                            "track": track,
+                            "reason": reason,
+                        }
+                    ],
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
                 result_cursor = connection.execute(
                     """
                     INSERT INTO screening_results(
                         run_id, candidate_id, rating, persona, status, raw_response, error,
                         confidence, evidence_json, gap_json, risk_json, recommended_action, created_at
-                    ) VALUES (?, ?, ?, 'external_rating_import', 'success', '', '',
-                        'external', '[]', '[]', '[]', '', ?)
+                    ) VALUES (?, ?, ?, 'external_rating_import', 'success', ?, '',
+                        'external', ?, '[]', '[]', '', ?)
                     """,
-                    (run_id, int(match["candidate_id"]), rating, timestamp),
+                    (run_id, int(match["candidate_id"]), rating, raw_response, evidence_json, timestamp),
                 )
                 result_id = int(result_cursor.lastrowid)
                 connection.execute(
@@ -3692,10 +3724,13 @@ class CandidateRepository:
                 imported += 1
                 result_rows.append(
                     {
-                        "line": index,
+                        "line": result_line,
                         "candidate_id": int(match["candidate_id"]),
                         "name": str(match["name"] or ""),
                         "rating": rating,
+                        "original_rating": original_rating,
+                        "track": track,
+                        "reason": reason,
                         "status": "imported",
                         "message": "已导入外部评级。",
                     }
@@ -3798,7 +3833,7 @@ class CandidateRepository:
             return None
         rows = connection.execute(
             """
-            SELECT r.candidate_id, c.name, r.rating, r.status, r.created_at
+            SELECT r.candidate_id, c.name, r.rating, r.status, r.created_at, r.evidence_json
             FROM screening_results r
             JOIN candidates c ON c.id = r.candidate_id
             WHERE r.run_id = ?
@@ -3806,7 +3841,22 @@ class CandidateRepository:
             """,
             (int(run["id"]),),
         ).fetchall()
-        return {"run": dict(run), "rows": [dict(row) for row in rows]}
+        projected_rows: list[dict[str, object]] = []
+        for row in rows:
+            projected = dict(row)
+            evidence: list[dict[str, object]] = []
+            try:
+                parsed = json.loads(str(projected.pop("evidence_json") or "[]"))
+                if isinstance(parsed, list):
+                    evidence = [item for item in parsed if isinstance(item, dict)]
+            except (TypeError, json.JSONDecodeError):
+                evidence = []
+            external = next((item for item in evidence if item.get("type") == "external_rating"), {})
+            projected["original_rating"] = external.get("original_rating") or projected.get("rating") or ""
+            projected["track"] = external.get("track") or ""
+            projected["reason"] = external.get("reason") or ""
+            projected_rows.append(projected)
+        return {"run": dict(run), "rows": projected_rows}
 
     def list_plugin_rating_badges(self, task_id: int) -> list[dict[str, object]]:
         task = self.get_recruitment_task(task_id)
