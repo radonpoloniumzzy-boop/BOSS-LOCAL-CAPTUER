@@ -135,6 +135,37 @@ class WebJobTaskFoundationTest(unittest.TestCase):
         rows = self.client.get("/api/candidates?page=1&page_size=100").json()["rows"]
         return int(next(row["id"] for row in rows if row["name"] == name))
 
+    def _intake_candidates_in_one_batch(
+        self,
+        *,
+        job: dict[str, object],
+        task: dict[str, object],
+        candidates: list[tuple[str, str]],
+        key: str,
+        source_job_title: str = "量化研究员",
+    ) -> int:
+        response = self.client.post(
+            "/api/intake/candidates",
+            json={
+                "source_platform": "boss",
+                "source_job_title": source_job_title,
+                "job_profile_id": job["id"],
+                "recruitment_task_id": task["id"],
+                "idempotency_key": key,
+                "candidates": [
+                    {
+                        "name": name,
+                        "source_candidate_id": source_id,
+                        "raw_card_text": f"{name} raw card",
+                    }
+                    for name, source_id in candidates
+                ],
+            },
+            headers=self.extension,
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        return int(response.json()["batch_id"])
+
     def _direct_repository(self) -> tuple[DatabaseManager, CandidateRepository]:
         db = DatabaseManager(self.data_dir / "boss_local_tool.db")
         db.initialize_existing()
@@ -1006,6 +1037,92 @@ class WebJobTaskFoundationTest(unittest.TestCase):
         self.assertEqual(latest_row["track"], "Alpha")
         self.assertEqual(latest_row["reason"], "需要人工确认后的理由")
         self.assertNotIn("raw_response", latest.text)
+
+    def test_external_rating_import_uses_preview_batch_id_to_match_same_batch_candidates(self) -> None:
+        job = self._create_active_job()
+        task = self._start_task(self._create_task(job))
+        batch_id = self._intake_candidates_in_one_batch(
+            job=job,
+            task=task,
+            candidates=[("测试甲", "trial-alpha"), ("测试乙", "trial-beta")],
+            key="trial-two-candidates",
+        )
+        text = "\n".join(
+            [
+                "| 候选人 | 当前评级 | batch_id |",
+                "| --- | --- | --- |",
+                f"| 测试甲 | 强SR | {batch_id} |",
+                f"| 测试乙 | 强SR | {batch_id} |",
+            ]
+        )
+
+        db, _repository = self._direct_repository()
+        try:
+            connection = db.get_connection()
+            before_runs = connection.execute("SELECT COUNT(*) FROM screening_runs").fetchone()[0]
+            before_results = connection.execute("SELECT COUNT(*) FROM screening_results").fetchone()[0]
+        finally:
+            db.close_thread_connection()
+
+        preview = self.client.post(
+            f"/api/recruitment-tasks/{task['id']}/external-ratings/preview",
+            json={"text": text},
+            headers=self.origin,
+        )
+        self.assertEqual(preview.status_code, 200, preview.text)
+        preview_payload = preview.json()
+        self.assertEqual(preview_payload["received"], 2)
+        self.assertEqual([row["rating"] for row in preview_payload["rows"]], ["SR", "SR"])
+        self.assertEqual([row["batch_id"] for row in preview_payload["rows"]], [str(batch_id), str(batch_id)])
+
+        db, _repository = self._direct_repository()
+        try:
+            connection = db.get_connection()
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM screening_runs").fetchone()[0], before_runs)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM screening_results").fetchone()[0], before_results)
+        finally:
+            db.close_thread_connection()
+
+        imported = self.client.post(
+            f"/api/recruitment-tasks/{task['id']}/external-ratings/import",
+            json={"text": text, "rows": preview_payload["rows"], "source_note": "web_paste"},
+            headers=self.origin,
+        )
+        self.assertEqual(imported.status_code, 200, imported.text)
+        payload = imported.json()
+        self.assertEqual(payload["received"], 2)
+        self.assertEqual(payload["imported"], 2)
+        self.assertEqual(payload["unmatched"], 0)
+        self.assertEqual(payload["ambiguous"], 0)
+        self.assertEqual([row["rating"] for row in payload["rows"]], ["SR", "SR"])
+
+        wrong_batch = self.client.post(
+            f"/api/recruitment-tasks/{task['id']}/external-ratings/import",
+            json={
+                "rows": [
+                    {"name": "测试甲", "rating": "SR", "original_rating": "强SR", "batch_id": batch_id + 999},
+                ]
+            },
+            headers=self.origin,
+        )
+        self.assertEqual(wrong_batch.status_code, 200, wrong_batch.text)
+        self.assertEqual(wrong_batch.json()["unmatched"], 1)
+
+        selected = self.client.put("/api/plugin-context", json={"recruitment_task_id": task["id"]}, headers=self.origin)
+        self.assertEqual(selected.status_code, 200, selected.text)
+        badges = self.client.get("/api/plugin/ratings/badges", headers=self.extension)
+        self.assertEqual(badges.status_code, 200, badges.text)
+        badge_rows = badges.json()["badges"]
+        self.assertEqual(len(badge_rows), 2)
+        self.assertEqual({row["rating"] for row in badge_rows}, {"SR"})
+        self.assertEqual({row["badge_text"] for row in badge_rows}, {"1SR"})
+        self.assertEqual({row["platform_uid"] for row in badge_rows}, {"boss:trial-alpha", "boss:trial-beta"})
+        for row in badge_rows:
+            self.assertEqual(set(row.keys()), {"candidate_id", "source_platform", "platform_uid", "rating", "badge_text"})
+        self.assertNotIn("raw_card_text", badges.text)
+        self.assertNotIn("detail_url", badges.text)
+        self.assertNotIn("name", badges.text)
+        self.assertNotIn(self.token, badges.text)
 
     def test_external_rating_import_rejects_invalid_non_running_and_wrong_candidate_scope(self) -> None:
         job = self._create_active_job()

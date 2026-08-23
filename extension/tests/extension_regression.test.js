@@ -3709,30 +3709,36 @@ async function testLegacyWarningDisappearsAfterSwitchingBackAndMigrating() {
 async function testPopupWebModeRefreshesSearchableRatingBadges() {
   const inserted = [];
   const removed = [];
-  const nameNode = {
-    innerText: "Alice",
-    textContent: "Alice",
-    insertAdjacentElement(_position, node) {
-      inserted.push(node);
-    },
-  };
-  const card = {
-    getAttribute(name) {
-      return name === "data-geek-id" ? "alice" : "";
-    },
-    querySelector(selector) {
-      if (String(selector).includes("href")) {
-        return { href: "https://www.zhipin.com/candidate/alice" };
-      }
-      return nameNode;
-    },
+  function makeCard(rawUid, label) {
+    const nameNode = {
+      innerText: label,
+      textContent: label,
+      insertAdjacentElement(_position, node) {
+        inserted.push(node);
+      },
+    };
+    return {
+      getAttribute(name) {
+        return name === "data-geek-id" ? rawUid : "";
+      },
+      querySelector(selector) {
+        if (String(selector).includes("href")) {
+          return { href: `https://www.zhipin.com/candidate/${rawUid}` };
+        }
+        return nameNode;
+      },
+    };
+  }
+  const cards = {
+    alice: makeCard("alice", "Alice"),
+    bob: makeCard("bob", "Bob"),
   };
   const fakeDocument = {
     querySelectorAll(selector) {
       if (String(selector).includes(".boss-local-rating-badge")) {
-        return inserted;
+        return inserted.slice();
       }
-      return [card];
+      return [cards.alice, cards.bob];
     },
     createElement() {
       return {
@@ -3765,8 +3771,14 @@ async function testPopupWebModeRefreshesSearchableRatingBadges() {
             {
               source_platform: "boss",
               platform_uid: "boss:alice",
-              rating: "SSR",
-              badge_text: "1SSR",
+              rating: "SR",
+              badge_text: "1SR",
+            },
+            {
+              source_platform: "boss",
+              platform_uid: "boss:bob",
+              rating: "SR",
+              badge_text: "1SR",
             },
           ],
         }),
@@ -3795,16 +3807,16 @@ async function testPopupWebModeRefreshesSearchableRatingBadges() {
   assert.strictEqual(badgeFetches[0].url, "http://127.0.0.1:17864/api/plugin/ratings/badges");
   assert.strictEqual(badgeFetches[0].headers["X-Boss-Local-Token"], "web-token");
   assert(!badgeFetches[0].url.includes("web-token"));
-  assert.strictEqual(inserted.length, 1);
-  assert.strictEqual(inserted[0].textContent, "1SSR");
+  assert.strictEqual(inserted.length, 2);
+  assert.deepStrictEqual(inserted.map((node) => node.textContent), ["1SR", "1SR"]);
   await popup.api.refreshRatingBadges(7, {
     apiBase: "http://127.0.0.1:17864",
     apiToken: "web-token",
     connectionMode: "web",
   });
-  assert.strictEqual(inserted.length, 1);
-  assert.strictEqual(inserted[0].textContent, "1SSR");
-  assert(removed.length >= 1);
+  assert.strictEqual(inserted.length, 2);
+  assert.deepStrictEqual(inserted.map((node) => node.textContent), ["1SR", "1SR"]);
+  assert(removed.length >= 2);
 }
 
 async function testPopupRatingBadgesIgnoreGenericDataId() {

@@ -8,6 +8,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import * as apiModule from "../api";
 import { Workbench } from "./Workbench";
+import { BatchesPage } from "./workbench/BatchesPage";
+import { CandidatesPage } from "./workbench/CandidatesPage";
 import { Drawer } from "./workbench/Drawer";
 
 type Deferred = {
@@ -36,6 +38,14 @@ const errorResponse = (message: string, statusCode = 409) =>
   } as Response);
 
 afterEach(() => vi.restoreAllMocks());
+
+function expectTableHeaderBeforeFirstRow(table: HTMLTableElement | null) {
+  if (!table) throw new Error("Expected table to exist.");
+  const header = table.querySelector("thead");
+  const firstRow = table.querySelector("tbody tr");
+  if (!header || !firstRow) throw new Error("Expected table header and first row to exist.");
+  expect(Boolean(header.compareDocumentPosition(firstRow) & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(true);
+}
 
 function DrawerHarness({
   tick = 0,
@@ -761,7 +771,7 @@ describe("workbench candidate intake views", () => {
               rating_status: "needs_confirmation",
               track: "高频 / ML量化",
               reason: "测试理由甲",
-              batch_id: "",
+              batch_id: "166",
               source_platform: "",
               source_job_title: "",
             },
@@ -774,7 +784,7 @@ describe("workbench candidate intake views", () => {
               rating_status: "needs_confirmation",
               track: "Alpha / 多因子",
               reason: "测试理由乙",
-              batch_id: "",
+              batch_id: "166",
               source_platform: "",
               source_job_title: "",
             },
@@ -787,7 +797,7 @@ describe("workbench candidate intake views", () => {
               rating_status: "normalized",
               track: "Alpha / 多因子",
               reason: "测试理由丙",
-              batch_id: "",
+              batch_id: "166",
               source_platform: "",
               source_job_title: "",
             },
@@ -800,7 +810,7 @@ describe("workbench candidate intake views", () => {
               rating_status: "normalized",
               track: "高频储备",
               reason: "测试理由丁",
-              batch_id: "",
+              batch_id: "166",
               source_platform: "",
               source_job_title: "",
             },
@@ -813,7 +823,7 @@ describe("workbench candidate intake views", () => {
               rating_status: "normalized",
               track: "CTA",
               reason: "测试理由戊",
-              batch_id: "",
+              batch_id: "166",
               source_platform: "",
               source_job_title: "",
             },
@@ -826,7 +836,7 @@ describe("workbench candidate intake views", () => {
               rating_status: "exact",
               track: "策略研究",
               reason: "测试理由己",
-              batch_id: "",
+              batch_id: "166",
               source_platform: "",
               source_job_title: "",
             },
@@ -839,7 +849,7 @@ describe("workbench candidate intake views", () => {
               rating_status: "exact",
               track: "数据工程",
               reason: "测试理由庚",
-              batch_id: "",
+              batch_id: "166",
               source_platform: "",
               source_job_title: "",
             },
@@ -854,16 +864,15 @@ describe("workbench candidate intake views", () => {
         return response({
           task_id: 11,
           run_id: 32,
-          status: "partial",
-          received: 3,
-          imported: 1,
-          unmatched: 1,
+          status: "completed",
+          received: 2,
+          imported: 2,
+          unmatched: 0,
           ambiguous: 0,
-          invalid: 1,
+          invalid: 0,
           rows: [
-            { line: 1, candidate_id: 7, name: "Alice", rating: "SSR", status: "imported", message: "已导入外部评级。" },
-            { line: 2, candidate_id: null, name: "Nobody", rating: "SR", status: "unmatched", message: "未在当前招聘任务的岗位关系中找到唯一候选人。" },
-            { line: 3, candidate_id: null, name: "Broken", rating: "A+", status: "invalid", message: "评级只能是 UR、SSR、SR、R、N。" },
+            { line: 3, candidate_id: 7, name: "测试甲", rating: "SR", status: "imported", message: "已导入外部评级。" },
+            { line: 4, candidate_id: 8, name: "测试乙", rating: "SR", status: "imported", message: "已导入外部评级。" },
           ],
         });
       }
@@ -877,7 +886,7 @@ describe("workbench candidate intake views", () => {
     await screen.findByText("Boss 推荐流");
     await user.click(screen.getByRole("button", { name: "导入外部评级" }));
     const dialog = await screen.findByRole("dialog", { name: "导入外部评级" });
-    const pastedTable = "| 排名 | 候选人     | 当前评级           | 最值得看的方向     | 判断    |\n| -- | ------- | -------------- | ----------- | ----- |\n| 1  | **测试甲** | **SSR- / 强SR** | 高频 / ML量化   | 测试理由甲 |\n| 2  | **测试乙** | **SSR- / 强SR** | Alpha / 多因子 | 测试理由乙 |\n| 3  | **测试丙** | **强SR**        | Alpha / 多因子 | 测试理由丙 |\n| 4  | **测试丁** | **强SR**        | 高频储备        | 测试理由丁 |\n| 5  | **测试戊** | **强SR**        | CTA         | 测试理由戊 |\n| 6  | **测试己** | **SR**         | 策略研究        | 测试理由己 |\n| 7  | **测试庚** | **SR**         | 数据工程        | 测试理由庚 |";
+    const pastedTable = "| 排名 | 候选人     | 当前评级           | 最值得看的方向     | 判断    | batch_id |\n| -- | ------- | -------------- | ----------- | ----- | --- |\n| 1  | **测试甲** | **SSR- / 强SR** | 高频 / ML量化   | 测试理由甲 | 166 |\n| 2  | **测试乙** | **SSR- / 强SR** | Alpha / 多因子 | 测试理由乙 | 166 |\n| 3  | **测试丙** | **强SR**        | Alpha / 多因子 | 测试理由丙 | 166 |\n| 4  | **测试丁** | **强SR**        | 高频储备        | 测试理由丁 | 166 |\n| 5  | **测试戊** | **强SR**        | CTA         | 测试理由戊 | 166 |\n| 6  | **测试己** | **SR**         | 策略研究        | 测试理由己 | 166 |\n| 7  | **测试庚** | **SR**         | 数据工程        | 测试理由庚 | 166 |";
     await user.click(within(dialog).getByLabelText("粘贴评级名单"));
     await user.paste(pastedTable);
     expect(await within(dialog).findByText("解析 7 行")).toBeInTheDocument();
@@ -891,6 +900,7 @@ describe("workbench candidate intake views", () => {
     expect(within(dialog).getAllByText("Alpha / 多因子")).toHaveLength(2);
     expect(within(dialog).getByText("测试理由乙")).toBeInTheDocument();
     expect(within(dialog).getByRole("button", { name: "确认导入外部评级" })).toBeDisabled();
+    expectTableHeaderBeforeFirstRow(dialog.querySelector("table"));
 
     await user.selectOptions(within(dialog).getByLabelText("第 4 行标准评级"), "SSR");
     await user.selectOptions(within(dialog).getByLabelText("第 3 行标准评级"), "SR");
@@ -902,14 +912,80 @@ describe("workbench candidate intake views", () => {
     expect(within(dialog).getByLabelText("第 3 行标准评级")).toHaveValue("SR");
     expect(within(dialog).getByLabelText("第 4 行标准评级")).toHaveValue("SSR");
     await user.click(within(dialog).getByRole("button", { name: "确认导入外部评级" }));
-    expect(await within(dialog).findByRole("status")).toHaveTextContent("成功 1");
-    expect(within(dialog).getByText("未匹配 1")).toBeInTheDocument();
-    expect(within(dialog).getByText("无效 1")).toBeInTheDocument();
+    expect(await within(dialog).findByRole("status")).toHaveTextContent("成功 2");
+    expect(within(dialog).getByText("未匹配 0")).toBeInTheDocument();
+    expect(within(dialog).getByText("无效 0")).toBeInTheDocument();
+    const tables = dialog.querySelectorAll("table");
+    expectTableHeaderBeforeFirstRow(tables[tables.length - 1]);
     const importCall = fetchMock.mock.calls.find(([url]) => String(url).endsWith("/api/recruitment-tasks/11/external-ratings/import"));
     expect(importCall?.[1]?.body).toContain("SSR- / 强SR");
+    expect(importCall?.[1]?.body).toContain("\"batch_id\":\"166\"");
     expect(importCall?.[1]?.body).toContain("测试理由乙");
     expect(importCall?.[1]?.body).toContain("\"rating\":\"SSR\"");
     expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/api/recruitment-tasks/11/external-ratings/import"))).toHaveLength(2);
+  });
+
+  it("keeps candidate and batch list headers before data rows", async () => {
+    const candidateFetch = vi.fn((input: string | URL) => {
+      const url = String(input);
+      if (url.includes("/api/candidates?")) {
+        return response({
+          rows: [{
+            id: 1,
+            name: "测试甲",
+            source_platform: "boss",
+            latest_source_platform: "boss",
+            latest_source_job_title: "量化研究员",
+            latest_batch_id: 166,
+            latest_capture_time: "2026-08-19T09:00:00",
+            latest_ingest_status: "new",
+            latest_rating: "SR",
+            latest_batch_role_id: 7,
+            has_role_binding: true,
+            batch_count: 1,
+          }],
+          total: 1,
+          page: 1,
+          page_size: 100,
+        });
+      }
+      throw new Error(`unexpected candidate request: ${url}`);
+    });
+    vi.stubGlobal("fetch", candidateFetch);
+    const candidateView = render(<CandidatesPage active onOpenBatch={() => {}} />);
+    expect(await screen.findByText("测试甲")).toBeInTheDocument();
+    expectTableHeaderBeforeFirstRow(candidateView.container.querySelector(".candidate-table-readability"));
+    candidateView.unmount();
+
+    const batchFetch = vi.fn((input: string | URL) => {
+      const url = String(input);
+      if (url.includes("/api/capture-batches?")) {
+        return response({
+          rows: [{
+            id: 166,
+            start_time: "2026-08-19T09:00:00",
+            source_platform: "boss",
+            total_collected: 2,
+            total_new: 2,
+            total_updated: 0,
+            total_skipped: 0,
+            total_failed: 0,
+            status: "completed",
+            role_id: 7,
+          }],
+          total: 1,
+          page: 1,
+          page_size: 20,
+          today_summary: { received: 2, added: 2 },
+        });
+      }
+      throw new Error(`unexpected batch request: ${url}`);
+    });
+    vi.stubGlobal("fetch", batchFetch);
+    const batchView = render(<BatchesPage active />);
+    expect(await screen.findByText("#166")).toBeInTheDocument();
+    expectTableHeaderBeforeFirstRow(batchView.container.querySelector(".batch-table-readability"));
+    batchView.unmount();
   });
 
   it("previews TSV external rating headers without disabling import", async () => {

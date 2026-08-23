@@ -137,6 +137,72 @@ const batchCandidates = [
   },
 ];
 
+const jobRows = [
+  {
+    id: 7,
+    job_title: "量化研究员",
+    department: "投研",
+    location: "上海",
+    employment_type: "全职",
+    target_hires: 2,
+    priority: "high",
+    status: "active",
+    version: 3,
+    updated_at: "2026-08-18T10:00:00",
+  },
+];
+
+const taskRows = [
+  {
+    id: 11,
+    name: "Boss 推荐流",
+    role_id: 7,
+    role_title: "量化研究员",
+    profile_version: 3,
+    platform: "boss",
+    source_url: "https://www.zhipin.com/web/geek/recommend",
+    target_candidates: 20,
+    status: "running",
+    current_step: "采集与筛选",
+    latest_message: "",
+    batch_count: 1,
+    candidate_count: 2,
+    run_count: 0,
+    export_count: 0,
+    created_at: "2026-08-18T10:00:00",
+    updated_at: "2026-08-18T10:00:00",
+  },
+];
+
+const ratingPreviewRows = [
+  {
+    line: 3,
+    candidate_id: "",
+    name: "测试甲",
+    rating: "SR",
+    original_rating: "强SR",
+    rating_status: "normalized",
+    track: "Alpha / 多因子",
+    reason: "测试理由甲",
+    batch_id: "166",
+    source_platform: "",
+    source_job_title: "",
+  },
+  {
+    line: 4,
+    candidate_id: "",
+    name: "测试乙",
+    rating: "SR",
+    original_rating: "强SR",
+    rating_status: "normalized",
+    track: "高频储备",
+    reason: "测试理由乙",
+    batch_id: "166",
+    source_platform: "",
+    source_job_title: "",
+  },
+];
+
 function json(body) {
   return {
     status: 200,
@@ -189,6 +255,28 @@ async function installMockApi(page) {
             capture_time: "2026-08-18T10:30:00",
             ingest_status: "updated",
           },
+        ],
+      }));
+    }
+    if (pathname === "/api/job-profiles") return route.fulfill(json({ rows: jobRows }));
+    if (pathname === "/api/recruitment-tasks") return route.fulfill(json({ rows: taskRows }));
+    if (pathname === "/api/plugin-context") return route.fulfill(json({ context: null }));
+    if (pathname === "/api/recruitment-tasks/11/external-ratings/preview") {
+      return route.fulfill(json({ task_id: 11, received: 2, rows: ratingPreviewRows }));
+    }
+    if (pathname === "/api/recruitment-tasks/11/external-ratings/import") {
+      return route.fulfill(json({
+        task_id: 11,
+        run_id: 32,
+        status: "completed",
+        received: 2,
+        imported: 2,
+        unmatched: 0,
+        ambiguous: 0,
+        invalid: 0,
+        rows: [
+          { line: 3, candidate_id: 1, name: "测试甲", rating: "SR", status: "imported", message: "已导入外部评级。" },
+          { line: 4, candidate_id: 2, name: "测试乙", rating: "SR", status: "imported", message: "已导入外部评级。" },
         ],
       }));
     }
@@ -313,6 +401,40 @@ async function assertTableHasScrollContract(page, label) {
   }
 }
 
+async function assertVisibleTableHeadersBeforeRows(page, label) {
+  const tables = await page.evaluate(() => {
+    return Array.from(document.querySelectorAll("table"))
+      .filter((table) => {
+        const rect = table.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      })
+      .map((table) => {
+        const header = table.querySelector("thead");
+        const firstRow = table.querySelector("tbody tr");
+        const headerRect = header?.getBoundingClientRect();
+        const rowRect = firstRow?.getBoundingClientRect();
+        return {
+          headers: Array.from(table.querySelectorAll("th")).map((node) => node.textContent?.trim() || ""),
+          hasHeader: Boolean(header),
+          hasFirstRow: Boolean(firstRow),
+          domBefore: header && firstRow ? Boolean(header.compareDocumentPosition(firstRow) & Node.DOCUMENT_POSITION_FOLLOWING) : false,
+          headerBottom: headerRect?.bottom ?? 0,
+          firstRowTop: rowRect?.top ?? 0,
+        };
+      });
+  });
+  assert(tables.length > 0, `${label}: no visible tables`);
+  for (const table of tables) {
+    assert(table.hasHeader, `${label}: table missing header ${JSON.stringify(table.headers)}`);
+    assert(table.hasFirstRow, `${label}: table missing first row ${JSON.stringify(table.headers)}`);
+    assert(table.domBefore, `${label}: table header appears after row in DOM ${JSON.stringify(table.headers)}`);
+    assert(
+      table.headerBottom <= table.firstRowTop + 1,
+      `${label}: table header overlaps or appears below first row ${JSON.stringify(table)}`,
+    );
+  }
+}
+
 async function assertMobileBreakpointContract(page, label) {
   if ((page.viewportSize()?.width || 0) > 760) return;
   const result = await page.evaluate(() => {
@@ -386,6 +508,7 @@ async function runViewport(browser, baseUrl, viewport) {
   await page.getByRole("button", { name: "查看详情" }).first().waitFor();
   await assertNoVerticalText(page, `${viewport.label} candidate list`);
   await assertTableHasScrollContract(page, `${viewport.label} candidate list`);
+  await assertVisibleTableHeadersBeforeRows(page, `${viewport.label} candidate list`);
   await assertButtonsDoNotOverlap(page, `${viewport.label} candidate list`);
   evidence.push(await capture(page, viewport.label, "candidates-list"));
 
@@ -404,6 +527,7 @@ async function runViewport(browser, baseUrl, viewport) {
   await page.getByRole("button", { name: "查看原始快照" }).first().waitFor();
   await assertNoVerticalText(page, `${viewport.label} batch detail`);
   await assertTableHasScrollContract(page, `${viewport.label} batch detail`);
+  await assertVisibleTableHeadersBeforeRows(page, `${viewport.label} batch detail`);
   await assertButtonsDoNotOverlap(page, `${viewport.label} batch detail`);
   evidence.push(await capture(page, viewport.label, "batch-detail"));
 
@@ -416,6 +540,19 @@ async function runViewport(browser, baseUrl, viewport) {
   await assertNoVerticalText(page, `${viewport.label} snapshot drawer`);
   await assertButtonsDoNotOverlap(page, `${viewport.label} snapshot drawer`);
   evidence.push(await capture(page, viewport.label, "snapshot-drawer"));
+
+  await page.getByRole("button", { name: "关闭原始快照" }).click();
+  await page.getByRole("button", { name: "岗位" }).click();
+  await page.getByRole("button", { name: "导入外部评级" }).click();
+  await page.getByRole("dialog", { name: "导入外部评级" }).waitFor();
+  await page.getByLabel("粘贴评级名单").fill("| 候选人 | 当前评级 | batch_id |\n| --- | --- | --- |\n| 测试甲 | 强SR | 166 |\n| 测试乙 | 强SR | 166 |");
+  await page.getByText("解析 2 行").waitFor();
+  await assertVisibleTableHeadersBeforeRows(page, `${viewport.label} external rating preview`);
+  evidence.push(await capture(page, viewport.label, "external-rating-preview"));
+  await page.getByRole("button", { name: "确认导入外部评级" }).click();
+  await page.locator(".rating-import-result").waitFor();
+  await assertVisibleTableHeadersBeforeRows(page, `${viewport.label} external rating result`);
+  evidence.push(await capture(page, viewport.label, "external-rating-result"));
 
   await context.close();
   return evidence;

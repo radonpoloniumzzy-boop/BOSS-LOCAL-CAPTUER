@@ -248,7 +248,7 @@ textarea:focus-visible,
 .data-panel { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-lg); overflow: hidden; box-shadow: 0 5px 18px rgba(23, 32, 51, .035); }
 .table-scroll { overflow-x: auto; }
 .workbench-table { width: 100%; min-width: 920px; border-collapse: separate; border-spacing: 0; table-layout: fixed; font-size: var(--text-xs); }
-.workbench-table th { position: sticky; top: 99px; z-index: 2; background: #f8fafc; color: var(--color-text-muted); text-align: left; font-weight: 600; padding: 11px 13px; border-bottom: 1px solid var(--color-border); white-space: nowrap; }
+.workbench-table th { background: #f8fafc; color: var(--color-text-muted); text-align: left; font-weight: 600; padding: 11px 13px; border-bottom: 1px solid var(--color-border); white-space: nowrap; }
 .workbench-table td { padding: 13px; border-bottom: 1px solid var(--color-border-soft); vertical-align: middle; overflow-wrap: normal; word-break: normal; }
 .workbench-table tbody tr { transition: background var(--motion-fast) var(--ease-standard); }
 .workbench-table tbody tr:hover { background: #f8fbff; }
