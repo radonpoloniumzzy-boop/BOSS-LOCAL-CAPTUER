@@ -14,6 +14,7 @@ type BatchStatusFilter = "" | "completed" | "partial" | "failed";
 export function BatchesPage({
   active = true,
   taskId = null,
+  taskLabel = "",
   onClearTaskScope,
   initialBatchId = null,
   initialReturnView = null,
@@ -22,6 +23,7 @@ export function BatchesPage({
 }: {
   active?: boolean;
   taskId?: number | null;
+  taskLabel?: string;
   onClearTaskScope?: () => void;
   initialBatchId?: number | null;
   initialReturnView?: "home" | "candidates" | "batches" | "jobs" | "settings" | null;
@@ -243,15 +245,19 @@ export function BatchesPage({
       <section className="data-panel">
         {taskId && (
           <div className="scope-banner">
-            <span>正在查看任务 #{taskId} 的批次范围。</span>
-            <button className="text-button" onClick={onClearTaskScope}>清除任务筛选</button>
+            <span>正在查看：{taskLabel || `任务 #${taskId}`} 的采集批次。</span>
+            <button className="text-button" onClick={onClearTaskScope}>返回全部批次</button>
           </div>
         )}
         <TableState
           loading={data.loading}
           error={data.error}
           empty={!data.rows.length}
-          emptyText={hasFilters ? "当前筛选条件下还没有采集批次。" : "还没有采集批次。"}
+          emptyText={hasFilters
+            ? taskId
+              ? "这个任务还没有符合当前条件的采集批次。请回到任务工作台确认插件当前任务后再采集。"
+              : "当前筛选条件下还没有采集批次。"
+            : "还没有采集批次。"}
         />
         {!data.loading && !data.error && data.rows.length > 0 && (
           <div className="table-scroll">

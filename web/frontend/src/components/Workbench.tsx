@@ -9,12 +9,28 @@ import { JobsPage } from "./workbench/JobsPage";
 import { SettingsPage } from "./workbench/SettingsPage";
 
 type View = "home" | "candidates" | "batches" | "jobs" | "settings";
+type TaskScope = { id: number; label: string };
+
+const taskScopeStorageKey = "boss-local-task-scope-v1";
+
+function readStoredTaskScope(): TaskScope | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.sessionStorage.getItem(taskScopeStorageKey);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<TaskScope>;
+    if (!Number.isInteger(parsed.id) || Number(parsed.id) <= 0) return null;
+    return { id: Number(parsed.id), label: String(parsed.label || `任务 #${parsed.id}`) };
+  } catch {
+    return null;
+  }
+}
 
 export function Workbench({ status }: { status: AppStatus }) {
   const [view, setView] = useState<View>("home");
   const [requestedBatch, setRequestedBatch] = useState<number | null>(null);
   const [requestedBatchOrigin, setRequestedBatchOrigin] = useState<View | null>(null);
-  const [taskScope, setTaskScope] = useState<number | null>(null);
+  const [taskScope, setTaskScopeState] = useState<TaskScope | null>(() => readStoredTaskScope());
   const [visited, setVisited] = useState<Record<View, boolean>>({
     home: true,
     candidates: false,
@@ -28,19 +44,32 @@ export function Workbench({ status }: { status: AppStatus }) {
     setView(nextView);
   };
 
+  const setTaskScope = (nextScope: TaskScope | null) => {
+    setTaskScopeState(nextScope);
+    try {
+      if (nextScope) {
+        window.sessionStorage.setItem(taskScopeStorageKey, JSON.stringify(nextScope));
+      } else {
+        window.sessionStorage.removeItem(taskScopeStorageKey);
+      }
+    } catch {
+      // Session persistence is optional; task-scoped navigation still works without it.
+    }
+  };
+
   const openBatch = (batchId: number, origin: View = view) => {
     setRequestedBatch(batchId);
     setRequestedBatchOrigin(origin);
     activateView("batches");
   };
 
-  const openTaskCandidates = (taskId: number) => {
-    setTaskScope(taskId);
+  const openTaskCandidates = (taskId: number, taskName: string) => {
+    setTaskScope({ id: taskId, label: taskName || `任务 #${taskId}` });
     activateView("candidates");
   };
 
-  const openTaskBatches = (taskId: number) => {
-    setTaskScope(taskId);
+  const openTaskBatches = (taskId: number, taskName: string) => {
+    setTaskScope({ id: taskId, label: taskName || `任务 #${taskId}` });
     activateView("batches");
   };
 
@@ -139,7 +168,8 @@ export function Workbench({ status }: { status: AppStatus }) {
           <section hidden={view !== "candidates"} aria-hidden={view !== "candidates"}>
             <CandidatesPage
               active={view === "candidates"}
-              taskId={taskScope}
+              taskId={taskScope?.id ?? null}
+              taskLabel={taskScope?.label ?? ""}
               onClearTaskScope={() => setTaskScope(null)}
               onOpenBatch={(batchId) => openBatch(batchId, "candidates")}
             />
@@ -149,7 +179,8 @@ export function Workbench({ status }: { status: AppStatus }) {
           <section hidden={view !== "batches"} aria-hidden={view !== "batches"}>
             <BatchesPage
               active={view === "batches"}
-              taskId={taskScope}
+              taskId={taskScope?.id ?? null}
+              taskLabel={taskScope?.label ?? ""}
               onClearTaskScope={() => setTaskScope(null)}
               initialBatchId={requestedBatch}
               initialReturnView={requestedBatchOrigin}

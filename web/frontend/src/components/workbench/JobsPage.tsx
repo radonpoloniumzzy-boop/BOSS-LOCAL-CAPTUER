@@ -26,8 +26,8 @@ export function JobsPage({
   onOpenBatch,
 }: {
   active: boolean;
-  onOpenTaskCandidates: (taskId: number) => void;
-  onOpenTaskBatches: (taskId: number) => void;
+  onOpenTaskCandidates: (taskId: number, taskName: string) => void;
+  onOpenTaskBatches: (taskId: number, taskName: string) => void;
   onOpenBatch: (batchId: number) => void;
 }) {
   const [jobs, setJobs] = useState<JobProfileRow[]>([]);

@@ -844,6 +844,29 @@ function testChatAutomationIsOptIn() {
   assert(manifest.description.includes("opt-in Boss chat"));
 }
 
+function testPopupClientFirstScreenKeepsCoreWebActionsVisibleAndLegacyFolded() {
+  const html = fs.readFileSync(path.join(EXTENSION_DIR, "popup.html"), "utf8");
+  const dom = new JSDOM(html);
+  const document = dom.window.document;
+  const coreIds = ["applyPairingCode", "collectCurrent", "collectAuto", "pauseScroll", "downloadCurrentBatch", "retryWebIntake", "openWebWorkbench"];
+  for (const id of coreIds) {
+    const element = document.getElementById(id);
+    assert(element, `missing ${id}`);
+    assert.strictEqual(element.closest("details"), null, `${id} should be on the client first screen`);
+  }
+  for (const id of ["desktopAdvanced", "scrollAdvanced", "detailEnrichmentAdvanced", "legacyChatAdvanced", "legacyBatchAdvanced"]) {
+    const details = document.getElementById(id);
+    assert(details, `missing ${id}`);
+    assert.strictEqual(details.open, false, `${id} should be folded by default`);
+  }
+  assert.strictEqual(document.getElementById("automationAuto").closest("details")?.id, "desktopAdvanced");
+  assert.strictEqual(document.getElementById("captureCurrentDetail").closest("details")?.id, "detailEnrichmentAdvanced");
+  assert.strictEqual(document.getElementById("chatAutomationEnabled").closest("details")?.id, "legacyChatAdvanced");
+  assert.strictEqual(document.getElementById("startBatchRequest").closest("details")?.id, "legacyBatchAdvanced");
+  assert(document.body.textContent.includes("网页工作台采集助手"));
+  assert(document.body.textContent.includes("后续聊天与附件能力（默认关闭）"));
+}
+
 function testScrollWaitDefaultsToThirtyMillisecondsAndHasAdjusters() {
   const popup = fs.readFileSync(path.join(EXTENSION_DIR, "popup.js"), "utf8");
   const html = fs.readFileSync(path.join(EXTENSION_DIR, "popup.html"), "utf8");
@@ -1535,7 +1558,7 @@ async function testPopupDesktopModeStillUsesDesktopImportOnly() {
               result: {
                 job_profile_id: 9,
                 recruitment_task_id: 12,
-                job_title: "????",
+                job_title: "测试岗位",
               },
             };
           },
@@ -1561,7 +1584,7 @@ async function testPopupDesktopModeStillUsesDesktopImportOnly() {
   assert(popup.fetchCalls.some((call) => call.url.endsWith("/api/extension/config")));
   assert(popup.fetchCalls.some((call) => call.url.endsWith("/api/import/cards")));
   assert(!popup.fetchCalls.some((call) => call.url.endsWith("/api/intake/candidates")));
-  assert(!popup.elements.automationAuto.title.includes("Web ??????????? AUTO ???"));
+  assert(!popup.elements.automationAuto.title.includes("Web mojibake AUTO text"));
 }
 
 async function testPopupRetryRestoresPendingStateAcrossInit() {
@@ -1614,10 +1637,10 @@ async function testPopupRetryRestoresPendingStateAcrossInit() {
 
 async function testWebIntakeConnectionChangeDoesNotResendOldPendingBatch() {
   const popup = createPopupTestContext({ apiBase: "http://127.0.0.1:17864", apiToken: "token-a" });
-  const settingsA = { apiBase: "http://127.0.0.1:17864", apiToken: "token-a", jobTitle: "Boss ????" };
+  const settingsA = { apiBase: "http://127.0.0.1:17864", apiToken: "token-a", jobTitle: "Boss 测试岗位" };
   const merged = {
     platform: "boss",
-    cards: [{ source_candidate_id: "boss-1", raw_card_text: "??? A" }],
+    cards: [{ source_candidate_id: "boss-1", raw_card_text: "测试原文 A" }],
   };
   const queued = await popup.context.BossLocalWebIntake.queueCapturedBatch({
     settings: settingsA,
@@ -1643,10 +1666,10 @@ async function testWebIntakeConnectionChangeDoesNotResendOldPendingBatch() {
 
 async function testWebIntakeSameRunIdDoesNotDuplicatePendingBatch() {
   const popup = createPopupTestContext({ apiBase: "http://127.0.0.1:17864", apiToken: "token-a" });
-  const settings = { apiBase: "http://127.0.0.1:17864", apiToken: "token-a", jobTitle: "Boss ????" };
+  const settings = { apiBase: "http://127.0.0.1:17864", apiToken: "token-a", jobTitle: "Boss 测试岗位" };
   const merged = {
     platform: "boss",
-    cards: [{ source_candidate_id: "boss-1", raw_card_text: "??? A" }],
+    cards: [{ source_candidate_id: "boss-1", raw_card_text: "测试原文 A" }],
   };
   const first = await popup.context.BossLocalWebIntake.queueCapturedBatch({
     settings,
@@ -1670,12 +1693,12 @@ async function testWebIntakeSameRunIdDoesNotDuplicatePendingBatch() {
 
 async function testWebIntakeConcurrentCompletionDoesNotOverwriteQueuedBatch() {
   const popup = createPopupTestContext({ apiBase: "http://127.0.0.1:17864", apiToken: "web-token" });
-  const settings = { apiBase: "http://127.0.0.1:17864", apiToken: "web-token", jobTitle: "Boss ????" };
+  const settings = { apiBase: "http://127.0.0.1:17864", apiToken: "web-token", jobTitle: "Boss 测试岗位" };
   const fetchStarted = createDeferred();
   const releaseFetch = createDeferred();
   const queuedA = await popup.context.BossLocalWebIntake.queueCapturedBatch({
     settings,
-    merged: { platform: "boss", cards: [{ source_candidate_id: "boss-1", raw_card_text: "???A" }] },
+    merged: { platform: "boss", cards: [{ source_candidate_id: "boss-1", raw_card_text: "测试原文A" }] },
     sourceUrl: "https://www.zhipin.com/web/geek/recommend",
     idempotencyKey: "concurrent-a",
     storageArea: popup.chrome.storage.local,
@@ -1693,7 +1716,7 @@ async function testWebIntakeConcurrentCompletionDoesNotOverwriteQueuedBatch() {
   await fetchStarted.promise;
   const queuedB = await popup.context.BossLocalWebIntake.queueCapturedBatch({
     settings,
-    merged: { platform: "boss", cards: [{ source_candidate_id: "boss-2", raw_card_text: "???B" }] },
+    merged: { platform: "boss", cards: [{ source_candidate_id: "boss-2", raw_card_text: "测试原文B" }] },
     sourceUrl: "https://www.zhipin.com/web/geek/recommend",
     idempotencyKey: "concurrent-b",
     storageArea: popup.chrome.storage.local,
@@ -1994,7 +2017,7 @@ async function testPendingLimitConcurrentEnqueueStaysWithinTen() {
 
 async function testWebIntakeSuccessSanitizesCompletedPayload() {
   const popup = createPopupTestContext({ apiBase: "http://127.0.0.1:17864", apiToken: "web-token" });
-  const settings = { apiBase: "http://127.0.0.1:17864", apiToken: "web-token", jobTitle: "Boss ????" };
+  const settings = { apiBase: "http://127.0.0.1:17864", apiToken: "web-token", jobTitle: "Boss 测试岗位" };
   const queued = await popup.context.BossLocalWebIntake.queueCapturedBatch({
     settings,
     merged: {
@@ -2003,7 +2026,7 @@ async function testWebIntakeSuccessSanitizesCompletedPayload() {
         {
           source_candidate_id: "boss-1",
           detail_url: "https://www.zhipin.com/candidate/1",
-          raw_card_text: "?? ???",
+          raw_card_text: "测试 原文",
           name: "??",
         },
       ],
@@ -2046,8 +2069,8 @@ async function testWebIntakeQuotaFailureIsReportedSeparately() {
   await assert.rejects(
     () =>
       popup.context.BossLocalWebIntake.queueCapturedBatch({
-        settings: { apiBase: "http://127.0.0.1:17864", apiToken: "web-token", jobTitle: "Boss ????" },
-        merged: { platform: "boss", cards: [{ source_candidate_id: "boss-1", raw_card_text: "???A" }] },
+        settings: { apiBase: "http://127.0.0.1:17864", apiToken: "web-token", jobTitle: "Boss 测试岗位" },
+        merged: { platform: "boss", cards: [{ source_candidate_id: "boss-1", raw_card_text: "测试原文A" }] },
         sourceUrl: "https://www.zhipin.com/web/geek/recommend",
         idempotencyKey: "quota-1",
         storageArea: popup.chrome.storage.local,
@@ -2061,9 +2084,9 @@ async function testServiceWorkerRestoresPendingBatchViaAlarm() {
     throw new Error("connect ECONNREFUSED 127.0.0.1:17864");
   });
   await first.api.enqueueAndSendWebIntake({
-    settings: { apiBase: "http://127.0.0.1:17864", apiToken: "web-token", jobTitle: "Boss ????" },
+    settings: { apiBase: "http://127.0.0.1:17864", apiToken: "web-token", jobTitle: "Boss 测试岗位" },
     sourceUrl: "https://www.zhipin.com/web/geek/recommend",
-    merged: { platform: "boss", cards: [{ source_candidate_id: "boss-1", raw_card_text: "???A" }] },
+    merged: { platform: "boss", cards: [{ source_candidate_id: "boss-1", raw_card_text: "测试原文A" }] },
     idempotencyKey: "restore-1",
   });
   const second = loadServiceWorker(async () => ({
@@ -2081,7 +2104,7 @@ async function testServiceWorkerRestoresPendingBatchViaAlarm() {
       };
     },
   }));
-  Object.assign(second.chrome.__store, first.chrome.__store, { apiBase: "http://127.0.0.1:17864", apiToken: "web-token", jobTitle: "Boss ????" });
+  Object.assign(second.chrome.__store, first.chrome.__store, { apiBase: "http://127.0.0.1:17864", apiToken: "web-token", jobTitle: "Boss 测试岗位" });
   await triggerRetryAlarm(second);
   const state = await second.context.BossLocalWebIntake.loadState(second.chrome.storage.local);
   assert.strictEqual(state.pendingOrder.length, 0);
@@ -2727,7 +2750,7 @@ function testCollectorDoesNotPromoteGenericDataIdToPlatformUid() {
       return [];
     },
   });
-  const first = collector.extractCardPayload(createCard({ "data-id": "same-data-id" }, "?? ???"), bossPlatform);
+  const first = collector.extractCardPayload(createCard({ "data-id": "same-data-id" }, "测试 原文"), bossPlatform);
   const second = collector.extractCardPayload(createCard({ "data-id": "same-data-id" }, "?? ??"), bossPlatform);
   assert.strictEqual(first.platform_uid, "");
   assert.strictEqual(second.platform_uid, "");
@@ -3311,7 +3334,7 @@ async function testPopupCurrentDetailEnrichmentRejectsUnconfirmedAndAllowsRetryA
   await popup.api.init();
   await popup.api.runCurrentDetailEnrichment();
   assert.strictEqual(enrichCount, 0);
-  assert(popup.elements.status.textContent.includes("缺少稳定身份"));
+  assert(popup.elements.status.textContent.includes("当前页面暂不支持安全详情关联"));
 
   frameStatus = "capturable";
   await popup.api.runCurrentDetailEnrichment();
@@ -3326,7 +3349,7 @@ async function testPopupCurrentDetailEnrichmentRejectsUnconfirmedAndAllowsRetryA
 
 async function testWebIntakeStatusMatrixFollowsServerStatus() {
   const popup = createPopupTestContext({ apiBase: "http://127.0.0.1:17864", apiToken: "web-token" });
-  const settings = { apiBase: "http://127.0.0.1:17864", apiToken: "web-token", jobTitle: "Boss ????" };
+  const settings = { apiBase: "http://127.0.0.1:17864", apiToken: "web-token", jobTitle: "Boss 测试岗位" };
   const runStatus = async (status) => {
     const queued = await popup.context.BossLocalWebIntake.queueCapturedBatch({
       settings,
@@ -4912,6 +4935,7 @@ async function main() {
   testAutoScrollCanBePausedFromPopup();
   testAutomationAutoButtonStartsDesktopWorkflow();
   testChatAutomationIsOptIn();
+  testPopupClientFirstScreenKeepsCoreWebActionsVisibleAndLegacyFolded();
   testScrollWaitDefaultsToThirtyMillisecondsAndHasAdjusters();
   testHoldEndScrollStrategyIsDefault();
   testRuntimeFingerprintAndVersionAwareRunnerInjection();

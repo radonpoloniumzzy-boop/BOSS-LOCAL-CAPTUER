@@ -123,6 +123,7 @@
 详细说明见：
 
 - [网页工作台快速开始](docs/guides/web-workbench-quick-start.md)
+- [M2.1 客户端试用候选版说明](docs/guides/m2-client-trial-candidate.md)
 - [备份与恢复](docs/guides/backup-and-recovery.md)
 - [当前预览版本说明](docs/releases/current-preview.md)
 

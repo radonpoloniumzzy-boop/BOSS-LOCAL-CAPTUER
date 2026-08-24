@@ -694,7 +694,7 @@ async function runCurrentDetailEnrichment() {
       return;
     }
     if (unconfirmed) {
-      setStatus("当前详情缺少稳定身份，无法确认对应候选人。请先从推荐页完成卡片采集后再重试。");
+      setStatus("当前页面暂不支持安全详情关联。请先从推荐页完成卡片采集后再重试。");
       return;
     }
     if (candidates.length === 0) {

@@ -22,8 +22,8 @@ type RecruitmentTasksPanelProps = {
   tasks: RecruitmentTaskRow[];
   currentContext: PluginTaskContext | null;
   saving: boolean;
-  onOpenTaskCandidates: (taskId: number) => void;
-  onOpenTaskBatches: (taskId: number) => void;
+  onOpenTaskCandidates: (taskId: number, taskName: string) => void;
+  onOpenTaskBatches: (taskId: number, taskName: string) => void;
   onOpenBatch: (batchId: number) => void;
   onStatusChange: (task: RecruitmentTaskRow, status: string) => Promise<void>;
   onAssignContext: (task: RecruitmentTaskRow | null) => Promise<void>;
@@ -141,6 +141,88 @@ export function RecruitmentTasksPanel({
     if (!progressTarget) return;
     await changeStatus(progressTarget, status);
     setProgressRefresh((value) => value + 1);
+  };
+
+  const renderNextAction = (progress: RecruitmentTaskProgress) => {
+    if (!progressTarget) return null;
+    const openScopedCandidates = () => {
+      setProgressTarget(null);
+      onOpenTaskCandidates(progress.task_id, progress.task_name);
+    };
+    const openScopedBatches = () => {
+      setProgressTarget(null);
+      onOpenTaskBatches(progress.task_id, progress.task_name);
+    };
+    if (progress.task_status === "ready") {
+      return (
+        <section className="detail-section-card next-action-card">
+          <div>
+            <span className="eyebrow">下一步</span>
+            <h3>先启动这个招聘任务</h3>
+            <p>启动后才能把它设为插件当前任务，再到招聘平台采集候选人。</p>
+          </div>
+          <button className="primary-button" disabled={saving} onClick={() => void changeProgressStatus("running")}>启动任务</button>
+        </section>
+      );
+    }
+    if (progress.task_status === "running" && !progress.is_plugin_context) {
+      return (
+        <section className="detail-section-card next-action-card">
+          <div>
+            <span className="eyebrow">下一步</span>
+            <h3>设为插件当前任务</h3>
+            <p>插件会把后续采集批次、外部评级和关键词标记都绑定到这个任务。</p>
+          </div>
+          <button
+            className="primary-button"
+            disabled={saving}
+            onClick={() => void onAssignContext(progressTarget).then(() => setProgressRefresh((value) => value + 1))}
+          >
+            设为插件当前任务
+          </button>
+        </section>
+      );
+    }
+    if (progress.task_status === "running") {
+      return (
+        <section className="detail-section-card next-action-card">
+          <div>
+            <span className="eyebrow">下一步</span>
+            <h3>{progress.batch_count > 0 ? "继续采集，或查看最近结果" : "去招聘平台采集候选人"}</h3>
+            <p>{progress.batch_count > 0 ? "新批次会出现在最近批次里；也可以直接查看本任务候选人。" : "打开 BOSS 推荐页后，在插件里点击采集当前已加载或自动滚动采集。"}</p>
+          </div>
+          <div className="button-row">
+            <button className="primary-button" onClick={openScopedBatches}>{progress.batch_count > 0 ? "查看本任务批次" : "查看采集批次"}</button>
+            <button className="secondary-button" onClick={openScopedCandidates}>查看本任务候选人</button>
+          </div>
+        </section>
+      );
+    }
+    if (progress.task_status === "paused") {
+      return (
+        <section className="detail-section-card next-action-card">
+          <div>
+            <span className="eyebrow">下一步</span>
+            <h3>继续任务后再采集</h3>
+            <p>暂停期间插件不会继续把这个任务作为新的采集上下文。</p>
+          </div>
+          <button className="primary-button" disabled={saving} onClick={() => void changeProgressStatus("running")}>继续任务</button>
+        </section>
+      );
+    }
+    return (
+      <section className="detail-section-card next-action-card">
+        <div>
+          <span className="eyebrow">下一步</span>
+          <h3>查看这个任务的历史结果</h3>
+          <p>任务已经结束，仍可查看候选人、采集批次和不可变快照。</p>
+        </div>
+        <div className="button-row">
+          <button className="primary-button" onClick={openScopedCandidates}>查看本任务候选人</button>
+          <button className="secondary-button" onClick={openScopedBatches}>查看本任务批次</button>
+        </div>
+      </section>
+    );
   };
 
   const exportProgressBatch = async (batchId: number) => {
@@ -392,6 +474,7 @@ export function RecruitmentTasksPanel({
                   <div><dt>最近采集</dt><dd className="numeric">{formatDate(progress.latest_capture_time)}</dd></div>
                 </dl>
               </section>
+              {renderNextAction(progress)}
               <section className="summary-strip five">
                 <div><span>批次数</span><strong>{progress.batch_count}</strong></div>
                 <div><span>批次记录</span><strong>{progress.batch_item_count}</strong></div>
@@ -485,8 +568,8 @@ export function RecruitmentTasksPanel({
                   {["ready", "running", "waiting_user", "paused"].includes(progress.task_status) && (
                     <button className="secondary-button danger" disabled={saving} onClick={() => { setConfirmError(""); setCancelTarget(progressTarget); }}>取消任务</button>
                   )}
-                  <button className="secondary-button" onClick={() => { setProgressTarget(null); onOpenTaskCandidates(progress.task_id); }}>查看本任务候选人</button>
-                  <button className="secondary-button" onClick={() => { setProgressTarget(null); onOpenTaskBatches(progress.task_id); }}>查看本任务批次</button>
+                  <button className="secondary-button" onClick={() => { setProgressTarget(null); onOpenTaskCandidates(progress.task_id, progress.task_name); }}>查看本任务候选人</button>
+                  <button className="secondary-button" onClick={() => { setProgressTarget(null); onOpenTaskBatches(progress.task_id, progress.task_name); }}>查看本任务批次</button>
                 </div>
                 <p className="muted">AI 初筛、自动沟通、联系方式和附件归档仍属于后续阶段，本页不提供可点击入口。</p>
               </section>

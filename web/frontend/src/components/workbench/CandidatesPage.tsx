@@ -33,11 +33,13 @@ function safeHttpUrl(value: string) {
 export function CandidatesPage({
   active = true,
   taskId = null,
+  taskLabel = "",
   onClearTaskScope,
   onOpenBatch,
 }: {
   active?: boolean;
   taskId?: number | null;
+  taskLabel?: string;
   onClearTaskScope?: () => void;
   onOpenBatch: (batchId: number) => void;
 }) {
@@ -196,15 +198,19 @@ export function CandidatesPage({
       <section className="data-panel">
         {taskId && (
           <div className="scope-banner">
-            <span>正在查看任务 #{taskId} 的候选人范围。</span>
-            <button className="text-button" onClick={onClearTaskScope}>清除任务筛选</button>
+            <span>正在查看：{taskLabel || `任务 #${taskId}`} 的候选人。</span>
+            <button className="text-button" onClick={onClearTaskScope}>返回全部候选人</button>
           </div>
         )}
         <TableState
           loading={data.loading}
           error={data.error}
           empty={!data.rows.length}
-          emptyText={keyword || platform || rating || unbound ? "没有符合当前筛选条件的候选人。" : "当前还没有候选人。"}
+          emptyText={keyword || platform || rating || unbound
+            ? "没有符合当前筛选条件的候选人。"
+            : taskId
+              ? "这个任务还没有候选人。请先在插件中将当前任务用于采集。"
+              : "当前还没有候选人。"}
         />
         {!data.loading && !data.error && data.rows.length > 0 && (
           <div className="table-scroll">

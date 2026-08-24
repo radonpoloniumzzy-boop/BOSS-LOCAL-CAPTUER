@@ -37,7 +37,10 @@ const errorResponse = (message: string, statusCode = 409) =>
     json: () => Promise.resolve({ error: { code: "request_failed", message } }),
   } as Response);
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+  window.sessionStorage.clear();
+});
 
 function expectTableHeaderBeforeFirstRow(table: HTMLTableElement | null) {
   if (!table) throw new Error("Expected table to exist.");
@@ -467,6 +470,8 @@ describe("recruitment task progress workbench", () => {
     const dialog = await screen.findByRole("dialog", { name: "招聘任务进度" });
 
     expect(within(dialog).getByText("插件正在使用")).toBeInTheDocument();
+    expect(within(dialog).getByRole("heading", { name: "继续采集，或查看最近结果" })).toBeInTheDocument();
+    expect(within(dialog).getByText("新批次会出现在最近批次里；也可以直接查看本任务候选人。")).toBeInTheDocument();
     expect(within(dialog).getByText("批次记录")).toBeInTheDocument();
     expect(within(dialog).getByText("唯一候选人")).toBeInTheDocument();
     expect(within(dialog).getByText("外部评级覆盖")).toBeInTheDocument();
@@ -523,14 +528,18 @@ describe("recruitment task progress workbench", () => {
     await user.click(screen.getByRole("button", { name: "岗位" }));
     await user.click(await screen.findByRole("button", { name: "查看 Boss 推荐流 进度" }));
     const dialog = await screen.findByRole("dialog", { name: "招聘任务进度" });
-    await user.click(within(dialog).getByRole("button", { name: "查看本任务候选人" }));
-    await screen.findByText("正在查看任务 #11 的候选人范围。");
+    await user.click(within(dialog).getAllByRole("button", { name: "查看本任务候选人" })[0]);
+    await screen.findByText("正在查看：Boss 推荐流 的候选人。");
+    expect(screen.getByText("这个任务还没有候选人。请先在插件中将当前任务用于采集。")).toBeInTheDocument();
     await waitFor(() => expect(requestedUrls.some((url) => url.includes("/api/candidates?") && url.includes("task_id=11"))).toBe(true));
+    expect(window.sessionStorage.getItem("boss-local-task-scope-v1")).toContain("Boss 推荐流");
 
     await user.click(screen.getByRole("button", { name: "岗位" }));
     await user.click(await screen.findByRole("button", { name: "查看 Boss 推荐流 进度" }));
-    await user.click(within(await screen.findByRole("dialog", { name: "招聘任务进度" })).getByRole("button", { name: "查看本任务批次" }));
-    await screen.findByText("正在查看任务 #11 的批次范围。");
+    const batchButtons = within(await screen.findByRole("dialog", { name: "招聘任务进度" })).getAllByRole("button", { name: "查看本任务批次" });
+    await user.click(batchButtons[batchButtons.length - 1]);
+    await screen.findByText("正在查看：Boss 推荐流 的采集批次。");
+    expect(screen.getByText("这个任务还没有符合当前条件的采集批次。请回到任务工作台确认插件当前任务后再采集。")).toBeInTheDocument();
     await waitFor(() => expect(requestedUrls.some((url) => url.includes("/api/capture-batches?") && url.includes("task_id=11"))).toBe(true));
   });
 
