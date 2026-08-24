@@ -732,7 +732,7 @@ class CandidateRepository:
         elif view == "overdue":
             where.extend([
                 "a.status = 'pending'",
-                "a.due_at < STRFTIME('%Y-%m-%dT%H:%M:%S', 'now', 'localtime')",
+                "a.due_at < STRFTIME('%Y-%m-%dT00:00:00', 'now', 'localtime')",
             ])
         elif view == "next_7_days":
             where.extend([
@@ -792,7 +792,7 @@ class CandidateRepository:
                               AND DATE(due_at) = DATE('now', 'localtime')
                          THEN 1 ELSE 0 END) AS today,
                 SUM(CASE WHEN status = 'pending'
-                              AND due_at < STRFTIME('%Y-%m-%dT%H:%M:%S', 'now', 'localtime')
+                              AND due_at < STRFTIME('%Y-%m-%dT00:00:00', 'now', 'localtime')
                          THEN 1 ELSE 0 END) AS overdue,
                 SUM(CASE WHEN status = 'pending'
                               AND DATE(due_at) BETWEEN DATE('now', 'localtime', '+1 day')

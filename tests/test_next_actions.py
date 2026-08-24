@@ -59,7 +59,7 @@ class NextActionRepositoryTest(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def test_creates_filters_completes_and_summarizes_actions(self) -> None:
-        now = datetime.now().replace(microsecond=0)
+        today_anchor = datetime.now().replace(hour=12, minute=0, second=0, microsecond=0)
         overdue = self.repository.save_next_action(
             NextAction(
                 subject_type="candidate_role",
@@ -68,7 +68,7 @@ class NextActionRepositoryTest(unittest.TestCase):
                 action_type="follow_up",
                 title="跟进候选人回复",
                 owner="招聘负责人",
-                due_at=(now - timedelta(days=1)).isoformat(),
+                due_at=(today_anchor - timedelta(days=1)).isoformat(),
                 priority="high",
                 note="确认意向",
             )
@@ -81,7 +81,7 @@ class NextActionRepositoryTest(unittest.TestCase):
                 action_type="manual_review",
                 title="检查本轮筛选结果",
                 owner="招聘负责人",
-                due_at=(now + timedelta(hours=1)).isoformat(),
+                due_at=today_anchor.isoformat(),
                 priority="urgent",
             )
         )
@@ -92,7 +92,7 @@ class NextActionRepositoryTest(unittest.TestCase):
                 role_id=int(self.profile.id),
                 action_type="interview",
                 title="安排业务面试",
-                due_at=(now + timedelta(days=3)).isoformat(),
+                due_at=(today_anchor + timedelta(days=3)).isoformat(),
             )
         )
 
