@@ -165,6 +165,41 @@ export type RecruitmentTaskRow = {
   updated_at: string;
 };
 
+export type RecruitmentTaskProgress = {
+  task_id: number;
+  task_name: string;
+  task_status: string;
+  job_profile_id: number;
+  job_profile_version: number;
+  job_title: string;
+  target_count: number;
+  is_plugin_context: boolean;
+  batch_count: number;
+  batch_item_count: number;
+  unique_candidate_count: number;
+  total_received: number;
+  total_added: number;
+  total_updated: number;
+  total_skipped: number;
+  total_failed: number;
+  rated_candidate_count: number;
+  unrated_candidate_count: number;
+  rating_counts: Record<"UR" | "SSR" | "SR" | "R" | "N", number>;
+  first_capture_time: string;
+  latest_capture_time: string;
+  recent_batches: Array<{
+    batch_id: number;
+    source_platform: string;
+    status: string;
+    start_time: string;
+    received: number;
+    added: number;
+    updated: number;
+    skipped: number;
+    failed: number;
+  }>;
+};
+
 export type PluginTaskContext = {
   recruitment_task_id: number;
   job_profile_id: number;

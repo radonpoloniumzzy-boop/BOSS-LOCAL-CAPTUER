@@ -14,6 +14,7 @@ export function Workbench({ status }: { status: AppStatus }) {
   const [view, setView] = useState<View>("home");
   const [requestedBatch, setRequestedBatch] = useState<number | null>(null);
   const [requestedBatchOrigin, setRequestedBatchOrigin] = useState<View | null>(null);
+  const [taskScope, setTaskScope] = useState<number | null>(null);
   const [visited, setVisited] = useState<Record<View, boolean>>({
     home: true,
     candidates: false,
@@ -30,6 +31,16 @@ export function Workbench({ status }: { status: AppStatus }) {
   const openBatch = (batchId: number, origin: View = view) => {
     setRequestedBatch(batchId);
     setRequestedBatchOrigin(origin);
+    activateView("batches");
+  };
+
+  const openTaskCandidates = (taskId: number) => {
+    setTaskScope(taskId);
+    activateView("candidates");
+  };
+
+  const openTaskBatches = (taskId: number) => {
+    setTaskScope(taskId);
     activateView("batches");
   };
 
@@ -126,13 +137,20 @@ export function Workbench({ status }: { status: AppStatus }) {
         )}
         {visited.candidates && (
           <section hidden={view !== "candidates"} aria-hidden={view !== "candidates"}>
-            <CandidatesPage active={view === "candidates"} onOpenBatch={(batchId) => openBatch(batchId, "candidates")} />
+            <CandidatesPage
+              active={view === "candidates"}
+              taskId={taskScope}
+              onClearTaskScope={() => setTaskScope(null)}
+              onOpenBatch={(batchId) => openBatch(batchId, "candidates")}
+            />
           </section>
         )}
         {visited.batches && (
           <section hidden={view !== "batches"} aria-hidden={view !== "batches"}>
             <BatchesPage
               active={view === "batches"}
+              taskId={taskScope}
+              onClearTaskScope={() => setTaskScope(null)}
               initialBatchId={requestedBatch}
               initialReturnView={requestedBatchOrigin}
               onInitialBatchConsumed={() => setRequestedBatch(null)}
@@ -145,7 +163,7 @@ export function Workbench({ status }: { status: AppStatus }) {
         )}
         {visited.jobs && (
           <section hidden={view !== "jobs"} aria-hidden={view !== "jobs"}>
-            <JobsPage active={view === "jobs"} />
+            <JobsPage active={view === "jobs"} onOpenTaskCandidates={openTaskCandidates} onOpenTaskBatches={openTaskBatches} onOpenBatch={(batchId) => openBatch(batchId, "jobs")} />
           </section>
         )}
         {visited.settings && (

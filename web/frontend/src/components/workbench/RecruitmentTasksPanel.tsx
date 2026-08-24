@@ -1,23 +1,30 @@
-import { useEffect, useState } from "react";
-import { Link2, Search, Upload } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { BarChart3, Download, Link2, Search, Upload } from "lucide-react";
 
 import {
+  ApiRequestError,
   ExternalRatingImportResult,
   ExternalRatingPreviewResult,
   ExternalRatingPreviewRow,
   KeywordRules,
   KeywordRulesResponse,
   PluginTaskContext,
+  RecruitmentTaskProgress,
   RecruitmentTaskRow,
+  downloadBatchMarkdown,
+  requestJson,
 } from "../../api";
 import { Drawer } from "./Drawer";
-import { RatingBadge, StatusBadge } from "./common";
+import { formatDate, RatingBadge, RefreshButton, StatusBadge, TableState } from "./common";
 import { statusLabel, toneForStatus } from "./JobEditorDrawer";
 
 type RecruitmentTasksPanelProps = {
   tasks: RecruitmentTaskRow[];
   currentContext: PluginTaskContext | null;
   saving: boolean;
+  onOpenTaskCandidates: (taskId: number) => void;
+  onOpenTaskBatches: (taskId: number) => void;
+  onOpenBatch: (batchId: number) => void;
   onStatusChange: (task: RecruitmentTaskRow, status: string) => Promise<void>;
   onAssignContext: (task: RecruitmentTaskRow | null) => Promise<void>;
   onPreviewRatings: (task: RecruitmentTaskRow, text: string) => Promise<ExternalRatingPreviewResult>;
@@ -30,6 +37,9 @@ export function RecruitmentTasksPanel({
   tasks,
   currentContext,
   saving,
+  onOpenTaskCandidates,
+  onOpenTaskBatches,
+  onOpenBatch,
   onStatusChange,
   onAssignContext,
   onPreviewRatings,
@@ -52,7 +62,14 @@ export function RecruitmentTasksPanel({
   const [keywordLoading, setKeywordLoading] = useState(false);
   const [keywordError, setKeywordError] = useState("");
   const [keywordSaved, setKeywordSaved] = useState("");
+  const [progressTarget, setProgressTarget] = useState<RecruitmentTaskRow | null>(null);
+  const [progress, setProgress] = useState<RecruitmentTaskProgress | null>(null);
+  const [progressLoading, setProgressLoading] = useState(false);
+  const [progressError, setProgressError] = useState("");
+  const [progressRefresh, setProgressRefresh] = useState(0);
+  const [exportingBatchId, setExportingBatchId] = useState<number | null>(null);
   const [panelError, setPanelError] = useState("");
+  const latestProgressRequest = useRef(0);
 
   const changeStatus = async (task: RecruitmentTaskRow, status: string) => {
     setPanelError("");
@@ -69,8 +86,73 @@ export function RecruitmentTasksPanel({
     try {
       await onStatusChange(cancelTarget, "cancelled");
       setCancelTarget(null);
+      if (progressTarget?.id === cancelTarget.id) setProgressRefresh((value) => value + 1);
     } catch (err) {
       setConfirmError(err instanceof Error ? err.message : "招聘任务取消失败。");
+    }
+  };
+
+  const loadProgress = useCallback((task: RecruitmentTaskRow) => {
+    const requestId = ++latestProgressRequest.current;
+    setProgressLoading(true);
+    setProgressError("");
+    void requestJson<RecruitmentTaskProgress>(`/api/recruitment-tasks/${task.id}/progress`)
+      .then((payload) => {
+        if (latestProgressRequest.current !== requestId) return;
+        setProgress(payload);
+        setProgressError("");
+      })
+      .catch((err: unknown) => {
+        if (latestProgressRequest.current !== requestId) return;
+        setProgress(null);
+        setProgressError(err instanceof ApiRequestError ? err.message : "任务进度读取失败，请稍后重试。");
+      })
+      .finally(() => {
+        if (latestProgressRequest.current === requestId) setProgressLoading(false);
+      });
+  }, []);
+
+  useEffect(() => {
+    if (!progressTarget) {
+      setProgress(null);
+      setProgressError("");
+      return;
+    }
+    loadProgress(progressTarget);
+  }, [loadProgress, progressRefresh, progressTarget]);
+
+  useEffect(() => {
+    if (!progressTarget || progress?.task_status !== "running") return undefined;
+    const timer = window.setInterval(() => setProgressRefresh((value) => value + 1), 10000);
+    const onFocus = () => setProgressRefresh((value) => value + 1);
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") setProgressRefresh((value) => value + 1);
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [progress?.task_status, progressTarget]);
+
+  const changeProgressStatus = async (status: string) => {
+    if (!progressTarget) return;
+    await changeStatus(progressTarget, status);
+    setProgressRefresh((value) => value + 1);
+  };
+
+  const exportProgressBatch = async (batchId: number) => {
+    if (exportingBatchId !== null) return;
+    setExportingBatchId(batchId);
+    setProgressError("");
+    try {
+      await downloadBatchMarkdown(batchId);
+    } catch (err) {
+      setProgressError(err instanceof ApiRequestError ? err.message : "Markdown 导出失败，请稍后重试。");
+    } finally {
+      setExportingBatchId((current) => (current === batchId ? null : current));
     }
   };
 
@@ -212,6 +294,13 @@ export function RecruitmentTasksPanel({
                   <div><dt>阶段</dt><dd>{task.current_step || "待启动"}</dd></div>
                 </dl>
                 <div className="button-row">
+                  <button
+                    className="secondary-button compact"
+                    aria-label={`查看 ${task.name} 进度`}
+                    onClick={() => { setProgressTarget(task); setProgress(null); setProgressError(""); }}
+                  >
+                    <BarChart3 size={14} />查看进度
+                  </button>
                   {task.status === "ready" && <button className="secondary-button compact" disabled={saving} onClick={() => void changeStatus(task, "running")}>启动</button>}
                   {task.status === "running" && <button className="secondary-button compact" disabled={saving} onClick={() => void changeStatus(task, "paused")}>暂停</button>}
                   {task.status === "paused" && <button className="secondary-button compact" disabled={saving} onClick={() => void changeStatus(task, "running")}>继续</button>}
@@ -271,6 +360,138 @@ export function RecruitmentTasksPanel({
               确认取消任务
             </button>
           </div>
+        </Drawer>
+      )}
+      {progressTarget && (
+        <Drawer label="招聘任务进度" className="drawer-panel detail-drawer-panel task-progress-drawer" onClose={() => setProgressTarget(null)}>
+          <div className="drawer-header">
+            <div>
+              <p className="eyebrow">任务进度</p>
+              <h2>{progressTarget.name}</h2>
+              <p>采集规模、外部评级覆盖和安全操作汇总；不包含 AI、沟通或附件能力。</p>
+            </div>
+            <button className="icon-button" onClick={() => setProgressTarget(null)} aria-label="关闭任务进度">×</button>
+          </div>
+          <TableState loading={progressLoading} error={progressError} empty={!progress && !progressLoading && !progressError} emptyText="还没有任务进度数据。" />
+          {progress && (
+            <div className="task-progress-layout">
+              <section className="detail-section-card">
+                <div className="detail-section-headline">
+                  <span className="eyebrow">任务摘要</span>
+                  <h3>{progress.task_name}</h3>
+                </div>
+                <div className="detail-chip-row">
+                  <StatusBadge tone={toneForStatus(progress.task_status)}>{statusLabel(progress.task_status)}</StatusBadge>
+                  {progress.is_plugin_context ? <StatusBadge tone="success">插件正在使用</StatusBadge> : <StatusBadge tone="muted">不是插件当前任务</StatusBadge>}
+                  <StatusBadge>{progress.job_title || "未提供岗位"}</StatusBadge>
+                </div>
+                <dl className="detail-summary-grid">
+                  <div><dt>岗位版本</dt><dd className="numeric">v{progress.job_profile_version}</dd></div>
+                  <div><dt>目标候选人</dt><dd className="numeric">{progress.target_count}</dd></div>
+                  <div><dt>首次采集</dt><dd className="numeric">{formatDate(progress.first_capture_time)}</dd></div>
+                  <div><dt>最近采集</dt><dd className="numeric">{formatDate(progress.latest_capture_time)}</dd></div>
+                </dl>
+              </section>
+              <section className="summary-strip five">
+                <div><span>批次数</span><strong>{progress.batch_count}</strong></div>
+                <div><span>批次记录</span><strong>{progress.batch_item_count}</strong></div>
+                <div><span>唯一候选人</span><strong>{progress.unique_candidate_count}</strong></div>
+                <div><span>新增</span><strong>{progress.total_added}</strong></div>
+                <div><span>失败</span><strong>{progress.total_failed}</strong></div>
+              </section>
+              <section className="summary-strip five">
+                <div><span>更新</span><strong>{progress.total_updated}</strong></div>
+                <div><span>跳过</span><strong>{progress.total_skipped}</strong></div>
+                <div><span>接收记录</span><strong>{progress.total_received}</strong></div>
+                <div><span>已评级</span><strong>{progress.rated_candidate_count}</strong></div>
+                <div><span>未评级</span><strong>{progress.unrated_candidate_count}</strong></div>
+              </section>
+              <section className="detail-section-card">
+                <div className="detail-section-headline">
+                  <span className="eyebrow">外部评级覆盖</span>
+                  <h3>UR / SSR / SR / R / N</h3>
+                </div>
+                <div className="rating-distribution">
+                  {(["UR", "SSR", "SR", "R", "N"] as const).map((rating) => (
+                    <div key={rating}>
+                      <RatingBadge rating={rating} />
+                      <strong className="numeric">{progress.rating_counts[rating]}</strong>
+                    </div>
+                  ))}
+                </div>
+              </section>
+              <section className="detail-section-card">
+                <div className="detail-section-headline detail-section-headline-row">
+                  <div>
+                    <span className="eyebrow">最近批次</span>
+                    <h3>不可变采集快照</h3>
+                  </div>
+                  <RefreshButton onClick={() => setProgressRefresh((value) => value + 1)} label="刷新任务进度" />
+                </div>
+                {progress.recent_batches.length === 0 ? (
+                  <div className="table-state compact-empty-state">这个任务还没有采集批次。</div>
+                ) : (
+                  <div className="table-scroll">
+                    <table className="workbench-table compact-table">
+                      <thead>
+                        <tr><th>批次</th><th>时间</th><th>平台</th><th>状态</th><th>接收</th><th>新增</th><th>更新</th><th>跳过</th><th>失败</th><th>操作</th></tr>
+                      </thead>
+                      <tbody>
+                        {progress.recent_batches.map((batch) => (
+                          <tr key={batch.batch_id}>
+                            <td className="numeric">#{batch.batch_id}</td>
+                            <td className="numeric">{formatDate(batch.start_time)}</td>
+                            <td><StatusBadge>{batch.source_platform || "unknown"}</StatusBadge></td>
+                            <td><StatusBadge tone={batch.status === "completed" ? "success" : batch.status === "partial" ? "warning" : "muted"}>{batch.status}</StatusBadge></td>
+                            <td>{batch.received}</td>
+                            <td>{batch.added}</td>
+                            <td>{batch.updated}</td>
+                            <td>{batch.skipped}</td>
+                            <td>{batch.failed}</td>
+                            <td>
+                              <div className="row-actions">
+                                <button className="secondary-button compact" onClick={() => { setProgressTarget(null); onOpenBatch(batch.batch_id); }}>打开批次</button>
+                                <button className="secondary-button compact" disabled={exportingBatchId === batch.batch_id} onClick={() => void exportProgressBatch(batch.batch_id)}>
+                                  <Download size={14} />{exportingBatchId === batch.batch_id ? "导出中…" : "导出 Markdown"}
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </section>
+              <section className="detail-section-card">
+                <div className="detail-section-headline">
+                  <span className="eyebrow">安全操作</span>
+                  <h3>当前可执行</h3>
+                </div>
+                <div className="button-row">
+                  {progress.task_status === "ready" && <button className="secondary-button" disabled={saving} onClick={() => void changeProgressStatus("running")}>启动任务</button>}
+                  {progress.task_status === "running" && <button className="secondary-button" disabled={saving} onClick={() => void changeProgressStatus("paused")}>暂停任务</button>}
+                  {progress.task_status === "paused" && <button className="secondary-button" disabled={saving} onClick={() => void changeProgressStatus("running")}>继续任务</button>}
+                  {["running", "paused"].includes(progress.task_status) && <button className="secondary-button" disabled={saving} onClick={() => void changeProgressStatus("completed")}>完成任务</button>}
+                  {progress.task_status === "running" && (
+                    <button
+                      className="primary-button"
+                      disabled={saving || progress.is_plugin_context}
+                      onClick={() => void onAssignContext(progressTarget).then(() => setProgressRefresh((value) => value + 1))}
+                    >
+                      设为插件当前任务
+                    </button>
+                  )}
+                  {["ready", "running", "waiting_user", "paused"].includes(progress.task_status) && (
+                    <button className="secondary-button danger" disabled={saving} onClick={() => { setConfirmError(""); setCancelTarget(progressTarget); }}>取消任务</button>
+                  )}
+                  <button className="secondary-button" onClick={() => { setProgressTarget(null); onOpenTaskCandidates(progress.task_id); }}>查看本任务候选人</button>
+                  <button className="secondary-button" onClick={() => { setProgressTarget(null); onOpenTaskBatches(progress.task_id); }}>查看本任务批次</button>
+                </div>
+                <p className="muted">AI 初筛、自动沟通、联系方式和附件归档仍属于后续阶段，本页不提供可点击入口。</p>
+              </section>
+            </div>
+          )}
         </Drawer>
       )}
       {keywordTarget && (

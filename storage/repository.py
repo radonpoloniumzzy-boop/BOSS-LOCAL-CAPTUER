@@ -213,7 +213,7 @@ RECRUITMENT_TASK_STATUS_TRANSITIONS = {
     "ready": {"running", "paused", "cancelled"},
     "running": {"waiting_user", "paused", "completed", "failed", "cancelled"},
     "waiting_user": {"running", "paused", "cancelled"},
-    "paused": {"running", "cancelled"},
+    "paused": {"running", "completed", "cancelled"},
     "failed": {"running", "cancelled"},
     "completed": set(),
     "cancelled": set(),
@@ -573,6 +573,116 @@ class CandidateRepository:
             "candidate_count": int(counts["candidate_count"] or 0),
             "run_count": int(runs["run_count"] or 0),
             "export_count": int(exports["export_count"] or 0),
+        }
+
+    def get_recruitment_task_progress(
+        self,
+        task_id: int,
+        *,
+        is_plugin_context: bool = False,
+        recent_limit: int = 5,
+    ) -> dict[str, object]:
+        """Return a read-only progress summary scoped to one recruitment task.
+
+        Count contract:
+        batch_count counts capture batch rows, batch_item_count counts batch item
+        appearances, and unique_candidate_count counts distinct candidate primary
+        keys. External rating coverage is counted by unique candidate and is
+        scoped to the task, role, fixed profile version, and external import
+        origin.
+        """
+        task = self.get_recruitment_task(task_id)
+        if task is None:
+            raise ValueError("招聘任务不存在")
+        connection = self.db.get_connection()
+        role_id = int(task["role_id"])
+        profile_version = int(task["profile_version"])
+        aggregate = connection.execute(
+            """
+            SELECT
+                COUNT(*) AS batch_count,
+                COALESCE(SUM(total_collected), 0) AS total_received,
+                COALESCE(SUM(total_new), 0) AS total_added,
+                COALESCE(SUM(total_updated), 0) AS total_updated,
+                COALESCE(SUM(total_skipped), 0) AS total_skipped,
+                COALESCE(SUM(total_failed), 0) AS total_failed,
+                MIN(start_time) AS first_capture_time,
+                MAX(start_time) AS latest_capture_time
+            FROM capture_batches
+            WHERE task_id = ?
+            """,
+            (task_id,),
+        ).fetchone()
+        item_counts = connection.execute(
+            """
+            SELECT
+                COUNT(*) AS batch_item_count,
+                COUNT(DISTINCT candidate_id) AS unique_candidate_count
+            FROM capture_batch_items bi
+            JOIN capture_batches b ON b.id = bi.batch_id
+            WHERE b.task_id = ?
+            """,
+            (task_id,),
+        ).fetchone()
+        rating_rows = connection.execute(
+            """
+            SELECT r.rating, COUNT(DISTINCT r.candidate_id) AS value
+            FROM screening_results r
+            JOIN screening_runs sr ON sr.id = r.run_id
+            JOIN candidate_role_matches m
+                ON m.candidate_id = r.candidate_id
+               AND m.role_id = sr.profile_id
+               AND m.screening_result_id = r.id
+            WHERE sr.task_id = ?
+              AND sr.profile_id = ?
+              AND sr.profile_version = ?
+              AND sr.origin = 'external_rating_import'
+              AND r.rating IN ('UR', 'SSR', 'SR', 'R', 'N')
+            GROUP BY r.rating
+            """,
+            (task_id, role_id, profile_version),
+        ).fetchall()
+        rating_counts = {rating: 0 for rating in ("UR", "SSR", "SR", "R", "N")}
+        for row in rating_rows:
+            rating_counts[str(row["rating"])] = int(row["value"] or 0)
+        rated = sum(rating_counts.values())
+        unique_candidates = int(item_counts["unique_candidate_count"] or 0)
+        recent_rows = connection.execute(
+            """
+            SELECT id AS batch_id, source_platform, status, start_time,
+                   total_collected AS received, total_new AS added,
+                   total_updated AS updated, total_skipped AS skipped,
+                   total_failed AS failed
+            FROM capture_batches
+            WHERE task_id = ?
+            ORDER BY start_time DESC, id DESC
+            LIMIT ?
+            """,
+            (task_id, max(1, min(int(recent_limit), 20))),
+        ).fetchall()
+        return {
+            "task_id": int(task["id"]),
+            "task_name": str(task["name"] or ""),
+            "task_status": str(task["status"] or ""),
+            "job_profile_id": role_id,
+            "job_profile_version": profile_version,
+            "job_title": str(task.get("role_title") or ""),
+            "target_count": int(task["target_candidates"] or 0),
+            "is_plugin_context": bool(is_plugin_context),
+            "batch_count": int(aggregate["batch_count"] or 0),
+            "batch_item_count": int(item_counts["batch_item_count"] or 0),
+            "unique_candidate_count": unique_candidates,
+            "total_received": int(aggregate["total_received"] or 0),
+            "total_added": int(aggregate["total_added"] or 0),
+            "total_updated": int(aggregate["total_updated"] or 0),
+            "total_skipped": int(aggregate["total_skipped"] or 0),
+            "total_failed": int(aggregate["total_failed"] or 0),
+            "rated_candidate_count": rated,
+            "unrated_candidate_count": max(0, unique_candidates - rated),
+            "rating_counts": rating_counts,
+            "first_capture_time": str(aggregate["first_capture_time"] or ""),
+            "latest_capture_time": str(aggregate["latest_capture_time"] or ""),
+            "recent_batches": [dict(row) for row in recent_rows],
         }
 
     def update_recruitment_task_progress(
@@ -1284,6 +1394,7 @@ class CandidateRepository:
         limit: int | None = None,
         offset: int = 0,
         candidate_ids: Iterable[int] | None = None,
+        task_id: int | None = None,
         sort: str = "latest_capture_desc",
     ) -> list[sqlite3.Row]:
         connection = self.db.get_connection()
@@ -1301,6 +1412,7 @@ class CandidateRepository:
             last_active_days=last_active_days,
             latest_reason_code=latest_reason_code,
             candidate_ids=candidate_ids,
+            task_id=task_id,
         )
         pagination_sql = ""
         if limit is not None:
@@ -1491,6 +1603,7 @@ class CandidateRepository:
         last_active_days: int | str | None = None,
         latest_reason_code: str = "",
         candidate_ids: Iterable[int] | None = None,
+        task_id: int | None = None,
         **_unused: object,
     ) -> tuple[str, str, list[object]]:
         params: list[object] = []
@@ -1500,6 +1613,15 @@ class CandidateRepository:
             joins += " JOIN capture_batch_items bi ON bi.candidate_id = c.id "
             filters.append("bi.batch_id = ?")
             params.append(batch_id)
+        if task_id is not None:
+            filters.append(
+                "EXISTS ("
+                "SELECT 1 FROM capture_batch_items bi_task "
+                "JOIN capture_batches b_task ON b_task.id = bi_task.batch_id "
+                "WHERE bi_task.candidate_id = c.id AND b_task.task_id = ?"
+                ")"
+            )
+            params.append(int(task_id))
         if source_platform:
             filters.append("c.source_platform = ?")
             params.append(source_platform.strip())
@@ -1750,6 +1872,7 @@ class CandidateRepository:
         status: str = "",
         failed_only: bool = False,
         today_only: bool = False,
+        task_id: int | None = None,
         page: int = 1,
         page_size: int = 20,
     ) -> dict[str, object]:
@@ -1770,6 +1893,9 @@ class CandidateRepository:
             params.append(day_start)
             filters.append("start_time < ?")
             params.append(next_day_start)
+        if task_id is not None:
+            filters.append("task_id = ?")
+            params.append(int(task_id))
         where_sql = f"WHERE {' AND '.join(filters)}" if filters else ""
         total = int(
             self.db.get_connection().execute(

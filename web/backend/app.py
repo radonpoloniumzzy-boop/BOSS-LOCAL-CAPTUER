@@ -266,6 +266,43 @@ _RECRUITMENT_TASK_FIELDS = (
     "updated_at",
 )
 
+_RECRUITMENT_TASK_PROGRESS_FIELDS = (
+    "task_id",
+    "task_name",
+    "task_status",
+    "job_profile_id",
+    "job_profile_version",
+    "job_title",
+    "target_count",
+    "is_plugin_context",
+    "batch_count",
+    "batch_item_count",
+    "unique_candidate_count",
+    "total_received",
+    "total_added",
+    "total_updated",
+    "total_skipped",
+    "total_failed",
+    "rated_candidate_count",
+    "unrated_candidate_count",
+    "rating_counts",
+    "first_capture_time",
+    "latest_capture_time",
+    "recent_batches",
+)
+
+_RECENT_BATCH_FIELDS = (
+    "batch_id",
+    "source_platform",
+    "status",
+    "start_time",
+    "received",
+    "added",
+    "updated",
+    "skipped",
+    "failed",
+)
+
 
 def _project_candidate_list_row(row: dict[str, object]) -> dict[str, object]:
     return {field: row.get(field) for field in _CANDIDATE_LIST_FIELDS}
@@ -306,6 +343,20 @@ def _project_job_version(row: dict[str, object]) -> dict[str, object]:
 
 def _project_recruitment_task(row: dict[str, object]) -> dict[str, object]:
     return {field: row.get(field) for field in _RECRUITMENT_TASK_FIELDS}
+
+
+def _project_recruitment_task_progress(row: dict[str, object]) -> dict[str, object]:
+    projected = {field: row.get(field) for field in _RECRUITMENT_TASK_PROGRESS_FIELDS}
+    projected["rating_counts"] = {
+        rating: int((row.get("rating_counts") or {}).get(rating, 0))  # type: ignore[union-attr]
+        for rating in _STANDARD_RATINGS
+    }
+    projected["recent_batches"] = [
+        {field: batch.get(field) for field in _RECENT_BATCH_FIELDS}
+        for batch in row.get("recent_batches", [])
+        if isinstance(batch, dict)
+    ]
+    return projected
 
 
 _STANDARD_RATINGS = ("UR", "SSR", "SR", "R", "N")
@@ -928,6 +979,24 @@ def create_web_app(
         except ValueError as exc:
             raise ApiError(404, "recruitment_task_not_found", str(exc)) from exc
 
+    @app.get("/api/recruitment-tasks/{task_id}/progress")
+    def get_recruitment_task_progress(task_id: int) -> dict[str, object]:
+        if runtime.repository is None:
+            raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。")
+        try:
+            context = runtime.get_plugin_context()
+        except RuntimeError as exc:
+            raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。") from exc
+        is_context = bool(context and int(context["recruitment_task_id"]) == int(task_id))
+        try:
+            progress = runtime.repository.get_recruitment_task_progress(
+                task_id,
+                is_plugin_context=is_context,
+            )
+        except ValueError as exc:
+            raise ApiError(404, "task_not_found", "招聘任务不存在。") from exc
+        return _project_recruitment_task_progress(progress)
+
     @app.post("/api/recruitment-tasks/{task_id}/status")
     def set_recruitment_task_status(task_id: int, payload: StatusPayload) -> dict[str, object]:
         if runtime.repository is None:
@@ -1083,6 +1152,7 @@ def create_web_app(
         source_platform: str = "",
         unbound_only: bool = False,
         rating: str = "",
+        task_id: int | None = None,
         sort: str = "latest_capture_desc",
     ) -> dict[str, object]:
         if runtime.repository is None:
@@ -1094,6 +1164,7 @@ def create_web_app(
             source_platform=source_platform,
             unbound_only=unbound_only,
             rating=rating,
+            task_id=task_id,
             sort=sort,
         )
         result["rows"] = [_project_candidate_list_row(dict(row)) for row in result["rows"]]
@@ -1125,6 +1196,7 @@ def create_web_app(
         status: str = "",
         failed_only: bool = False,
         today_only: bool = False,
+        task_id: int | None = None,
     ) -> dict[str, object]:
         if runtime.repository is None:
             raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。")
@@ -1133,6 +1205,7 @@ def create_web_app(
             status=status,
             failed_only=failed_only,
             today_only=today_only,
+            task_id=task_id,
             page=page,
             page_size=page_size,
         )

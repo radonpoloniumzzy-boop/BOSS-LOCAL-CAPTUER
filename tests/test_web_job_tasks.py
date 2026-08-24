@@ -593,6 +593,39 @@ class WebJobTaskFoundationTest(unittest.TestCase):
         self.assertEqual(task_rejected.status_code, 422, task_rejected.text)
         self.assertEqual(task_rejected.json()["error"]["code"], "invalid_request")
 
+    def test_paused_recruitment_task_can_complete_and_remains_terminal(self) -> None:
+        job = self._create_active_job()
+        task = self._create_task(job)
+
+        running = self.client.post(
+            f"/api/recruitment-tasks/{task['id']}/status",
+            json={"status": "running"},
+            headers=self.origin,
+        )
+        self.assertEqual(running.status_code, 200, running.text)
+        paused = self.client.post(
+            f"/api/recruitment-tasks/{task['id']}/status",
+            json={"status": "paused"},
+            headers=self.origin,
+        )
+        self.assertEqual(paused.status_code, 200, paused.text)
+
+        completed = self.client.post(
+            f"/api/recruitment-tasks/{task['id']}/status",
+            json={"status": "completed"},
+            headers=self.origin,
+        )
+        self.assertEqual(completed.status_code, 200, completed.text)
+        self.assertEqual(completed.json()["status"], "completed")
+
+        reopened = self.client.post(
+            f"/api/recruitment-tasks/{task['id']}/status",
+            json={"status": "running"},
+            headers=self.origin,
+        )
+        self.assertEqual(reopened.status_code, 409)
+        self.assertEqual(reopened.json()["error"]["code"], "invalid_recruitment_task_status_transition")
+
     def test_plugin_context_persists_and_becomes_unavailable_for_terminal_task(self) -> None:
         job = self._create_active_job()
         task = self._create_task(job)
@@ -1314,6 +1347,152 @@ class WebJobTaskFoundationTest(unittest.TestCase):
         current = self.client.get("/api/plugin/ratings/badges", headers=self.extension)
         self.assertEqual(current.status_code, 200, current.text)
         self.assertEqual(current.json()["badges"][0]["badge_text"], "1SSR")
+
+    def test_recruitment_task_progress_returns_zero_counts_for_empty_task(self) -> None:
+        job = self._create_active_job()
+        task = self._create_task(job)
+
+        response = self.client.get(f"/api/recruitment-tasks/{task['id']}/progress", headers=self.origin)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["task_id"], task["id"])
+        self.assertEqual(payload["task_status"], "ready")
+        self.assertEqual(payload["job_profile_id"], job["id"])
+        self.assertEqual(payload["job_profile_version"], job["version"])
+        self.assertFalse(payload["is_plugin_context"])
+        self.assertEqual(payload["batch_count"], 0)
+        self.assertEqual(payload["batch_item_count"], 0)
+        self.assertEqual(payload["unique_candidate_count"], 0)
+        self.assertEqual(payload["rated_candidate_count"], 0)
+        self.assertEqual(payload["unrated_candidate_count"], 0)
+        self.assertEqual(payload["rating_counts"], {"UR": 0, "SSR": 0, "SR": 0, "R": 0, "N": 0})
+        self.assertEqual(payload["recent_batches"], [])
+
+    def test_recruitment_task_progress_aggregates_batches_candidates_and_external_ratings(self) -> None:
+        job = self._create_active_job()
+        task = self._start_task(self._create_task(job))
+        alice_id = self._intake_candidate(job=job, task=task, name="Alice", source_id="alice-progress", key="progress-a")
+        bob_batch = self._intake_candidates_in_one_batch(
+            job=job,
+            task=task,
+            candidates=[("Alice", "alice-progress"), ("Bob", "bob-progress")],
+            key="progress-b",
+        )
+        other_job = self._create_active_job("隔离岗位")
+        other_task = self._start_task(self._create_task(other_job))
+        self._intake_candidate(job=other_job, task=other_task, name="Other", source_id="other-progress", key="progress-other")
+
+        imported = self.client.post(
+            f"/api/recruitment-tasks/{task['id']}/external-ratings/import",
+            json={"rows": [{"candidate_id": alice_id, "name": "Alice", "rating": "SSR"}]},
+            headers=self.origin,
+        )
+        self.assertEqual(imported.status_code, 200, imported.text)
+        selected = self.client.put("/api/plugin-context", json={"recruitment_task_id": task["id"]}, headers=self.origin)
+        self.assertEqual(selected.status_code, 200, selected.text)
+
+        response = self.client.get(f"/api/recruitment-tasks/{task['id']}/progress", headers=self.origin)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertTrue(payload["is_plugin_context"])
+        self.assertEqual(payload["batch_count"], 2)
+        self.assertEqual(payload["batch_item_count"], 3)
+        self.assertEqual(payload["unique_candidate_count"], 2)
+        self.assertEqual(payload["total_received"], 3)
+        self.assertEqual(payload["total_added"], 2)
+        self.assertEqual(payload["total_updated"], 1)
+        self.assertEqual(payload["total_skipped"], 0)
+        self.assertEqual(payload["total_failed"], 0)
+        self.assertEqual(payload["rated_candidate_count"], 1)
+        self.assertEqual(payload["unrated_candidate_count"], 1)
+        self.assertEqual(payload["rating_counts"]["SSR"], 1)
+        self.assertEqual(payload["recent_batches"][0]["batch_id"], bob_batch)
+        self.assertEqual(set(payload["recent_batches"][0].keys()), {
+            "batch_id", "source_platform", "status", "start_time",
+            "received", "added", "updated", "skipped", "failed",
+        })
+        self.assertNotIn("Alice raw card", response.text)
+        self.assertNotIn("raw_card_text", response.text)
+        self.assertNotIn("platform_uid", response.text)
+        self.assertNotIn("prompt_text", response.text)
+        self.assertNotIn("provider", response.text)
+        self.assertNotIn(self.token, response.text)
+
+    def test_recruitment_task_progress_rating_scope_excludes_other_task_version_and_origin(self) -> None:
+        job = self._create_active_job()
+        task_a = self._start_task(self._create_task(job))
+        candidate_id = self._intake_candidate(job=job, task=task_a, name="Scoped", source_id="scoped-progress", key="progress-scope-a")
+        imported = self.client.post(
+            f"/api/recruitment-tasks/{task_a['id']}/external-ratings/import",
+            json={"rows": [{"candidate_id": candidate_id, "name": "Scoped", "rating": "UR"}]},
+            headers=self.origin,
+        )
+        self.assertEqual(imported.status_code, 200, imported.text)
+        task_b = self._start_task(self._create_task(job))
+
+        db, _repository = self._direct_repository()
+        try:
+            connection = db.get_connection()
+            connection.execute(
+                """
+                INSERT INTO screening_runs(
+                    profile_id, profile_version, source_job_title, batch_id, provider, model,
+                    origin, task_id, status, total_candidates, completed_candidates,
+                    failed_candidates, started_at, completed_at, note
+                ) VALUES (?, ?, '', NULL, 'manual', 'manual', 'manual', ?, 'completed', 1, 1, 0,
+                    '2026-08-20T10:00:00', '2026-08-20T10:00:00', '')
+                """,
+                (job["id"], job["version"], task_b["id"]),
+            )
+            run_id = int(connection.execute("SELECT last_insert_rowid()").fetchone()[0])
+            result = connection.execute(
+                """
+                INSERT INTO screening_results(
+                    run_id, candidate_id, rating, persona, status, raw_response, error,
+                    confidence, evidence_json, gap_json, risk_json, recommended_action, created_at
+                ) VALUES (?, ?, 'SSR', 'manual', 'success', '{}', '', 'manual', '[]', '[]', '[]', '', '2026-08-20T10:00:00')
+                """,
+                (run_id, candidate_id),
+            )
+            connection.execute(
+                "UPDATE candidate_role_matches SET latest_rating = 'SSR', screening_result_id = ? WHERE candidate_id = ? AND role_id = ?",
+                (int(result.lastrowid), candidate_id, job["id"]),
+            )
+            connection.commit()
+        finally:
+            db.close_thread_connection()
+
+        progress_a = self.client.get(f"/api/recruitment-tasks/{task_a['id']}/progress", headers=self.origin)
+        progress_b = self.client.get(f"/api/recruitment-tasks/{task_b['id']}/progress", headers=self.origin)
+
+        self.assertEqual(progress_a.status_code, 200, progress_a.text)
+        self.assertEqual(progress_a.json()["rating_counts"]["SSR"], 0)
+        self.assertEqual(progress_b.status_code, 200, progress_b.text)
+        self.assertEqual(progress_b.json()["rated_candidate_count"], 0)
+        self.assertEqual(progress_b.json()["rating_counts"], {"UR": 0, "SSR": 0, "SR": 0, "R": 0, "N": 0})
+
+    def test_task_scoped_candidate_and_batch_filters_are_server_side(self) -> None:
+        job = self._create_active_job()
+        task_a = self._start_task(self._create_task(job))
+        task_b = self._start_task(self._create_task(job))
+        self._intake_candidate(job=job, task=task_a, name="Task A Candidate", source_id="task-a-filter", key="task-filter-a")
+        self._intake_candidate(job=job, task=task_b, name="Task B Candidate", source_id="task-b-filter", key="task-filter-b")
+
+        candidates = self.client.get(f"/api/candidates?task_id={task_a['id']}&page=1&page_size=100")
+        batches = self.client.get(f"/api/capture-batches?task_id={task_a['id']}&page=1&page_size=20")
+
+        self.assertEqual(candidates.status_code, 200, candidates.text)
+        self.assertEqual([row["name"] for row in candidates.json()["rows"]], ["Task A Candidate"])
+        self.assertEqual(batches.status_code, 200, batches.text)
+        self.assertEqual(batches.json()["total"], 1)
+
+    def test_recruitment_task_progress_returns_task_not_found(self) -> None:
+        response = self.client.get("/api/recruitment-tasks/99999/progress", headers=self.origin)
+
+        self.assertEqual(response.status_code, 404, response.text)
+        self.assertEqual(response.json()["error"]["code"], "task_not_found")
 
     def test_running_task_keyword_rules_are_bound_to_fixed_task_version(self) -> None:
         created = self.client.post(

@@ -19,7 +19,17 @@ import { JobEditorDrawer, JobFormPayload, statusLabel, toneForStatus } from "./J
 import { RecruitmentTasksPanel } from "./RecruitmentTasksPanel";
 import { formatDate, RefreshButton, StatusBadge, TableState } from "./common";
 
-export function JobsPage({ active }: { active: boolean }) {
+export function JobsPage({
+  active,
+  onOpenTaskCandidates,
+  onOpenTaskBatches,
+  onOpenBatch,
+}: {
+  active: boolean;
+  onOpenTaskCandidates: (taskId: number) => void;
+  onOpenTaskBatches: (taskId: number) => void;
+  onOpenBatch: (batchId: number) => void;
+}) {
   const [jobs, setJobs] = useState<JobProfileRow[]>([]);
   const [tasks, setTasks] = useState<RecruitmentTaskRow[]>([]);
   const [versions, setVersions] = useState<JobProfileVersionRow[]>([]);
@@ -337,6 +347,9 @@ export function JobsPage({ active }: { active: boolean }) {
           tasks={tasks}
           currentContext={currentContext}
           saving={saving}
+          onOpenTaskCandidates={onOpenTaskCandidates}
+          onOpenTaskBatches={onOpenTaskBatches}
+          onOpenBatch={onOpenBatch}
           onStatusChange={setTaskStatus}
           onAssignContext={assignPluginContext}
           onPreviewRatings={previewExternalRatings}

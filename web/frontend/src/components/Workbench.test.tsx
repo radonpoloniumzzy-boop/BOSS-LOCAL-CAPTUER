@@ -335,6 +335,291 @@ describe("drawer accessibility behavior", () => {
   });
 });
 
+describe("recruitment task progress workbench", () => {
+  const taskRows = [
+    {
+      id: 11,
+      name: "Boss 推荐流",
+      role_id: 7,
+      role_title: "量化研究员",
+      profile_version: 2,
+      platform: "boss",
+      source_url: "https://www.zhipin.com/web/geek/recommend",
+      target_candidates: 20,
+      status: "running",
+      current_step: "采集与筛选",
+      latest_message: "",
+      batch_count: 2,
+      candidate_count: 2,
+      run_count: 1,
+      export_count: 0,
+      created_at: "2026-08-19T09:00:00",
+      updated_at: "2026-08-19T10:05:00",
+    },
+    {
+      id: 12,
+      name: "猎聘推荐流",
+      role_id: 7,
+      role_title: "量化研究员",
+      profile_version: 2,
+      platform: "liepin",
+      source_url: "https://www.liepin.com/",
+      target_candidates: 10,
+      status: "completed",
+      current_step: "已完成",
+      latest_message: "",
+      batch_count: 1,
+      candidate_count: 1,
+      run_count: 0,
+      export_count: 0,
+      created_at: "2026-08-19T09:00:00",
+      updated_at: "2026-08-19T10:05:00",
+    },
+  ];
+
+  function mockJobsShell(extra: (url: string, init?: RequestInit) => Promise<Response>) {
+    return vi.fn((input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/job-profiles") && !init?.method) {
+        return response({
+          rows: [{
+            id: 7,
+            job_title: "量化研究员",
+            department: "投研",
+            location: "上海",
+            employment_type: "全职",
+            target_hires: 2,
+            priority: "high",
+            status: "active",
+            version: 2,
+            updated_at: "2026-08-19T10:00:00",
+          }],
+        });
+      }
+      if (url.endsWith("/api/recruitment-tasks") && !init?.method) {
+        return response({ rows: taskRows });
+      }
+      if (url.endsWith("/api/plugin-context") && !init?.method) {
+        return response({
+          context: {
+            recruitment_task_id: 11,
+            job_profile_id: 7,
+            job_profile_version: 2,
+            job_title: "量化研究员",
+            platform: "boss",
+            source_url: "https://www.zhipin.com/web/geek/recommend",
+            task_status: "running",
+            context_updated_at: "2026-08-19T10:05:00",
+          },
+        });
+      }
+      return extra(url, init);
+    });
+  }
+
+  it("shows task progress, distinguishes batch items from unique candidates, and exports recent batch markdown", async () => {
+    const downloader = vi.spyOn(apiModule, "downloadBatchMarkdown").mockResolvedValue();
+    const fetchMock = mockJobsShell((url) => {
+      if (url === "/api/recruitment-tasks/11/progress") {
+        return response({
+          task_id: 11,
+          task_name: "Boss 推荐流",
+          task_status: "running",
+          job_profile_id: 7,
+          job_profile_version: 2,
+          job_title: "量化研究员",
+          target_count: 20,
+          is_plugin_context: true,
+          batch_count: 2,
+          batch_item_count: 3,
+          unique_candidate_count: 2,
+          total_received: 3,
+          total_added: 2,
+          total_updated: 1,
+          total_skipped: 0,
+          total_failed: 0,
+          rated_candidate_count: 1,
+          unrated_candidate_count: 1,
+          rating_counts: { UR: 0, SSR: 1, SR: 0, R: 0, N: 0 },
+          first_capture_time: "2026-08-19T09:00:00",
+          latest_capture_time: "2026-08-19T10:00:00",
+          recent_batches: [{
+            batch_id: 88,
+            source_platform: "boss",
+            status: "completed",
+            start_time: "2026-08-19T10:00:00",
+            received: 2,
+            added: 1,
+            updated: 1,
+            skipped: 0,
+            failed: 0,
+          }],
+        });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    render(<Workbench status={status} />);
+
+    await user.click(screen.getByRole("button", { name: "岗位" }));
+    await user.click(await screen.findByRole("button", { name: "查看 Boss 推荐流 进度" }));
+    const dialog = await screen.findByRole("dialog", { name: "招聘任务进度" });
+
+    expect(within(dialog).getByText("插件正在使用")).toBeInTheDocument();
+    expect(within(dialog).getByText("批次记录")).toBeInTheDocument();
+    expect(within(dialog).getByText("唯一候选人")).toBeInTheDocument();
+    expect(within(dialog).getByText("外部评级覆盖")).toBeInTheDocument();
+    expect(within(dialog).getByText("1SSR")).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "完成任务" })).toBeInTheDocument();
+    expect(within(dialog).getByText("AI 初筛、自动沟通、联系方式和附件归档仍属于后续阶段，本页不提供可点击入口。")).toBeInTheDocument();
+
+    await user.click(within(dialog).getByRole("button", { name: "导出 Markdown" }));
+    expect(downloader).toHaveBeenCalledWith(88);
+  });
+
+  it("carries task scope to candidates and batches from progress actions", async () => {
+    const requestedUrls: string[] = [];
+    const fetchMock = mockJobsShell((url) => {
+      requestedUrls.push(url);
+      if (url === "/api/recruitment-tasks/11/progress") {
+        return response({
+          task_id: 11,
+          task_name: "Boss 推荐流",
+          task_status: "running",
+          job_profile_id: 7,
+          job_profile_version: 2,
+          job_title: "量化研究员",
+          target_count: 20,
+          is_plugin_context: true,
+          batch_count: 0,
+          batch_item_count: 0,
+          unique_candidate_count: 0,
+          total_received: 0,
+          total_added: 0,
+          total_updated: 0,
+          total_skipped: 0,
+          total_failed: 0,
+          rated_candidate_count: 0,
+          unrated_candidate_count: 0,
+          rating_counts: { UR: 0, SSR: 0, SR: 0, R: 0, N: 0 },
+          first_capture_time: "",
+          latest_capture_time: "",
+          recent_batches: [],
+        });
+      }
+      if (url.includes("/api/candidates?")) {
+        return response({ rows: [], total: 0, page: 1, page_size: 100 });
+      }
+      if (url.includes("/api/capture-batches?")) {
+        return response({ rows: [], total: 0, page: 1, page_size: 20, today_summary: { received: 0, added: 0 } });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    render(<Workbench status={status} />);
+
+    await user.click(screen.getByRole("button", { name: "岗位" }));
+    await user.click(await screen.findByRole("button", { name: "查看 Boss 推荐流 进度" }));
+    const dialog = await screen.findByRole("dialog", { name: "招聘任务进度" });
+    await user.click(within(dialog).getByRole("button", { name: "查看本任务候选人" }));
+    await screen.findByText("正在查看任务 #11 的候选人范围。");
+    await waitFor(() => expect(requestedUrls.some((url) => url.includes("/api/candidates?") && url.includes("task_id=11"))).toBe(true));
+
+    await user.click(screen.getByRole("button", { name: "岗位" }));
+    await user.click(await screen.findByRole("button", { name: "查看 Boss 推荐流 进度" }));
+    await user.click(within(await screen.findByRole("dialog", { name: "招聘任务进度" })).getByRole("button", { name: "查看本任务批次" }));
+    await screen.findByText("正在查看任务 #11 的批次范围。");
+    await waitFor(() => expect(requestedUrls.some((url) => url.includes("/api/capture-batches?") && url.includes("task_id=11"))).toBe(true));
+  });
+
+  it("ignores stale progress responses after switching tasks", async () => {
+    const progressQueue: Record<number, Deferred> = {};
+    const fetchMock = mockJobsShell((url) => {
+      if (url === "/api/recruitment-tasks/11/progress") {
+        return new Promise<Response>((resolve) => {
+          progressQueue[11] = { resolve };
+        });
+      }
+      if (url === "/api/recruitment-tasks/12/progress") {
+        return response({
+          task_id: 12,
+          task_name: "猎聘推荐流",
+          task_status: "completed",
+          job_profile_id: 7,
+          job_profile_version: 2,
+          job_title: "量化研究员",
+          target_count: 10,
+          is_plugin_context: false,
+          batch_count: 1,
+          batch_item_count: 1,
+          unique_candidate_count: 1,
+          total_received: 1,
+          total_added: 1,
+          total_updated: 0,
+          total_skipped: 0,
+          total_failed: 0,
+          rated_candidate_count: 0,
+          unrated_candidate_count: 1,
+          rating_counts: { UR: 0, SSR: 0, SR: 0, R: 0, N: 0 },
+          first_capture_time: "2026-08-19T11:00:00",
+          latest_capture_time: "2026-08-19T11:00:00",
+          recent_batches: [],
+        });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    render(<Workbench status={status} />);
+
+    await user.click(screen.getByRole("button", { name: "岗位" }));
+    await user.click(await screen.findByRole("button", { name: "查看 Boss 推荐流 进度" }));
+    await screen.findByRole("dialog", { name: "招聘任务进度" });
+    await user.click(screen.getByRole("button", { name: "关闭任务进度" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "招聘任务进度" })).not.toBeInTheDocument());
+    await user.click(await screen.findByRole("button", { name: "查看 猎聘推荐流 进度" }));
+    const dialog = await screen.findByRole("dialog", { name: "招聘任务进度" });
+    expect(await within(dialog).findByRole("heading", { level: 2, name: "猎聘推荐流" })).toBeInTheDocument();
+
+    progressQueue[11].resolve({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({
+        task_id: 11,
+        task_name: "Boss 推荐流",
+        task_status: "running",
+        job_profile_id: 7,
+        job_profile_version: 2,
+        job_title: "量化研究员",
+        target_count: 20,
+        is_plugin_context: true,
+        batch_count: 99,
+        batch_item_count: 99,
+        unique_candidate_count: 99,
+        total_received: 99,
+        total_added: 99,
+        total_updated: 0,
+        total_skipped: 0,
+        total_failed: 0,
+        rated_candidate_count: 0,
+        unrated_candidate_count: 99,
+        rating_counts: { UR: 0, SSR: 0, SR: 0, R: 0, N: 0 },
+        first_capture_time: "",
+        latest_capture_time: "",
+        recent_batches: [],
+      }),
+    } as Response);
+
+    await waitFor(() => {
+      expect(within(dialog).getByRole("heading", { level: 2, name: "猎聘推荐流" })).toBeInTheDocument();
+      expect(within(dialog).queryByText("Boss 推荐流")).not.toBeInTheDocument();
+      expect(within(dialog).queryByText("99")).not.toBeInTheDocument();
+    });
+  });
+});
+
 describe("workbench candidate intake views", () => {
   it("manages job profiles, fixed versions, tasks, and plugin context", async () => {
     let taskStatus = "ready";

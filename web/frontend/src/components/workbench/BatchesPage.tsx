@@ -13,12 +13,16 @@ type BatchStatusFilter = "" | "completed" | "partial" | "failed";
 
 export function BatchesPage({
   active = true,
+  taskId = null,
+  onClearTaskScope,
   initialBatchId = null,
   initialReturnView = null,
   onInitialBatchConsumed,
   onReturnFromInitialBatch,
 }: {
   active?: boolean;
+  taskId?: number | null;
+  onClearTaskScope?: () => void;
   initialBatchId?: number | null;
   initialReturnView?: "home" | "candidates" | "batches" | "jobs" | "settings" | null;
   onInitialBatchConsumed?: () => void;
@@ -93,7 +97,7 @@ export function BatchesPage({
     if (noticeTimer.current !== null) window.clearTimeout(noticeTimer.current);
   }, []);
 
-  useEffect(() => setPage(1), [platform, statusFilter, failedOnly, todayOnly]);
+  useEffect(() => setPage(1), [platform, statusFilter, failedOnly, taskId, todayOnly]);
 
   useEffect(() => {
     if (active) return;
@@ -110,6 +114,7 @@ export function BatchesPage({
     if (statusFilter) params.set("status", statusFilter);
     if (failedOnly) params.set("failed_only", "true");
     if (todayOnly) params.set("today_only", "true");
+    if (taskId) params.set("task_id", String(taskId));
     void requestJson<BatchPageResponse>(`/api/capture-batches?${params}`)
       .then((payload) => {
         if (latest.current !== requestId) return;
@@ -130,7 +135,7 @@ export function BatchesPage({
           }));
         }
       });
-  }, [active, page, platform, statusFilter, failedOnly, todayOnly, refresh, showNotice]);
+  }, [active, page, platform, statusFilter, failedOnly, taskId, todayOnly, refresh, showNotice]);
 
   useEffect(() => {
     if (!active || !initialBatchId) return;
@@ -179,7 +184,7 @@ export function BatchesPage({
     );
   }
 
-  const hasFilters = Boolean(platform || statusFilter || failedOnly || todayOnly);
+  const hasFilters = Boolean(platform || statusFilter || failedOnly || taskId || todayOnly);
 
   return (
     <div className="page-content page-enter">
@@ -236,6 +241,12 @@ export function BatchesPage({
         <div><span>今日新增</span><strong>{todaySummary.added}</strong></div>
       </section>
       <section className="data-panel">
+        {taskId && (
+          <div className="scope-banner">
+            <span>正在查看任务 #{taskId} 的批次范围。</span>
+            <button className="text-button" onClick={onClearTaskScope}>清除任务筛选</button>
+          </div>
+        )}
         <TableState
           loading={data.loading}
           error={data.error}

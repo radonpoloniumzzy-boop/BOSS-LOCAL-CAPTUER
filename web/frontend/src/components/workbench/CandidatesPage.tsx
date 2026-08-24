@@ -32,9 +32,13 @@ function safeHttpUrl(value: string) {
 
 export function CandidatesPage({
   active = true,
+  taskId = null,
+  onClearTaskScope,
   onOpenBatch,
 }: {
   active?: boolean;
+  taskId?: number | null;
+  onClearTaskScope?: () => void;
   onOpenBatch: (batchId: number) => void;
 }) {
   const [keywordInput, setKeywordInput] = useState("");
@@ -56,7 +60,7 @@ export function CandidatesPage({
   const latestDetail = useRef(0);
   const latestAppearances = useRef(0);
 
-  useEffect(() => setPage(1), [keyword, platform, rating, sort, unbound]);
+  useEffect(() => setPage(1), [keyword, platform, rating, sort, taskId, unbound]);
 
   useEffect(() => {
     if (active) return;
@@ -71,6 +75,7 @@ export function CandidatesPage({
     if (platform) params.set("source_platform", platform);
     if (unbound) params.set("unbound_only", "true");
     if (rating) params.set("rating", rating);
+    if (taskId) params.set("task_id", String(taskId));
     void requestJson<PagedResponse<CandidateRow>>(`/api/candidates?${params}`).then((payload) => {
       if (latest.current === requestId) setData({ ...payload, loading: false, error: "" });
     }).catch((error: unknown) => {
@@ -83,7 +88,7 @@ export function CandidatesPage({
         }));
       }
     });
-  }, [keyword, page, platform, rating, refresh, sort, unbound]);
+  }, [keyword, page, platform, rating, refresh, sort, taskId, unbound]);
 
   useEffect(() => {
     if (selectedId === null) {
@@ -189,6 +194,12 @@ export function CandidatesPage({
         </div>
       </div>
       <section className="data-panel">
+        {taskId && (
+          <div className="scope-banner">
+            <span>正在查看任务 #{taskId} 的候选人范围。</span>
+            <button className="text-button" onClick={onClearTaskScope}>清除任务筛选</button>
+          </div>
+        )}
         <TableState
           loading={data.loading}
           error={data.error}
