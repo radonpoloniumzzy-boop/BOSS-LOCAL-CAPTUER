@@ -15,7 +15,7 @@ from core.models import (
     ScreeningProfile,
     ScreeningResult,
 )
-from core.utils import now_iso
+from core.utils import normalize_multiline_text, normalize_text, now_iso, short_hash
 from storage.db import DatabaseManager
 from talent.profile_builder import StandardProfileBuilder
 
@@ -34,6 +34,14 @@ class InvalidJobProfileStatusTransitionError(ValueError):
 
 class InvalidRecruitmentTaskStatusTransitionError(ValueError):
     """Raised when a recruitment task status transition is not allowed."""
+
+
+class CandidateDetailEnrichmentError(ValueError):
+    """Raised when a plugin detail enrichment request cannot be safely applied."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 RECRUITMENT_STATUSES = {
@@ -1050,6 +1058,184 @@ class CandidateRepository:
             "inserted_batch_items": inserted_batch_items,
             "candidate_results": candidate_results,
         }
+
+    def enrich_existing_candidate_detail(
+        self,
+        *,
+        task_id: int,
+        job_profile_id: int | None,
+        recruitment_task_id: int | None,
+        source_platform: str,
+        platform_uid: str,
+        source_url: str = "",
+        detail_url: str = "",
+        capture_time: str = "",
+        raw_card_text: str = "",
+        active_status: str = "",
+        expected_salary: str = "",
+        work_experience_text: str = "",
+        education_text: str = "",
+        tags_text: str = "",
+        summary_text: str = "",
+        city: str = "",
+        years_experience: int | None = None,
+        job_family: str = "",
+        job_track: str = "",
+    ) -> dict[str, object]:
+        safe_platform = normalize_text(source_platform).lower()
+        safe_uid = normalize_text(platform_uid)
+        if not safe_uid:
+            raise CandidateDetailEnrichmentError("detail_target_unconfirmed", "无法确认当前详情对应的候选人。")
+        text_values = [
+            raw_card_text,
+            active_status,
+            expected_salary,
+            work_experience_text,
+            education_text,
+            tags_text,
+            summary_text,
+            city,
+            job_family,
+            job_track,
+        ]
+        if any(self._contains_forbidden_contact(value) for value in text_values):
+            raise CandidateDetailEnrichmentError("detail_contact_forbidden", "详情内容包含联系方式，已停止写入。")
+
+        connection = self.db.get_connection()
+        changed_fields: list[str] = []
+        timestamp = now_iso()
+        with connection:
+            task = connection.execute(
+                """
+                SELECT t.*, p.job_title AS role_title
+                FROM recruitment_tasks t
+                JOIN screening_profiles p ON p.id = t.role_id
+                WHERE t.id = ?
+                """,
+                (task_id,),
+            ).fetchone()
+            if task is None or str(task["status"] or "") != "running":
+                raise CandidateDetailEnrichmentError("context_unavailable", "当前未选择可用招聘任务。")
+            role_id = int(task["role_id"])
+            if recruitment_task_id is not None and int(recruitment_task_id) != int(task["id"]):
+                raise CandidateDetailEnrichmentError("detail_context_mismatch", "当前详情与插件任务上下文不一致。")
+            if job_profile_id is not None and int(job_profile_id) != role_id:
+                raise CandidateDetailEnrichmentError("detail_context_mismatch", "当前详情与岗位上下文不一致。")
+            task_platform = normalize_text(str(task["platform"] or "")).lower()
+            if safe_platform and task_platform and safe_platform != task_platform:
+                raise CandidateDetailEnrichmentError("detail_context_mismatch", "当前详情来源平台与招聘任务不一致。")
+
+            matches = connection.execute(
+                """
+                SELECT c.*
+                FROM candidates c
+                JOIN candidate_role_matches m ON m.candidate_id = c.id
+                WHERE m.role_id = ?
+                  AND c.platform_uid = ?
+                  AND (? = '' OR c.source_platform = ?)
+                ORDER BY c.id
+                """,
+                (role_id, safe_uid, safe_platform, safe_platform),
+            ).fetchall()
+            if len(matches) == 0:
+                raise CandidateDetailEnrichmentError("detail_target_unconfirmed", "未找到可安全更新的已入库候选人。")
+            if len(matches) > 1:
+                raise CandidateDetailEnrichmentError("detail_target_ambiguous", "当前详情命中了多个候选人，已停止写入。")
+
+            row = matches[0]
+            candidate_id = int(row["id"])
+            candidate_updates: dict[str, object] = {}
+
+            def add_text_update(field: str, value: str) -> None:
+                normalized = normalize_multiline_text(str(value or ""))
+                if not normalized:
+                    return
+                if str(row[field] or "") != normalized:
+                    candidate_updates[field] = normalized
+                    changed_fields.append(field)
+
+            add_text_update("source_platform", safe_platform)
+            add_text_update("source_url", source_url)
+            add_text_update("detail_url", detail_url)
+            add_text_update("capture_time", capture_time)
+            add_text_update("raw_card_text", raw_card_text)
+            add_text_update("active_status", active_status)
+            add_text_update("expected_salary", expected_salary)
+            add_text_update("work_experience_text", work_experience_text)
+            add_text_update("education_text", education_text)
+            add_text_update("tags_text", tags_text)
+            add_text_update("summary_text", summary_text)
+            if "raw_card_text" in candidate_updates:
+                candidate_updates["raw_text_hash"] = short_hash(str(candidate_updates["raw_card_text"]))
+                changed_fields.append("raw_text_hash")
+
+            if candidate_updates:
+                set_clause = ", ".join(f"{field} = ?" for field in candidate_updates)
+                connection.execute(
+                    f"UPDATE candidates SET {set_clause}, updated_at = ? WHERE id = ?",
+                    [*candidate_updates.values(), timestamp, candidate_id],
+                )
+
+            profile_updates: dict[str, object] = {}
+            for field, value in (
+                ("city", city),
+                ("job_family", job_family),
+                ("job_track", job_track),
+            ):
+                normalized = normalize_text(str(value or ""))
+                if normalized:
+                    profile_updates[field] = normalized
+            if years_experience is not None:
+                profile_updates["years_experience"] = int(years_experience)
+            if profile_updates:
+                existing_profile = connection.execute(
+                    "SELECT * FROM candidate_profiles WHERE candidate_id = ?",
+                    (candidate_id,),
+                ).fetchone()
+                if existing_profile is None:
+                    connection.execute(
+                        """
+                        INSERT INTO candidate_profiles(candidate_id, name_or_alias, updated_at)
+                        VALUES (?, ?, ?)
+                        """,
+                        (candidate_id, str(row["name"] or ""), timestamp),
+                    )
+                    existing_profile = connection.execute(
+                        "SELECT * FROM candidate_profiles WHERE candidate_id = ?",
+                        (candidate_id,),
+                    ).fetchone()
+                changed_profile = {
+                    field: value
+                    for field, value in profile_updates.items()
+                    if existing_profile is None or existing_profile[field] != value
+                }
+                if changed_profile:
+                    set_clause = ", ".join(f"{field} = ?" for field in changed_profile)
+                    connection.execute(
+                        f"UPDATE candidate_profiles SET {set_clause}, updated_at = ? WHERE candidate_id = ?",
+                        [*changed_profile.values(), timestamp, candidate_id],
+                    )
+                    changed_fields.extend(changed_profile.keys())
+
+        unique_changed = sorted(set(changed_fields))
+        return {
+            "status": "updated" if unique_changed else "unchanged",
+            "updated": bool(unique_changed),
+            "updated_field_count": len(unique_changed),
+            "message": "候选人详情已更新。" if unique_changed else "当前详情未产生新变化。",
+        }
+
+    @staticmethod
+    def _contains_forbidden_contact(value: object) -> bool:
+        text = str(value or "")
+        if not text:
+            return False
+        patterns = (
+            r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}",
+            r"(?<!\d)(?:\+?86[-\s]?)?1[3-9]\d{9}(?!\d)",
+            r"(?:微信|wechat|vx|手机号|电话|邮箱|联系方式|身份证|住址|地址)\s*[:：]?\s*\S+",
+        )
+        return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns)
 
     def _ensure_candidate_role_match_exists(
         self,

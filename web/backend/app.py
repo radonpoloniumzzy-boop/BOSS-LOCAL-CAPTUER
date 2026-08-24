@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import io
 import re
+import sqlite3
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import quote, urlencode
@@ -14,11 +15,13 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from automation.parser import CandidateParser
 from core.app_lock import ApplicationLockError
 from core.bootstrap import BootstrapService, DataDirectoryError
 from core.version import APP_VERSION
 from core.models import RecruitmentTask, ScreeningProfile
 from storage.repository import (
+    CandidateDetailEnrichmentError,
     IdempotencyConflictError,
     InvalidJobProfileStatusTransitionError,
     InvalidRecruitmentTaskStatusTransitionError,
@@ -133,6 +136,29 @@ class ExternalRatingsImportRequest(BaseModel):
     text: str = ""
     rows: list[dict[str, object]] = Field(default_factory=list)
     source_note: str = ""
+
+
+class CandidateDetailEnrichmentRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    source_platform: str = ""
+    platform_uid: str = ""
+    source_url: str = ""
+    detail_url: str = ""
+    capture_time: str = ""
+    recruitment_task_id: int | None = None
+    job_profile_id: int | None = None
+    raw_card_text: str = ""
+    active_status: str = ""
+    expected_salary: str = ""
+    work_experience_text: str = ""
+    education_text: str = ""
+    tags_text: str = ""
+    summary_text: str = ""
+    city: str = ""
+    years_experience: int | None = None
+    job_family: str = ""
+    job_track: str = ""
 
 
 _CANDIDATE_LIST_FIELDS = (
@@ -492,6 +518,7 @@ def create_web_app(
             "/api/plugin/context",
             "/api/plugin/ratings/badges",
             "/api/plugin/keyword-rules",
+            "/api/plugin/candidate-detail/enrich",
         }
         extension_allowed = request.url.path in extension_paths or (
             request.url.path.startswith("/api/capture-batches/")
@@ -723,6 +750,60 @@ def create_web_app(
             return runtime.import_service.import_candidates(payload.model_dump())
         except IdempotencyConflictError as exc:
             raise ApiError(409, "idempotency_conflict", str(exc)) from exc
+        except ValueError as exc:
+            raise ApiError(400, "invalid_request", str(exc)) from exc
+
+    @app.post("/api/plugin/candidate-detail/enrich")
+    def enrich_candidate_detail(
+        payload: CandidateDetailEnrichmentRequest,
+        _auth: None = Depends(require_local_api_token),
+    ) -> dict[str, object]:
+        if runtime.repository is None:
+            raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。")
+        try:
+            context = runtime.get_plugin_context()
+        except RuntimeError as exc:
+            raise ApiError(503, "database_not_ready", "数据库尚未就绪，请先完成首次设置。") from exc
+        if context is None:
+            raise ApiError(409, "context_unavailable", "当前未选择可用招聘任务。")
+
+        source_platform = CandidateParser.normalize_source_platform(
+            payload.source_platform,
+            payload.source_url or payload.detail_url,
+        )
+        platform_uid = CandidateParser.canonicalize_platform_uid(
+            source_platform,
+            payload.platform_uid,
+        )
+        try:
+            return runtime.repository.enrich_existing_candidate_detail(
+                task_id=int(context["recruitment_task_id"]),
+                job_profile_id=payload.job_profile_id,
+                recruitment_task_id=payload.recruitment_task_id,
+                source_platform=source_platform,
+                platform_uid=platform_uid,
+                source_url=payload.source_url,
+                detail_url=payload.detail_url,
+                capture_time=payload.capture_time,
+                raw_card_text=payload.raw_card_text,
+                active_status=payload.active_status,
+                expected_salary=payload.expected_salary,
+                work_experience_text=payload.work_experience_text,
+                education_text=payload.education_text,
+                tags_text=payload.tags_text,
+                summary_text=payload.summary_text,
+                city=payload.city,
+                years_experience=payload.years_experience,
+                job_family=payload.job_family,
+                job_track=payload.job_track,
+            )
+        except CandidateDetailEnrichmentError as exc:
+            status = 400
+            if exc.code in {"context_unavailable", "detail_context_mismatch"}:
+                status = 409
+            raise ApiError(status, exc.code, str(exc)) from exc
+        except sqlite3.DatabaseError as exc:
+            raise ApiError(500, "detail_enrichment_failed", "候选人详情写入失败，已回滚本次更新。") from exc
         except ValueError as exc:
             raise ApiError(400, "invalid_request", str(exc)) from exc
 

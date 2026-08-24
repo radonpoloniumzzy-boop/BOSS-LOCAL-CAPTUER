@@ -288,6 +288,7 @@ function createPopupTestContext(options = {}) {
     "collectCurrent",
     "collectAuto",
     "pauseScroll",
+    "captureCurrentDetail",
     "requestResume",
     "downloadResume",
     "requestAndDownload",
@@ -558,6 +559,12 @@ function loadCollectorForDom(dom, href = "https://www.zhipin.com/web/geek/recomm
 function giveCardsLayout(dom) {
   for (const node of dom.window.document.querySelectorAll(".candidate-card, .resume-card, .ad-card, .filter-card")) {
     node.getBoundingClientRect = () => ({ width: 720, height: 180, top: 0, left: 0, right: 720, bottom: 180 });
+  }
+}
+
+function giveDetailLayout(dom) {
+  for (const node of dom.window.document.querySelectorAll(".candidate-detail, .resume-detail, .hidden-detail, .loading-detail")) {
+    node.getBoundingClientRect = () => ({ width: 760, height: 520, top: 0, left: 0, right: 760, bottom: 520 });
   }
 }
 
@@ -3043,6 +3050,280 @@ async function testCollectorIgnoresDetachedNodesAndUsesFreshDomSnapshots() {
   assert.strictEqual(third.cards[0].name, "页面丙");
 }
 
+async function testCollectorExtractsBossCurrentDetailSafely() {
+  const dom = new JSDOM(`
+    <main>
+      <section class="candidate-detail" data-geek-id="detail-alpha">
+        <h2 class="name">详情测试甲</h2>
+        <span class="salary">45K-65K</span>
+        <span class="experience">8年经验</span>
+        <span class="education">本科</span>
+        <p>城市：上海</p>
+        <p>职能：技术</p>
+        <p>方向：策略平台</p>
+        <p class="summary">长期做策略平台 Python</p>
+        <span class="boss-local-rating-badge">1SSR</span>
+        <span class="boss-local-keyword-badge">关键词 2</span>
+        <button>打招呼</button>
+        <p>邮箱：safe@example.invalid</p>
+      </section>
+      <article class="candidate-card" data-geek-id="list-alpha">
+        <strong class="name">列表候选</strong>
+        <span class="salary">35K-45K</span>
+        <span class="experience">6年经验</span>
+        <span class="education">本科</span>
+        <button>打招呼</button>
+      </article>
+    </main>
+  `, { url: "https://www.zhipin.com/web/geek/recommend" });
+  giveCardsLayout(dom);
+  giveDetailLayout(dom);
+  const collector = loadCollectorForDom(dom);
+  const boss = collector.platforms.find((platform) => platform.id === "boss");
+  const result = collector.extractCurrentDetail(boss, { recruitmentTaskId: 11, jobProfileId: 22 });
+
+  assert.strictEqual(result.status, "capturable");
+  assert.strictEqual(result.detail.platform_uid, "boss:detail-alpha");
+  assert.strictEqual(result.detail.recruitment_task_id, 11);
+  assert.strictEqual(result.detail.job_profile_id, 22);
+  assert.strictEqual(result.detail.city, "上海");
+  assert.strictEqual(result.detail.years_experience, 8);
+  assert.strictEqual(result.detail.job_family, "技术");
+  assert.strictEqual(result.detail.job_track, "策略平台");
+  assert(result.detail.raw_card_text.includes("详情测试甲"));
+  assert(!result.detail.raw_card_text.includes("1SSR"));
+  assert(!result.detail.raw_card_text.includes("关键词 2"));
+  assert(!result.detail.raw_card_text.includes("打招呼"));
+  assert(!result.detail.raw_card_text.includes("safe@example.invalid"));
+}
+
+async function testCollectorExtractsLiepinCurrentDetail() {
+  const dom = new JSDOM(`
+    <main>
+      <section class="resume-detail" data-resume-id="resume-alpha">
+        <h2 class="name">详情测试乙</h2>
+        <span class="salary">35K-50K</span>
+        <span class="experience">6年经验</span>
+        <span class="education">硕士</span>
+        <p>城市：深圳</p>
+        <p>方向：数据工程</p>
+        <p>候选人长期负责数据平台建设</p>
+      </section>
+    </main>
+  `, { url: "https://lpt.liepin.com/recommend" });
+  giveDetailLayout(dom);
+  const collector = loadCollectorForDom(dom, "https://lpt.liepin.com/recommend");
+  const liepin = collector.platforms.find((platform) => platform.id === "liepin");
+  const result = collector.extractCurrentDetail(liepin, { recruitmentTaskId: 33, jobProfileId: 44 });
+
+  assert.strictEqual(result.status, "capturable");
+  assert.strictEqual(result.detail.platform_uid, "liepin:resume-alpha");
+  assert.strictEqual(result.detail.source_platform, "liepin");
+  assert.strictEqual(result.detail.city, "深圳");
+  assert.strictEqual(result.detail.job_track, "数据工程");
+}
+
+async function testCollectorDetailRejectsHiddenLoadingMultipleAndUnconfirmed() {
+  const hidden = new JSDOM(`
+    <main>
+      <section class="candidate-detail hidden-detail" data-geek-id="hidden-alpha" style="display:none">
+        <h2 class="name">隐藏详情</h2><p>45K-65K</p><p>8年经验</p><p>本科</p>
+      </section>
+    </main>
+  `, { url: "https://www.zhipin.com/web/geek/recommend" });
+  giveDetailLayout(hidden);
+  let collector = loadCollectorForDom(hidden);
+  let boss = collector.platforms.find((platform) => platform.id === "boss");
+  assert.strictEqual(collector.extractCurrentDetail(boss, {}).status, "not_opened");
+
+  const loading = new JSDOM(`
+    <main>
+      <section class="candidate-detail loading-detail" data-geek-id="loading-alpha">
+        <p>加载中</p><p>45K-65K</p><p>8年经验</p><p>本科</p>
+      </section>
+    </main>
+  `, { url: "https://www.zhipin.com/web/geek/recommend" });
+  giveDetailLayout(loading);
+  collector = loadCollectorForDom(loading);
+  boss = collector.platforms.find((platform) => platform.id === "boss");
+  assert.strictEqual(collector.extractCurrentDetail(boss, {}).status, "not_opened");
+
+  const multiple = new JSDOM(`
+    <main>
+      <section class="candidate-detail" data-geek-id="multi-a"><h2 class="name">多详情甲</h2><p>45K-65K</p><p>8年经验</p><p>本科</p><p>策略平台</p></section>
+      <section class="candidate-detail" data-geek-id="multi-b"><h2 class="name">多详情乙</h2><p>35K-50K</p><p>6年经验</p><p>硕士</p><p>数据平台</p></section>
+    </main>
+  `, { url: "https://www.zhipin.com/web/geek/recommend" });
+  giveDetailLayout(multiple);
+  collector = loadCollectorForDom(multiple);
+  boss = collector.platforms.find((platform) => platform.id === "boss");
+  assert.strictEqual(collector.extractCurrentDetail(boss, {}).status, "ambiguous");
+
+  const unconfirmed = new JSDOM(`
+    <main>
+      <section class="candidate-detail"><h2 class="name">无身份详情</h2><p>45K-65K</p><p>8年经验</p><p>本科</p><p>策略平台</p></section>
+    </main>
+  `, { url: "https://www.zhipin.com/web/geek/recommend" });
+  giveDetailLayout(unconfirmed);
+  collector = loadCollectorForDom(unconfirmed);
+  boss = collector.platforms.find((platform) => platform.id === "boss");
+  assert.strictEqual(collector.extractCurrentDetail(boss, {}).status, "unconfirmed");
+}
+
+async function testCollectorDetailUsesFreshDomAfterCandidateSwitchAndClose() {
+  const dom = new JSDOM(`
+    <main>
+      <section class="candidate-detail" data-geek-id="detail-a">
+        <h2 class="name">详情甲</h2><p>45K-65K</p><p>8年经验</p><p>本科</p><p>策略平台</p>
+      </section>
+    </main>
+  `, { url: "https://www.zhipin.com/web/geek/recommend" });
+  giveDetailLayout(dom);
+  const collector = loadCollectorForDom(dom);
+  const boss = collector.platforms.find((platform) => platform.id === "boss");
+  const first = collector.extractCurrentDetail(boss, {});
+  assert.strictEqual(first.detail.platform_uid, "boss:detail-a");
+
+  dom.window.document.querySelector("main").innerHTML = `
+    <section class="candidate-detail" data-geek-id="detail-b">
+      <h2 class="name">详情乙</h2><p>35K-50K</p><p>6年经验</p><p>硕士</p><p>数据平台</p>
+    </section>
+  `;
+  giveDetailLayout(dom);
+  const second = collector.extractCurrentDetail(boss, {});
+  assert.strictEqual(second.detail.platform_uid, "boss:detail-b");
+  assert(!second.detail.raw_card_text.includes("详情甲"));
+
+  dom.window.document.querySelector(".candidate-detail").remove();
+  const closed = collector.extractCurrentDetail(boss, {});
+  assert.strictEqual(closed.status, "not_opened");
+}
+
+async function testPopupCurrentDetailEnrichmentPostsSafePayloadInWebModeOnly() {
+  const frameResults = [{ result: {
+    status: "capturable",
+    detail: {
+      source_platform: "boss",
+      platform_uid: "boss:detail-alpha",
+      recruitment_task_id: 11,
+      job_profile_id: 22,
+      raw_card_text: "详情测试甲\n长期做策略平台",
+      summary_text: "长期做策略平台",
+    },
+  } }];
+  const fetchCalls = [];
+  const popup = createPopupTestContext({
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "web-token",
+    connectionMode: "web",
+    runtimeHandler: createPopupWebRuntimeHandler(),
+    fetchImpl: async (url, requestOptions = {}) => {
+      fetchCalls.push({ url: String(url), options: requestOptions });
+      if (String(url).endsWith("/api/plugin/context")) {
+        return {
+          ok: true,
+          json: async () => ({
+            recruitment_task_id: 11,
+            job_profile_id: 22,
+            job_profile_version: 3,
+            job_title: "量化研究员",
+            task_status: "running",
+          }),
+        };
+      }
+      if (String(url).endsWith("/api/plugin/candidate-detail/enrich")) {
+        return { ok: true, json: async () => ({ status: "updated", updated_fields: ["summary_text"] }) };
+      }
+      throw new Error(`unexpected fetch ${String(url)}`);
+    },
+  });
+  popup.chrome.scripting.executeScript = async (details) => {
+    if (details.files) return [{ result: true }];
+    return frameResults;
+  };
+
+  await popup.api.init();
+  await popup.api.runCurrentDetailEnrichment();
+
+  const enrichCalls = fetchCalls.filter((call) => call.url.endsWith("/api/plugin/candidate-detail/enrich"));
+  assert.strictEqual(enrichCalls.length, 1);
+  assert.strictEqual(enrichCalls[0].options.headers["X-Boss-Local-Token"], "web-token");
+  assert(!enrichCalls[0].url.includes("web-token"));
+  const body = JSON.parse(enrichCalls[0].options.body);
+  assert.strictEqual(body.platform_uid, "boss:detail-alpha");
+  assert(!("name" in body));
+  assert(popup.elements.status.textContent.includes("已安全更新"));
+
+  const desktop = createPopupTestContext({
+    apiBase: "http://127.0.0.1:19001",
+    apiToken: "desktop-token",
+    connectionMode: "desktop",
+    runtimeHandler: createPopupWebRuntimeHandler(),
+    fetchImpl: async () => {
+      throw new Error("desktop mode must not fetch");
+    },
+  });
+  await desktop.api.init();
+  await desktop.api.runCurrentDetailEnrichment();
+  assert(desktop.elements.status.textContent.includes("仅支持网页工作台模式"));
+}
+
+async function testPopupCurrentDetailEnrichmentRejectsUnconfirmedAndAllowsRetryAfterFailure() {
+  let frameStatus = "unconfirmed";
+  let failWrite = true;
+  let enrichCount = 0;
+  const popup = createPopupTestContext({
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "web-token",
+    connectionMode: "web",
+    runtimeHandler: createPopupWebRuntimeHandler(),
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/api/plugin/context")) {
+        return {
+          ok: true,
+          json: async () => ({
+            recruitment_task_id: 11,
+            job_profile_id: 22,
+            job_profile_version: 3,
+            job_title: "量化研究员",
+            task_status: "running",
+          }),
+        };
+      }
+      if (String(url).endsWith("/api/plugin/candidate-detail/enrich")) {
+        enrichCount += 1;
+        if (failWrite) {
+          return { ok: false, json: async () => ({ error: { message: "无法确认当前详情对应的候选人。" } }) };
+        }
+        return { ok: true, json: async () => ({ status: "unchanged" }) };
+      }
+      throw new Error(`unexpected fetch ${String(url)}`);
+    },
+  });
+  popup.chrome.scripting.executeScript = async (details) => {
+    if (details.files) return [{ result: true }];
+    if (frameStatus === "unconfirmed") {
+      return [{ result: { status: "unconfirmed", detail: null } }];
+    }
+    return [{ result: { status: "capturable", detail: { source_platform: "boss", platform_uid: "boss:retry", raw_card_text: "安全详情" } } }];
+  };
+
+  await popup.api.init();
+  await popup.api.runCurrentDetailEnrichment();
+  assert.strictEqual(enrichCount, 0);
+  assert(popup.elements.status.textContent.includes("缺少稳定身份"));
+
+  frameStatus = "capturable";
+  await popup.api.runCurrentDetailEnrichment();
+  assert.strictEqual(enrichCount, 1);
+  assert(popup.elements.status.textContent.includes("采集当前详情失败"));
+
+  failWrite = false;
+  await popup.api.runCurrentDetailEnrichment();
+  assert.strictEqual(enrichCount, 2);
+  assert(popup.elements.status.textContent.includes("没有新的可更新信息"));
+}
+
 async function testWebIntakeStatusMatrixFollowsServerStatus() {
   const popup = createPopupTestContext({ apiBase: "http://127.0.0.1:17864", apiToken: "web-token" });
   const settings = { apiBase: "http://127.0.0.1:17864", apiToken: "web-token", jobTitle: "Boss ????" };
@@ -4624,6 +4905,10 @@ async function main() {
   testBatchRequestSkipsAlreadyRequestedConversation();
   testPreviewToolbarDownloadDoesNotSaveHtmlPreviewPage();
   testCollectionSupportsBossAndLiepinAdapters();
+  await testCollectorExtractsBossCurrentDetailSafely();
+  await testCollectorExtractsLiepinCurrentDetail();
+  await testCollectorDetailRejectsHiddenLoadingMultipleAndUnconfirmed();
+  await testCollectorDetailUsesFreshDomAfterCandidateSwitchAndClose();
   testAutoScrollCanBePausedFromPopup();
   testAutomationAutoButtonStartsDesktopWorkflow();
   testChatAutomationIsOptIn();
@@ -4665,6 +4950,8 @@ async function main() {
   await testPopupDesktopModeDoesNotRequestRatingBadgesAndClearsOldBadges();
   await testPopupWebModeRefreshesKeywordHighlights();
   await testPopupKeywordHighlightsClearOnFailureAndDesktopMode();
+  await testPopupCurrentDetailEnrichmentPostsSafePayloadInWebModeOnly();
+  await testPopupCurrentDetailEnrichmentRejectsUnconfirmedAndAllowsRetryAfterFailure();
   await testPendingLimitConcurrentEnqueueStaysWithinTen();
   await testWebIntakeSuccessSanitizesCompletedPayload();
   await testCompletedTransitionScrubsSensitivePendingBeforeDelete();

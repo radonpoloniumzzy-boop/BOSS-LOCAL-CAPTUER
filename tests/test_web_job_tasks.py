@@ -1555,6 +1555,226 @@ class WebJobTaskFoundationTest(unittest.TestCase):
             snapshot_rules,
         )
 
+    def test_plugin_candidate_detail_enrichment_updates_existing_candidate_only(self) -> None:
+        job = self._create_active_job()
+        task = self._start_task(self._create_task(job))
+        candidate_id = self._intake_candidate(
+            job=job,
+            task=task,
+            name="详情测试甲",
+            source_id="detail-alpha",
+            key="detail-enrich-alpha",
+        )
+        selected = self.client.put("/api/plugin-context", json={"recruitment_task_id": task["id"]}, headers=self.origin)
+        self.assertEqual(selected.status_code, 200, selected.text)
+        repo = self.app.state.runtime.repository
+        before_items = repo.db.get_connection().execute("SELECT COUNT(*) AS count FROM capture_batch_items").fetchone()["count"]
+        batch_id = self.client.get("/api/candidates?page=1&page_size=20&keyword=详情测试甲").json()["rows"][0]["latest_batch_id"]
+        before_markdown = self.client.get(f"/api/capture-batches/{batch_id}/export.md").text
+
+        response = self.client.post(
+            "/api/plugin/candidate-detail/enrich",
+            json={
+                "source_platform": "boss",
+                "platform_uid": "detail-alpha",
+                "recruitment_task_id": task["id"],
+                "job_profile_id": job["id"],
+                "source_url": "https://www.zhipin.com/web/geek/recommend",
+                "detail_url": "https://www.zhipin.com/geek/detail/detail-alpha",
+                "capture_time": "2026-08-24T10:20:30",
+                "raw_card_text": "详情测试甲\n城市：上海\n8年经验\n本科\n长期做策略平台",
+                "active_status": "今日活跃",
+                "expected_salary": "45K-65K",
+                "work_experience_text": "8年经验",
+                "education_text": "本科",
+                "tags_text": "Python | 策略平台",
+                "summary_text": "长期做策略平台",
+                "city": "上海",
+                "years_experience": 8,
+                "job_family": "技术",
+                "job_track": "策略平台",
+            },
+            headers=self.extension,
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["status"], "updated")
+        self.assertNotIn("candidate_id", response.text)
+        self.assertEqual(
+            repo.db.get_connection().execute("SELECT COUNT(*) AS count FROM capture_batch_items").fetchone()["count"],
+            before_items,
+        )
+        detail = self.client.get(f"/api/candidates/{candidate_id}").json()
+        self.assertEqual(detail["city"], "上海")
+        self.assertEqual(detail["years_experience"], 8)
+        self.assertEqual(detail["job_family"], "技术")
+        self.assertEqual(detail["job_track"], "策略平台")
+        self.assertEqual(detail["latest_raw_card_text"], "详情测试甲 raw card")
+        self.assertEqual(self.client.get(f"/api/capture-batches/{batch_id}/export.md").text, before_markdown)
+
+        repeat = self.client.post(
+            "/api/plugin/candidate-detail/enrich",
+            json={
+                "source_platform": "boss",
+                "platform_uid": "boss:detail-alpha",
+                "recruitment_task_id": task["id"],
+                "job_profile_id": job["id"],
+                "raw_card_text": "详情测试甲\n城市：上海\n8年经验\n本科\n长期做策略平台",
+                "active_status": "今日活跃",
+                "expected_salary": "45K-65K",
+                "work_experience_text": "8年经验",
+                "education_text": "本科",
+                "tags_text": "Python | 策略平台",
+                "summary_text": "长期做策略平台",
+                "city": "上海",
+                "years_experience": 8,
+                "job_family": "技术",
+                "job_track": "策略平台",
+            },
+            headers=self.extension,
+        )
+        self.assertEqual(repeat.status_code, 200, repeat.text)
+        self.assertEqual(repeat.json()["status"], "unchanged")
+
+    def test_plugin_candidate_detail_enrichment_rejects_unconfirmed_ambiguous_and_context_mismatch(self) -> None:
+        job = self._create_active_job()
+        task = self._start_task(self._create_task(job))
+        self._intake_candidate(job=job, task=task, name="详情测试乙", source_id="detail-beta", key="detail-enrich-beta")
+        selected = self.client.put("/api/plugin-context", json={"recruitment_task_id": task["id"]}, headers=self.origin)
+        self.assertEqual(selected.status_code, 200, selected.text)
+
+        unconfirmed = self.client.post(
+            "/api/plugin/candidate-detail/enrich",
+            json={"source_platform": "boss", "platform_uid": "", "raw_card_text": "安全详情"},
+            headers=self.extension,
+        )
+        self.assertEqual(unconfirmed.status_code, 400, unconfirmed.text)
+        self.assertEqual(unconfirmed.json()["error"]["code"], "detail_target_unconfirmed")
+
+        mismatch = self.client.post(
+            "/api/plugin/candidate-detail/enrich",
+            json={
+                "source_platform": "liepin",
+                "platform_uid": "liepin:detail-beta",
+                "recruitment_task_id": task["id"] + 99,
+                "job_profile_id": job["id"],
+                "raw_card_text": "安全详情",
+            },
+            headers=self.extension,
+        )
+        self.assertEqual(mismatch.status_code, 409, mismatch.text)
+        self.assertEqual(mismatch.json()["error"]["code"], "detail_context_mismatch")
+
+        repo = self.app.state.runtime.repository
+        connection = repo.db.get_connection()
+        connection.execute(
+            """
+            INSERT INTO candidates(candidate_key, raw_text_hash, job_title, source_url, capture_time, raw_card_text,
+                source_platform, name, active_status, expected_salary, work_experience_text, education_text,
+                tags_text, summary_text, detail_url, platform_uid, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "platform:boss:detail-beta-duplicate",
+                "dup",
+                "量化研究员",
+                "",
+                "2026-08-24T10:00:00",
+                "duplicate",
+                "boss",
+                "详情测试乙副本",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "boss:detail-beta",
+                "2026-08-24T10:00:00",
+                "2026-08-24T10:00:00",
+            ),
+        )
+        duplicate_id = connection.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+        connection.execute(
+            "INSERT INTO candidate_role_matches(candidate_id, role_id, created_at, updated_at) VALUES (?, ?, ?, ?)",
+            (duplicate_id, job["id"], "2026-08-24T10:00:00", "2026-08-24T10:00:00"),
+        )
+        connection.commit()
+        ambiguous = self.client.post(
+            "/api/plugin/candidate-detail/enrich",
+            json={"source_platform": "boss", "platform_uid": "boss:detail-beta", "raw_card_text": "安全详情"},
+            headers=self.extension,
+        )
+        self.assertEqual(ambiguous.status_code, 400, ambiguous.text)
+        self.assertEqual(ambiguous.json()["error"]["code"], "detail_target_ambiguous")
+
+    def test_plugin_candidate_detail_enrichment_forbids_contact_extra_fields_and_rolls_back(self) -> None:
+        job = self._create_active_job()
+        task = self._start_task(self._create_task(job))
+        candidate_id = self._intake_candidate(
+            job=job,
+            task=task,
+            name="详情测试丙",
+            source_id="detail-gamma",
+            key="detail-enrich-gamma",
+        )
+        self.client.put("/api/plugin-context", json={"recruitment_task_id": task["id"]}, headers=self.origin)
+        contact = self.client.post(
+            "/api/plugin/candidate-detail/enrich",
+            json={
+                "source_platform": "boss",
+                "platform_uid": "boss:detail-gamma",
+                "raw_card_text": "详情测试丙\n邮箱：safe@example.invalid",
+            },
+            headers=self.extension,
+        )
+        self.assertEqual(contact.status_code, 400, contact.text)
+        self.assertEqual(contact.json()["error"]["code"], "detail_contact_forbidden")
+        self.assertNotIn("safe@example.invalid", contact.text)
+
+        extra = self.client.post(
+            "/api/plugin/candidate-detail/enrich",
+            json={
+                "source_platform": "boss",
+                "platform_uid": "boss:detail-gamma",
+                "raw_card_text": "详情测试丙",
+                "prompt_text": "forbidden",
+            },
+            headers=self.extension,
+        )
+        self.assertEqual(extra.status_code, 422, extra.text)
+        self.assertNotIn("prompt_text", extra.text)
+
+        repo = self.app.state.runtime.repository
+        connection = repo.db.get_connection()
+        connection.execute(
+            """
+            CREATE TRIGGER fail_detail_enrichment_update
+            BEFORE UPDATE OF summary_text ON candidates
+            BEGIN
+              SELECT RAISE(ABORT, 'detail enrichment rollback');
+            END
+            """
+        )
+        before = self.client.get(f"/api/candidates/{candidate_id}").json()
+        failed = self.client.post(
+            "/api/plugin/candidate-detail/enrich",
+            json={
+                "source_platform": "boss",
+                "platform_uid": "boss:detail-gamma",
+                "raw_card_text": "详情测试丙\n城市：北京\n风控平台",
+                "summary_text": "风控平台",
+                "city": "北京",
+            },
+            headers=self.extension,
+        )
+        self.assertEqual(failed.status_code, 500, failed.text)
+        after = self.client.get(f"/api/candidates/{candidate_id}").json()
+        self.assertEqual(after["raw_card_text"], before["raw_card_text"])
+        self.assertEqual(after["summary_text"], before["summary_text"])
+        self.assertNotEqual(after.get("city"), "北京")
+
 
 if __name__ == "__main__":
     unittest.main()

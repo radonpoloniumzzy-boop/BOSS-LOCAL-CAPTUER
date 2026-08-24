@@ -72,6 +72,7 @@ const applyPairingCodeButton = document.getElementById("applyPairingCode");
 const downloadCurrentBatchButton = document.getElementById("downloadCurrentBatch");
 const retryWebIntakeButton = document.getElementById("retryWebIntake");
 const openWebWorkbenchButton = document.getElementById("openWebWorkbench");
+const captureCurrentDetailButton = document.getElementById("captureCurrentDetail");
 let batchStatusTimer = null;
 let activeJobProfileId = null;
 let activeRecruitmentTaskId = null;
@@ -91,6 +92,7 @@ document.getElementById("scrollWaitUp").addEventListener("click", () => adjustSc
 document.getElementById("collectCurrent").addEventListener("click", () => runCollection(false));
 document.getElementById("collectAuto").addEventListener("click", () => runCollection(true));
 document.getElementById("pauseScroll").addEventListener("click", () => requestScrollPause());
+captureCurrentDetailButton.addEventListener("click", () => runCurrentDetailEnrichment());
 document.getElementById("requestResume").addEventListener("click", () => runSingleChatAction("request_resume"));
 document.getElementById("downloadResume").addEventListener("click", () => runSingleChatAction("download_current_resume"));
 document.getElementById("requestAndDownload").addEventListener("click", () => runSingleChatAction("request_and_download"));
@@ -654,6 +656,77 @@ async function runCollection(autoScroll, options = {}) {
   } catch (error) {
     setStatus(`${webMode ? "发送到网页工作台失败" : "导入本地程序失败"}。\n${formatWebIntakeError(error)}`);
   }
+}
+
+async function runCurrentDetailEnrichment() {
+  const baseSettings = collectSettings();
+  if (!isWebWorkbenchMode(baseSettings)) {
+    setStatus("采集当前详情仅支持网页工作台模式。桌面兼容模式请继续使用原采集入口。");
+    return;
+  }
+  if (!baseSettings.apiToken) {
+    setStatus("插件尚未连接网页工作台，请先在设置页使用连接码配对。");
+    return;
+  }
+
+  const tab = await getActiveSupportedTab();
+  if (!tab) {
+    return;
+  }
+  const platform = detectCollectPlatform(tab.url);
+  const settings = await refreshPluginContext(applyPlatformDefaults(baseSettings, platform));
+  if (!settings.recruitmentTaskId || !settings.jobProfileId) {
+    setStatus("当前未选择可用招聘任务，无法安全绑定详情。");
+    return;
+  }
+
+  captureCurrentDetailButton.disabled = true;
+  setStatus("正在识别当前已打开的候选人详情...");
+  try {
+    const frameResults = await collectCurrentDetailFromAllFrames(tab.id, settings);
+    const candidates = (frameResults || [])
+      .map((item) => item?.result)
+      .filter((result) => result && result.status === "capturable" && result.detail);
+    const ambiguous = (frameResults || []).some((item) => item?.result?.status === "ambiguous");
+    const unconfirmed = (frameResults || []).some((item) => item?.result?.status === "unconfirmed");
+    if (ambiguous || candidates.length > 1) {
+      setStatus("当前页面存在多个候选人详情，已停止采集。请只保留一个详情后重试。");
+      return;
+    }
+    if (unconfirmed) {
+      setStatus("当前详情缺少稳定身份，无法确认对应候选人。请先从推荐页完成卡片采集后再重试。");
+      return;
+    }
+    if (candidates.length === 0) {
+      setStatus("未识别到已打开的候选人详情。请先手动打开候选人详情后再采集。");
+      return;
+    }
+
+    const apiBase = BossLocalWebIntake.deriveWebApiBase(settings);
+    const response = await fetch(`${apiBase}/api/plugin/candidate-detail/enrich`, {
+      method: "POST",
+      headers: localApiHeaders(settings),
+      body: JSON.stringify(candidates[0].detail),
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      const message = payload?.error?.message || "详情增强写入失败，请稍后重试。";
+      throw new Error(message);
+    }
+    setStatus(payload.status === "unchanged" ? "当前详情没有新的可更新信息。" : "当前详情已安全更新到候选人主档。");
+  } catch (error) {
+    setStatus(`采集当前详情失败。\n${safeDetailEnrichmentError(error)}`);
+  } finally {
+    captureCurrentDetailButton.disabled = false;
+  }
+}
+
+function safeDetailEnrichmentError(error) {
+  const text = String(error?.message || error || "");
+  if (!text) {
+    return "请稍后重试。";
+  }
+  return text.length > 80 ? "本地服务返回详情采集失败，请确认当前任务和候选人身份后重试。" : text;
 }
 
 async function refreshRatingBadges(tabId, settings) {
@@ -1347,6 +1420,36 @@ async function collectFromAllFrames(tabId, autoScroll, settings) {
   });
 }
 
+async function collectCurrentDetailFromAllFrames(tabId, settings) {
+  await chrome.scripting.executeScript({
+    target: { tabId, allFrames: true },
+    files: ["collector.js"],
+  });
+
+  return chrome.scripting.executeScript({
+    target: { tabId, allFrames: true },
+    args: [settings],
+    func: (settingsArg) => {
+      if (typeof globalThis.__bossLocalExtractCurrentDetail !== "function") {
+        return {
+          status: "failed",
+          detail: null,
+          diagnostics: { detail_regions: 0 },
+        };
+      }
+      try {
+        return globalThis.__bossLocalExtractCurrentDetail(settingsArg);
+      } catch (_error) {
+        return {
+          status: "failed",
+          detail: null,
+          diagnostics: { detail_regions: 0 },
+        };
+      }
+    },
+  });
+}
+
 function mergeFrameResults(frameResults) {
   const cardsByKey = new Map();
   const debugLines = [];
@@ -1784,6 +1887,7 @@ function setStatus(text) {
 globalThis.BossLocalPopup = {
   init,
   runCollection,
+  runCurrentDetailEnrichment,
   runAutomation,
   applyPairingCodeAndTest,
   retryWebIntake,
@@ -1797,5 +1901,6 @@ globalThis.BossLocalPopup = {
   clearKeywordHighlights,
   queueAndSendWebBatch,
   collectSettings,
+  collectCurrentDetailFromAllFrames,
   isWebWorkbenchMode,
 };

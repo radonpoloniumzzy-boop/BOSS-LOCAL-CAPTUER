@@ -13,6 +13,16 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
       actionTexts: ["打招呼", "立即沟通", "继续沟通", "立即开聊"],
       noMoreTexts: ["没有更多了", "没有更多内容了", "没有更多候选人了", "已经到底了", "到底了", "我是有底线的"],
       selectors: {
+        detail: [
+          "[data-testid='candidate-detail']",
+          "[data-testid='geek-detail']",
+          ".candidate-detail",
+          ".geek-detail",
+          ".resume-detail",
+          "[class*='candidate'][class*='detail']",
+          "[class*='geek'][class*='detail']",
+          "[class*='resume'][class*='detail']",
+        ],
         card: [
           ".candidate-card-wrap",
           ".candidate-card",
@@ -46,6 +56,17 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
       actionTexts: ["打招呼", "立即沟通", "继续沟通", "聊一聊", "开聊", "沟通", "查看简历", "下载简历", "邀请面试"],
       noMoreTexts: ["没有更多了", "没有更多内容了", "暂无更多", "已经到底了", "到底了", "没有更多推荐", "我是有底线的"],
       selectors: {
+        detail: [
+          "[data-testid='candidate-detail']",
+          "[data-testid='resume-detail']",
+          "[data-testid='talent-detail']",
+          ".candidate-detail",
+          ".resume-detail",
+          ".talent-detail",
+          "[class*='candidate'][class*='detail']",
+          "[class*='resume'][class*='detail']",
+          "[class*='talent'][class*='detail']",
+        ],
         card: [
           ".resume-card",
           ".talent-card",
@@ -218,6 +239,172 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
       },
     };
   };
+
+  globalThis.__bossLocalExtractCurrentDetail = function bossLocalExtractCurrentDetail(settings) {
+    const platform = detectPlatform();
+    if (!platform) {
+      return {
+        status: "not_supported",
+        detail: null,
+        diagnostics: { detail_regions: 0, loading_regions: 0, hidden_regions: 0 },
+      };
+    }
+    const result = extractCurrentDetail(platform, settings || {});
+    return {
+      ...result,
+      platform: platform.id,
+    };
+  };
+
+  function extractCurrentDetail(platform, settings) {
+    const diagnostics = {
+      detail_regions: 0,
+      loading_regions: 0,
+      hidden_regions: 0,
+      ambiguous_identity_regions: 0,
+    };
+    const nodes = [];
+    for (const selector of platform.selectors.detail || []) {
+      for (const node of querySelectorAllSafe(document, selector)) {
+        if (!(node instanceof HTMLElement) || isPluginOwnedNode(node)) {
+          continue;
+        }
+        if (!isElementVisible(node)) {
+          diagnostics.hidden_regions += 1;
+          continue;
+        }
+        if (isLoadingDetailNode(node)) {
+          diagnostics.loading_regions += 1;
+          continue;
+        }
+        nodes.push(node);
+      }
+      if (nodes.length) {
+        break;
+      }
+    }
+    const uniqueNodes = uniqueElements(nodes).filter((node) => isLikelyDetailNode(node, platform));
+    diagnostics.detail_regions = uniqueNodes.length;
+    if (uniqueNodes.length === 0) {
+      return { status: "not_opened", detail: null, diagnostics };
+    }
+    if (uniqueNodes.length > 1) {
+      return { status: "ambiguous", detail: null, diagnostics };
+    }
+    const node = uniqueNodes[0];
+    const identity = resolveStablePlatformIdentity(node, platform);
+    if (identity.status === "ambiguous") {
+      diagnostics.ambiguous_identity_regions += 1;
+      return { status: "ambiguous", detail: null, diagnostics };
+    }
+    if (!identity.value) {
+      return { status: "unconfirmed", detail: null, diagnostics };
+    }
+    const rawText = sanitizeDetailSnapshot(normalizeCardText(visibleBusinessText(node)));
+    if (!rawText) {
+      return { status: "not_opened", detail: null, diagnostics };
+    }
+    const inferred = inferFieldsFromText(rawText, node, platform);
+    const lines = splitLines(rawText);
+    return {
+      status: "capturable",
+      detail: {
+        source_platform: platform.id,
+        platform_uid: identity.value,
+        recruitment_task_id: settings.recruitmentTaskId || null,
+        job_profile_id: settings.jobProfileId || null,
+        source_url: absolutizeUrl(settings.sourceUrl || location.href),
+        detail_url: safeHttpUrl(location.href) || inferred.detail_url,
+        capture_time: new Date().toISOString(),
+        raw_card_text: rawText,
+        active_status: firstText(node, platform.selectors.activeStatus) || inferred.active_status,
+        expected_salary: firstText(node, platform.selectors.expectedSalary) || inferred.expected_salary,
+        work_experience_text: firstText(node, platform.selectors.workExperience) || inferred.work_experience_text,
+        education_text: firstText(node, platform.selectors.education) || inferred.education_text,
+        tags_text: allTexts(node, platform.selectors.tags).join(" | ") || inferred.tags_text,
+        summary_text: firstText(node, platform.selectors.summary) || inferred.summary_text,
+        city: inferLabeledValue(lines, ["城市", "所在城市", "所在地", "工作城市"]),
+        years_experience: inferYearsExperience(rawText),
+        job_family: inferLabeledValue(lines, ["职能", "职位类型", "岗位类别"]),
+        job_track: inferLabeledValue(lines, ["方向", "领域", "岗位方向"]),
+      },
+      diagnostics,
+    };
+  }
+
+  function isLikelyDetailNode(node, platform) {
+    if (!(node instanceof HTMLElement) || !isAttachedToCurrentDocument(node) || isPluginOwnedNode(node)) {
+      return false;
+    }
+    if (!isElementVisible(node) || isLoadingDetailNode(node)) {
+      return false;
+    }
+    const text = normalizeText(visibleBusinessText(node));
+    if (!text || text.length < 20) {
+      return false;
+    }
+    const rect = node.getBoundingClientRect();
+    if (rect.width < 320 || rect.height < 160) {
+      return false;
+    }
+    const lowerClass = `${node.className || ""} ${node.id || ""}`.toLowerCase();
+    if (!/(detail|resume|geek|candidate|talent)/i.test(lowerClass)) {
+      return false;
+    }
+    return true;
+  }
+
+  function isLoadingDetailNode(node) {
+    const classText = `${node.className || ""} ${node.id || ""}`.toLowerCase();
+    const text = normalizeText(node.innerText || node.textContent || "");
+    return /skeleton|loading|placeholder|spin/.test(classText) || /加载中|正在加载|loading/.test(text);
+  }
+
+  function sanitizeDetailSnapshot(value) {
+    return splitLines(value)
+      .filter((line) => !containsContactLine(line))
+      .join("\n");
+  }
+
+  function containsContactLine(value) {
+    const text = String(value || "");
+    return (
+      /[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/.test(text)
+      || /(?<!\d)(?:\+?86[-\s]?)?1[3-9]\d{9}(?!\d)/.test(text)
+      || /(?:微信|wechat|vx|手机号|电话|邮箱|联系方式|身份证|住址|地址)\s*[:：]?\s*\S+/i.test(text)
+    );
+  }
+
+  function inferLabeledValue(lines, labels) {
+    for (const line of lines || []) {
+      for (const label of labels) {
+        const pattern = new RegExp(`^${escapeRegExp(label)}\\s*[:：]?\\s*(.+)$`);
+        const match = line.match(pattern);
+        if (match) {
+          return normalizeText(match[1]);
+        }
+      }
+    }
+    return "";
+  }
+
+  function inferYearsExperience(value) {
+    const match = String(value || "").match(/(\d+)\s*(?:年|年以上|年经验)/);
+    return match ? Number(match[1]) : null;
+  }
+
+  function safeHttpUrl(value) {
+    try {
+      const url = new URL(String(value || ""), location.href);
+      return /^https?:$/i.test(url.protocol) ? url.toString() : "";
+    } catch (_error) {
+      return "";
+    }
+  }
+
+  function escapeRegExp(value) {
+    return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
 
   async function collectCards(platform, autoScroll, settings) {
     const cardsByKey = new Map();
@@ -1417,6 +1604,7 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
     globalThis.BossLocalCollectorTest = {
       collectCards,
       detectCandidateCardNodes,
+      extractCurrentDetail,
       extractCardPayload,
       normalizePlatformUid,
       platforms: PLATFORM_ADAPTERS,
