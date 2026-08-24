@@ -561,6 +561,12 @@ function giveCardsLayout(dom) {
   }
 }
 
+function giveBossNestedCardsLayout(dom) {
+  for (const node of dom.window.document.querySelectorAll(".candidate-card-wrap, .card-inner, .candidate-card")) {
+    node.getBoundingClientRect = () => ({ width: 720, height: 180, top: 0, left: 0, right: 720, bottom: 180 });
+  }
+}
+
 async function testDownloadEndpointValidation() {
   const { api } = loadServiceWorker();
   const downloadUrl = "https://www.zhipin.com/wflow/zpgeek/download/preview4boss/abc123?d=1&id=xyz";
@@ -2819,7 +2825,7 @@ async function testCollectorDedupesByStableUidButKeepsSameNameDifferentUid() {
       </article>
     </main>
   `, { url: "https://www.zhipin.com/web/geek/recommend" });
-  giveCardsLayout(dom);
+  giveBossNestedCardsLayout(dom);
   const collector = loadCollectorForDom(dom);
   const boss = collector.platforms.find((platform) => platform.id === "boss");
   const result = await collector.collectCards(boss, false, {});
@@ -2828,6 +2834,130 @@ async function testCollectorDedupesByStableUidButKeepsSameNameDifferentUid() {
   assert.deepStrictEqual(JSON.parse(JSON.stringify(result.cards.map((card) => card.name))), ["测试甲", "测试甲", "测试丙"]);
   assert.strictEqual(result.diagnostics.duplicate_identity, 1);
   assert.strictEqual(result.diagnostics.missing_stable_identity, 1);
+}
+
+async function testCollectorFindsBossStableUidBeyondCardRoot() {
+  const dom = new JSDOM(`
+    <main>
+      <article class="candidate-card">
+        <div class="content">
+          <strong class="name">测试甲</strong>
+          <span class="salary">30K-45K</span>
+          <span class="experience">5年经验</span>
+          <span class="education">本科</span>
+          <p>真实结构中稳定身份可能在内部节点。</p>
+          <div class="geek-meta" data-geek-id="inner-alpha"></div>
+          <button>打招呼</button>
+        </div>
+      </article>
+    </main>
+  `, { url: "https://www.zhipin.com/web/geek/recommend" });
+  giveBossNestedCardsLayout(dom);
+  const collector = loadCollectorForDom(dom);
+  const boss = collector.platforms.find((platform) => platform.id === "boss");
+  const result = await collector.collectCards(boss, false, {});
+
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(result.cards.map((card) => card.platform_uid))), ["boss:inner-alpha"]);
+  assert.strictEqual(result.diagnostics.accepted_cards, 1);
+  assert.strictEqual(result.diagnostics.stable_identity_found, 1);
+  assert.strictEqual(result.diagnostics.identity_from_descendant, 1);
+  assert.strictEqual(Number(result.diagnostics.identity_from_bounded_ancestor || 0), 0);
+  assert.strictEqual(result.diagnostics.missing_stable_identity, 0);
+  assert.strictEqual(result.diagnostics.stable_identity_ambiguous, 0);
+  assert.strictEqual(
+    result.diagnostics.stable_identity_found + result.diagnostics.missing_stable_identity + result.diagnostics.stable_identity_ambiguous,
+    result.diagnostics.accepted_cards,
+  );
+
+  const ancestorDom = new JSDOM(`
+    <main>
+      <section class="candidate-card-wrap" data-geek-id="ancestor-beta">
+        <article class="card-inner">
+          <strong class="name">测试乙</strong>
+          <span class="salary">35K-55K</span>
+          <span class="experience">6年经验</span>
+          <span class="education">硕士</span>
+          <p>真实结构中稳定身份可能在受控祖先。</p>
+          <button>打招呼</button>
+        </article>
+      </section>
+    </main>
+  `, { url: "https://www.zhipin.com/web/geek/recommend" });
+  giveBossNestedCardsLayout(ancestorDom);
+  ancestorDom.window.document.querySelector(".candidate-card-wrap").getBoundingClientRect = () => ({
+    width: 720,
+    height: 5000,
+    top: 0,
+    left: 0,
+    right: 720,
+    bottom: 5000,
+  });
+  const ancestorCollector = loadCollectorForDom(ancestorDom);
+  const ancestorBoss = ancestorCollector.platforms.find((platform) => platform.id === "boss");
+  const ancestorResult = await ancestorCollector.collectCards(ancestorBoss, false, {});
+
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(ancestorResult.cards.map((card) => card.platform_uid))), ["boss:ancestor-beta"]);
+  assert.strictEqual(ancestorResult.diagnostics.stable_identity_found, 1);
+  assert.strictEqual(ancestorResult.diagnostics.identity_from_bounded_ancestor, 1);
+  assert.strictEqual(ancestorResult.diagnostics.missing_stable_identity, 0);
+}
+
+async function testCollectorTreatsBossStableUidAmbiguityAsMissingIdentity() {
+  const dom = new JSDOM(`
+    <main>
+      <article class="candidate-card">
+        <strong class="name">测试丙</strong>
+        <span class="salary">30K-45K</span>
+        <span class="experience">5年经验</span>
+        <span class="education">本科</span>
+        <p>两个不同稳定身份不能随便选择。</p>
+        <span data-geek-id="ambiguous-a"></span>
+        <span data-candidate-id="ambiguous-b"></span>
+        <button>打招呼</button>
+      </article>
+      <article class="candidate-card">
+        <strong class="name">测试丁</strong>
+        <span class="salary">32K-46K</span>
+        <span class="experience">6年经验</span>
+        <span class="education">硕士</span>
+        <p>多个节点同一稳定身份可以采用。</p>
+        <span data-geek-id="same-inner"></span>
+        <span data-candidate-id="same-inner"></span>
+        <button>打招呼</button>
+      </article>
+      <article class="candidate-card" data-id="generic-only">
+        <strong class="name">测试戊</strong>
+        <span class="salary">25K-35K</span>
+        <span class="experience">4年经验</span>
+        <span class="education">本科</span>
+        <p>只有泛化 data-id。</p>
+        <a href="/geek/detail/generic-only">详情</a>
+        <button>打招呼</button>
+      </article>
+      <article class="candidate-card" data-geek-id="liepin:foreign">
+        <strong class="name">测试己</strong>
+        <span class="salary">28K-40K</span>
+        <span class="experience">5年经验</span>
+        <span class="education">本科</span>
+        <p>其他平台前缀不能冒充 Boss 身份。</p>
+        <button>打招呼</button>
+      </article>
+    </main>
+  `, { url: "https://www.zhipin.com/web/geek/recommend" });
+  giveCardsLayout(dom);
+  const collector = loadCollectorForDom(dom);
+  const boss = collector.platforms.find((platform) => platform.id === "boss");
+  const result = await collector.collectCards(boss, false, {});
+
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(result.cards.map((card) => card.platform_uid))), ["", "boss:same-inner", "", ""]);
+  assert.strictEqual(result.diagnostics.accepted_cards, 4);
+  assert.strictEqual(result.diagnostics.stable_identity_found, 1);
+  assert.strictEqual(result.diagnostics.stable_identity_ambiguous, 1);
+  assert.strictEqual(result.diagnostics.missing_stable_identity, 2);
+  assert.strictEqual(
+    result.diagnostics.stable_identity_found + result.diagnostics.missing_stable_identity + result.diagnostics.stable_identity_ambiguous,
+    result.diagnostics.accepted_cards,
+  );
 }
 
 async function testCollectorRawCardTextIgnoresPluginBadgesAndKeywordMarkup() {
@@ -4557,6 +4687,8 @@ async function main() {
   testCollectorDoesNotPromoteGenericDataIdToPlatformUid();
   await testCollectorAcceptsBossAndLiepinStableCardsOnly();
   await testCollectorDedupesByStableUidButKeepsSameNameDifferentUid();
+  await testCollectorFindsBossStableUidBeyondCardRoot();
+  await testCollectorTreatsBossStableUidAmbiguityAsMissingIdentity();
   await testCollectorRawCardTextIgnoresPluginBadgesAndKeywordMarkup();
   await testCollectorIgnoresDetachedNodesAndUsesFreshDomSnapshots();
   await testWebIntakeStatusMatrixFollowsServerStatus();

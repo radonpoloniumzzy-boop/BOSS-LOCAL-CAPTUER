@@ -1695,7 +1695,12 @@ function createCaptureDiagnostics() {
     unsupported_platform: 0,
     invalid_card: 0,
     plugin_owned_node: 0,
+    stable_identity_found: 0,
     missing_stable_identity: 0,
+    stable_identity_ambiguous: 0,
+    identity_from_root: 0,
+    identity_from_descendant: 0,
+    identity_from_bounded_ancestor: 0,
   };
 }
 
@@ -1725,7 +1730,12 @@ function formatCaptureDiagnosticLines(diagnostics) {
     ["hidden", "隐藏卡片跳过"],
     ["missing_name", "缺少姓名跳过"],
     ["missing_candidate_structure", "结构不完整跳过"],
+    ["stable_identity_found", "稳定身份已识别"],
     ["missing_stable_identity", "缺少稳定身份"],
+    ["stable_identity_ambiguous", "稳定身份歧义"],
+    ["identity_from_root", "身份来自卡片根节点"],
+    ["identity_from_descendant", "身份来自卡片内部节点"],
+    ["identity_from_bounded_ancestor", "身份来自受控祖先"],
     ["plugin_owned_node", "插件控件跳过"],
     ["detached", "陈旧节点跳过"],
     ["unsupported_platform", "不支持平台跳过"],

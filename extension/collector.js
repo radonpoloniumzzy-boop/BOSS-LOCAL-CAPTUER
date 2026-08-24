@@ -696,7 +696,8 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
     mergeDiagnostics(diagnostics, detection.diagnostics);
     const cards = [];
     for (const cardNode of detection.nodes) {
-      const payload = extractCardPayload(cardNode, platform);
+      const identity = resolveStablePlatformIdentity(cardNode, platform);
+      const payload = extractCardPayload(cardNode, platform, identity);
       if (!payload.raw_card_text) {
         countDiagnostic(diagnostics, "invalid_card");
         continue;
@@ -705,7 +706,14 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
         countDiagnostic(diagnostics, "missing_name");
         continue;
       }
-      if (!payload.platform_uid) {
+      if (identity.value) {
+        countDiagnostic(diagnostics, "stable_identity_found");
+        if (identity.source) {
+          countDiagnostic(diagnostics, `identity_from_${identity.source}`);
+        }
+      } else if (identity.status === "ambiguous") {
+        countDiagnostic(diagnostics, "stable_identity_ambiguous");
+      } else {
         countDiagnostic(diagnostics, "missing_stable_identity");
       }
       cards.push(payload);
@@ -766,12 +774,13 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
     return { selector: "none", nodes: [], diagnostics: createDiagnostics() };
   }
 
-  function extractCardPayload(card, platform) {
+  function extractCardPayload(card, platform, identityResult = null) {
     const rawText = normalizeCardText(visibleBusinessText(card));
     const inferred = inferFieldsFromText(rawText, card, platform);
     const tags = allTexts(card, platform.selectors.tags);
     const detailUrl = firstHref(card, platform.selectors.detailLink) || inferred.detail_url;
-    const platformUid = normalizePlatformUid(platform, firstAttr(card, platform.selectors.platformUidAttrs) || inferred.platform_uid);
+    const identity = identityResult || resolveStablePlatformIdentity(card, platform);
+    const platformUid = identity.value || normalizePlatformUid(platform, inferred.platform_uid);
     const sourceCandidateId = normalizeText(firstAttr(card, platform.selectors.sourceCandidateIdAttrs || []) || "");
     return {
       platform: platform.id,
@@ -787,6 +796,83 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
       detail_url: detailUrl,
       platform_uid: platformUid,
     };
+  }
+
+  function resolveStablePlatformIdentity(card, platform) {
+    const attrs = Array.isArray(platform?.selectors?.platformUidAttrs) ? platform.selectors.platformUidAttrs : [];
+    if (!attrs.length || !isHTMLElementNode(card)) {
+      return { value: "", status: "missing", source: "" };
+    }
+
+    const root = resolveUniquePlatformUid(platform, collectAttributeValues([card], attrs));
+    if (root.status !== "missing") {
+      return { ...root, source: root.value ? "root" : "" };
+    }
+
+    if (platform.id === "boss") {
+      const descendantNodes = findDescendantIdentityNodes(card, attrs);
+      const descendant = resolveUniquePlatformUid(platform, collectAttributeValues(descendantNodes, attrs));
+      if (descendant.status !== "missing") {
+        return { ...descendant, source: descendant.value ? "descendant" : "" };
+      }
+
+      const ancestorNodes = findBoundedCandidateAncestors(card, platform);
+      const ancestor = resolveUniquePlatformUid(platform, collectAttributeValues(ancestorNodes, attrs));
+      if (ancestor.status !== "missing") {
+        return { ...ancestor, source: ancestor.value ? "bounded_ancestor" : "" };
+      }
+    }
+
+    return { value: "", status: "missing", source: "" };
+  }
+
+  function findDescendantIdentityNodes(root, attrs) {
+    const selector = attrs.map((attr) => `[${attr}]`).join(",");
+    return querySelectorAllSafe(root, selector).filter((node) => isHTMLElementNode(node) && node !== root);
+  }
+
+  function findBoundedCandidateAncestors(node, platform) {
+    const selectors = Array.isArray(platform?.selectors?.card) ? platform.selectors.card : [];
+    const ancestors = [];
+    let current = node.parentElement;
+    for (let depth = 0; depth < 4 && current; depth += 1) {
+      if (isHTMLElementNode(current) && matchesAnySelector(current, selectors) && !isPluginOwnedNode(current)) {
+        ancestors.push(current);
+      }
+      current = current.parentElement;
+    }
+    return ancestors;
+  }
+
+  function collectAttributeValues(nodes, attrs) {
+    const values = [];
+    for (const node of nodes || []) {
+      if (!isHTMLElementNode(node)) {
+        continue;
+      }
+      for (const attr of attrs) {
+        const value = normalizeText(node.getAttribute(attr) || "");
+        if (value) {
+          values.push(value);
+        }
+      }
+    }
+    return values;
+  }
+
+  function resolveUniquePlatformUid(platform, values) {
+    const normalized = uniqueStrings(
+      (values || [])
+        .map((value) => normalizePlatformUid(platform, value))
+        .filter(Boolean),
+    );
+    if (normalized.length === 0) {
+      return { value: "", status: "missing" };
+    }
+    if (normalized.length > 1) {
+      return { value: "", status: "ambiguous" };
+    }
+    return { value: normalized[0], status: "found" };
   }
 
   function findCandidateCardsByAction(platform) {
@@ -1095,13 +1181,30 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
       if (prefix === platformId) {
         return cleaned;
       }
-      return `${platformId}:${cleaned}`;
+      return "";
     }
     return `${platformId}:${cleaned}`;
   }
 
+  function matchesAnySelector(node, selectors) {
+    return (selectors || []).some((selector) => {
+      try {
+        return node.matches(selector);
+      } catch (_error) {
+        return false;
+      }
+    });
+  }
+
   function isAttachedToCurrentDocument(node) {
     return Boolean(node?.ownerDocument?.documentElement?.contains(node));
+  }
+
+  function isHTMLElementNode(node) {
+    if (typeof HTMLElement === "undefined") {
+      return Boolean(node && typeof node.getAttribute === "function");
+    }
+    return node instanceof HTMLElement;
   }
 
   function isPluginOwnedNode(node) {
@@ -1188,7 +1291,12 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
       unsupported_platform: 0,
       invalid_card: 0,
       plugin_owned_node: 0,
+      stable_identity_found: 0,
       missing_stable_identity: 0,
+      stable_identity_ambiguous: 0,
+      identity_from_root: 0,
+      identity_from_descendant: 0,
+      identity_from_bounded_ancestor: 0,
       ...initial,
     };
   }
@@ -1257,6 +1365,10 @@ if (typeof globalThis.__bossLocalExtract !== "function") {
 
   function uniqueElements(nodes) {
     return Array.from(new Set(nodes.filter(Boolean)));
+  }
+
+  function uniqueStrings(values) {
+    return Array.from(new Set((values || []).filter(Boolean)));
   }
 
   function splitLines(value) {
