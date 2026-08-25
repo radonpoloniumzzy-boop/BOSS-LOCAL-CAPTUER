@@ -28,7 +28,7 @@ type CheckItem = {
   detail: string;
 };
 
-const REQUIRED_CAPABILITIES = ["phase2c_pairing", "batch_markdown_export"];
+const REQUIRED_CAPABILITIES = ["phase2c_pairing", "batch_markdown_export", "m2a_job_task_foundation"];
 
 const recoveryMessages: Record<string, string> = {
   configured_database_missing: "已配置的人才库文件不存在，请检查 D 盘、移动盘和数据库备份后重新检查。",

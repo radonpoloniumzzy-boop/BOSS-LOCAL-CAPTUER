@@ -61,6 +61,7 @@ class AutomationFlowConfig:
     enabled: bool = False
     task_id: int | None = None
     profile_id: int | None = None
+    profile_version: int = 0
     job_title: str = ""
     source_url: str = "https://www.zhipin.com/web/geek/recommend"
     max_candidates: int = 0

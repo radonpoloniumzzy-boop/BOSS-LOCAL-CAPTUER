@@ -231,6 +231,14 @@ class ConfigService:
         )
         profile_id = automation_clean.get("profile_id")
         automation_clean["profile_id"] = int(profile_id) if profile_id is not None else None
+        automation_clean["task_id"] = (
+            int(automation_clean["task_id"])
+            if automation_clean.get("task_id") is not None
+            else None
+        )
+        automation_clean["profile_version"] = int(
+            automation_clean.get("profile_version", defaults.automation_flow.profile_version)
+        )
         automation_clean["max_candidates"] = int(
             automation_clean.get("max_candidates", defaults.automation_flow.max_candidates)
         )

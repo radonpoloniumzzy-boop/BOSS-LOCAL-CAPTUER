@@ -38,6 +38,8 @@ DATABASE_FAULTS = {
     "database_in_use": "人才库正在被另一个程序实例使用，请关闭其他实例后重试。",
 }
 
+PLUGIN_CONTEXT_ACTIVE_TASK_STATUSES = {"running"}
+
 
 def write_runtime_log(
     log_dir: Path, level: int, message: str, *, exc_info: bool = False
@@ -266,6 +268,107 @@ class WebRuntime:
 
             self.config_service.update(rotate)
             self.pairing.revoke()
+
+    def set_plugin_context(self, task_id: int | None) -> dict[str, object] | None:
+        with self._state_lock:
+            if self.config_service is None or self.repository is None:
+                raise RuntimeError("database_not_ready")
+            if task_id is None:
+                def clear(config):
+                    config.automation_flow.enabled = False
+                    config.automation_flow.task_id = None
+                    config.automation_flow.profile_id = None
+                    config.automation_flow.profile_version = 0
+                    config.automation_flow.job_title = ""
+
+                self.config_service.update(clear)
+                return None
+
+            context = self._build_plugin_context(int(task_id))
+            if context is None:
+                raise ValueError("插件上下文不可用")
+
+            def remember(config):
+                config.automation_flow.enabled = True
+                config.automation_flow.task_id = int(context["recruitment_task_id"])
+                config.automation_flow.profile_id = int(context["job_profile_id"])
+                config.automation_flow.profile_version = int(context["job_profile_version"])
+                config.automation_flow.job_title = str(context["job_title"])
+                config.automation_flow.source_url = str(context["source_url"])
+
+            self.config_service.update(remember)
+            return context
+
+    def set_job_profile_status(
+        self,
+        profile_id: int,
+        status: str,
+        *,
+        expected_version: int,
+    ) -> object:
+        with self._state_lock:
+            if self.config_service is None or self.repository is None:
+                raise RuntimeError("database_not_ready")
+            profile = self.repository.set_job_profile_status(
+                profile_id,
+                status,
+                expected_version=expected_version,
+            )
+            if status == "closed":
+                flow = self.config_service.load().automation_flow
+                if flow.enabled and flow.profile_id == profile_id:
+                    self.set_plugin_context(None)
+            return profile
+
+    def set_recruitment_task_status(self, task_id: int, status: str):
+        with self._state_lock:
+            if self.config_service is None or self.repository is None:
+                raise RuntimeError("database_not_ready")
+            task = self.repository.set_recruitment_task_status(task_id, status)
+            if status != "running":
+                flow = self.config_service.load().automation_flow
+                if flow.enabled and flow.task_id == task_id:
+                    self.set_plugin_context(None)
+            return task
+
+    def get_plugin_context(self) -> dict[str, object] | None:
+        with self._state_lock:
+            if self.config_service is None or self.repository is None:
+                raise RuntimeError("database_not_ready")
+            flow = self.config_service.load().automation_flow
+            if not flow.enabled or flow.task_id is None:
+                return None
+            context = self._build_plugin_context(int(flow.task_id))
+            if context is None:
+                self.set_plugin_context(None)
+            return context
+
+    def _build_plugin_context(self, task_id: int) -> dict[str, object] | None:
+        assert self.repository is not None
+        task = self.repository.get_recruitment_task(task_id)
+        if task is None:
+            return None
+        if str(task.get("status") or "") not in PLUGIN_CONTEXT_ACTIVE_TASK_STATUSES:
+            return None
+        profile = self.repository.get_job_profile(int(task["role_id"]))
+        if profile is None or str(profile.get("status") or "") != "active":
+            return None
+        version = self.repository.get_job_profile_version(
+            int(task["role_id"]),
+            int(task["profile_version"]),
+        )
+        if version is None:
+            return None
+        return {
+            "recruitment_task_id": int(task["id"]),
+            "job_profile_id": int(task["role_id"]),
+            "job_profile_version": int(task["profile_version"]),
+            "job_title": str(task.get("role_title") or profile.get("job_title") or ""),
+            "platform": str(task.get("platform") or ""),
+            "source_url": str(task.get("source_url") or ""),
+            "task_status": str(task.get("status") or ""),
+            "context_updated_at": str(task.get("updated_at") or ""),
+        }
 
     def close(self) -> None:
         with self._state_lock:

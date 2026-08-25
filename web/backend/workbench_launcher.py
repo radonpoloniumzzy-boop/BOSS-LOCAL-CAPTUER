@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 from core.bootstrap import BootstrapConfigurationError, BootstrapStore
 
 
-REQUIRED_CAPABILITIES = frozenset({"phase2c_pairing", "batch_markdown_export"})
+REQUIRED_CAPABILITIES = frozenset({"phase2c_pairing", "batch_markdown_export", "m2a_job_task_foundation"})
 STEP_READ_CONFIG = "read_config"
 STEP_CHECK_RUNTIME = "check_runtime"
 STEP_CHECK_FRONTEND = "check_frontend"

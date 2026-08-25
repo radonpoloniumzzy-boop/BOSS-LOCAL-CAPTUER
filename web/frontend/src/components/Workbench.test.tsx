@@ -8,6 +8,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import * as apiModule from "../api";
 import { Workbench } from "./Workbench";
+import { BatchesPage } from "./workbench/BatchesPage";
+import { CandidatesPage } from "./workbench/CandidatesPage";
 import { Drawer } from "./workbench/Drawer";
 
 type Deferred = {
@@ -28,7 +30,25 @@ const status = {
 const response = (body: unknown) =>
   Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) } as Response);
 
-afterEach(() => vi.restoreAllMocks());
+const errorResponse = (message: string, statusCode = 409) =>
+  Promise.resolve({
+    ok: false,
+    status: statusCode,
+    json: () => Promise.resolve({ error: { code: "request_failed", message } }),
+  } as Response);
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  window.sessionStorage.clear();
+});
+
+function expectTableHeaderBeforeFirstRow(table: HTMLTableElement | null) {
+  if (!table) throw new Error("Expected table to exist.");
+  const header = table.querySelector("thead");
+  const firstRow = table.querySelector("tbody tr");
+  if (!header || !firstRow) throw new Error("Expected table header and first row to exist.");
+  expect(Boolean(header.compareDocumentPosition(firstRow) & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(true);
+}
 
 function DrawerHarness({
   tick = 0,
@@ -318,7 +338,1129 @@ describe("drawer accessibility behavior", () => {
   });
 });
 
+describe("recruitment task progress workbench", () => {
+  const taskRows = [
+    {
+      id: 11,
+      name: "Boss 推荐流",
+      role_id: 7,
+      role_title: "量化研究员",
+      profile_version: 2,
+      platform: "boss",
+      source_url: "https://www.zhipin.com/web/geek/recommend",
+      target_candidates: 20,
+      status: "running",
+      current_step: "采集与筛选",
+      latest_message: "",
+      batch_count: 2,
+      candidate_count: 2,
+      run_count: 1,
+      export_count: 0,
+      created_at: "2026-08-19T09:00:00",
+      updated_at: "2026-08-19T10:05:00",
+    },
+    {
+      id: 12,
+      name: "猎聘推荐流",
+      role_id: 7,
+      role_title: "量化研究员",
+      profile_version: 2,
+      platform: "liepin",
+      source_url: "https://www.liepin.com/",
+      target_candidates: 10,
+      status: "completed",
+      current_step: "已完成",
+      latest_message: "",
+      batch_count: 1,
+      candidate_count: 1,
+      run_count: 0,
+      export_count: 0,
+      created_at: "2026-08-19T09:00:00",
+      updated_at: "2026-08-19T10:05:00",
+    },
+  ];
+
+  function mockJobsShell(extra: (url: string, init?: RequestInit) => Promise<Response>) {
+    return vi.fn((input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/job-profiles") && !init?.method) {
+        return response({
+          rows: [{
+            id: 7,
+            job_title: "量化研究员",
+            department: "投研",
+            location: "上海",
+            employment_type: "全职",
+            target_hires: 2,
+            priority: "high",
+            status: "active",
+            version: 2,
+            updated_at: "2026-08-19T10:00:00",
+          }],
+        });
+      }
+      if (url.endsWith("/api/recruitment-tasks") && !init?.method) {
+        return response({ rows: taskRows });
+      }
+      if (url.endsWith("/api/plugin-context") && !init?.method) {
+        return response({
+          context: {
+            recruitment_task_id: 11,
+            job_profile_id: 7,
+            job_profile_version: 2,
+            job_title: "量化研究员",
+            platform: "boss",
+            source_url: "https://www.zhipin.com/web/geek/recommend",
+            task_status: "running",
+            context_updated_at: "2026-08-19T10:05:00",
+          },
+        });
+      }
+      return extra(url, init);
+    });
+  }
+
+  it("shows task progress, distinguishes batch items from unique candidates, and exports recent batch markdown", async () => {
+    const downloader = vi.spyOn(apiModule, "downloadBatchMarkdown").mockResolvedValue();
+    const fetchMock = mockJobsShell((url) => {
+      if (url === "/api/recruitment-tasks/11/progress") {
+        return response({
+          task_id: 11,
+          task_name: "Boss 推荐流",
+          task_status: "running",
+          job_profile_id: 7,
+          job_profile_version: 2,
+          job_title: "量化研究员",
+          target_count: 20,
+          is_plugin_context: true,
+          batch_count: 2,
+          batch_item_count: 3,
+          unique_candidate_count: 2,
+          total_received: 3,
+          total_added: 2,
+          total_updated: 1,
+          total_skipped: 0,
+          total_failed: 0,
+          rated_candidate_count: 1,
+          unrated_candidate_count: 1,
+          rating_counts: { UR: 0, SSR: 1, SR: 0, R: 0, N: 0 },
+          first_capture_time: "2026-08-19T09:00:00",
+          latest_capture_time: "2026-08-19T10:00:00",
+          recent_batches: [{
+            batch_id: 88,
+            source_platform: "boss",
+            status: "completed",
+            start_time: "2026-08-19T10:00:00",
+            received: 2,
+            added: 1,
+            updated: 1,
+            skipped: 0,
+            failed: 0,
+          }],
+        });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    render(<Workbench status={status} />);
+
+    await user.click(screen.getByRole("button", { name: "岗位" }));
+    await user.click(await screen.findByRole("button", { name: "查看 Boss 推荐流 进度" }));
+    const dialog = await screen.findByRole("dialog", { name: "招聘任务进度" });
+
+    expect(within(dialog).getByText("插件正在使用")).toBeInTheDocument();
+    expect(within(dialog).getByRole("heading", { name: "继续采集，或查看最近结果" })).toBeInTheDocument();
+    expect(within(dialog).getByText("新批次会出现在最近批次里；也可以直接查看本任务候选人。")).toBeInTheDocument();
+    expect(within(dialog).getByText("批次记录")).toBeInTheDocument();
+    expect(within(dialog).getByText("唯一候选人")).toBeInTheDocument();
+    expect(within(dialog).getByText("外部评级覆盖")).toBeInTheDocument();
+    expect(within(dialog).getByText("1SSR")).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "完成任务" })).toBeInTheDocument();
+    expect(within(dialog).getByText("AI 初筛、自动沟通、联系方式和附件归档仍属于后续阶段，本页不提供可点击入口。")).toBeInTheDocument();
+
+    await user.click(within(dialog).getByRole("button", { name: "导出 Markdown" }));
+    expect(downloader).toHaveBeenCalledWith(88);
+  });
+
+  it("carries task scope to candidates and batches from progress actions", async () => {
+    const requestedUrls: string[] = [];
+    const fetchMock = mockJobsShell((url) => {
+      requestedUrls.push(url);
+      if (url === "/api/recruitment-tasks/11/progress") {
+        return response({
+          task_id: 11,
+          task_name: "Boss 推荐流",
+          task_status: "running",
+          job_profile_id: 7,
+          job_profile_version: 2,
+          job_title: "量化研究员",
+          target_count: 20,
+          is_plugin_context: true,
+          batch_count: 0,
+          batch_item_count: 0,
+          unique_candidate_count: 0,
+          total_received: 0,
+          total_added: 0,
+          total_updated: 0,
+          total_skipped: 0,
+          total_failed: 0,
+          rated_candidate_count: 0,
+          unrated_candidate_count: 0,
+          rating_counts: { UR: 0, SSR: 0, SR: 0, R: 0, N: 0 },
+          first_capture_time: "",
+          latest_capture_time: "",
+          recent_batches: [],
+        });
+      }
+      if (url.includes("/api/candidates?")) {
+        return response({ rows: [], total: 0, page: 1, page_size: 100 });
+      }
+      if (url.includes("/api/capture-batches?")) {
+        return response({ rows: [], total: 0, page: 1, page_size: 20, today_summary: { received: 0, added: 0 } });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    render(<Workbench status={status} />);
+
+    await user.click(screen.getByRole("button", { name: "岗位" }));
+    await user.click(await screen.findByRole("button", { name: "查看 Boss 推荐流 进度" }));
+    const dialog = await screen.findByRole("dialog", { name: "招聘任务进度" });
+    await user.click(within(dialog).getAllByRole("button", { name: "查看本任务候选人" })[0]);
+    await screen.findByText("正在查看：Boss 推荐流 的候选人。");
+    expect(screen.getByText("这个任务还没有候选人。请先在插件中将当前任务用于采集。")).toBeInTheDocument();
+    await waitFor(() => expect(requestedUrls.some((url) => url.includes("/api/candidates?") && url.includes("task_id=11"))).toBe(true));
+    expect(window.sessionStorage.getItem("boss-local-task-scope-v1")).toContain("Boss 推荐流");
+
+    await user.click(screen.getByRole("button", { name: "岗位" }));
+    await user.click(await screen.findByRole("button", { name: "查看 Boss 推荐流 进度" }));
+    const batchButtons = within(await screen.findByRole("dialog", { name: "招聘任务进度" })).getAllByRole("button", { name: "查看本任务批次" });
+    await user.click(batchButtons[batchButtons.length - 1]);
+    await screen.findByText("正在查看：Boss 推荐流 的采集批次。");
+    expect(screen.getByText("这个任务还没有符合当前条件的采集批次。请回到任务工作台确认插件当前任务后再采集。")).toBeInTheDocument();
+    await waitFor(() => expect(requestedUrls.some((url) => url.includes("/api/capture-batches?") && url.includes("task_id=11"))).toBe(true));
+  });
+
+  it("ignores stale progress responses after switching tasks", async () => {
+    const progressQueue: Record<number, Deferred> = {};
+    const fetchMock = mockJobsShell((url) => {
+      if (url === "/api/recruitment-tasks/11/progress") {
+        return new Promise<Response>((resolve) => {
+          progressQueue[11] = { resolve };
+        });
+      }
+      if (url === "/api/recruitment-tasks/12/progress") {
+        return response({
+          task_id: 12,
+          task_name: "猎聘推荐流",
+          task_status: "completed",
+          job_profile_id: 7,
+          job_profile_version: 2,
+          job_title: "量化研究员",
+          target_count: 10,
+          is_plugin_context: false,
+          batch_count: 1,
+          batch_item_count: 1,
+          unique_candidate_count: 1,
+          total_received: 1,
+          total_added: 1,
+          total_updated: 0,
+          total_skipped: 0,
+          total_failed: 0,
+          rated_candidate_count: 0,
+          unrated_candidate_count: 1,
+          rating_counts: { UR: 0, SSR: 0, SR: 0, R: 0, N: 0 },
+          first_capture_time: "2026-08-19T11:00:00",
+          latest_capture_time: "2026-08-19T11:00:00",
+          recent_batches: [],
+        });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    render(<Workbench status={status} />);
+
+    await user.click(screen.getByRole("button", { name: "岗位" }));
+    await user.click(await screen.findByRole("button", { name: "查看 Boss 推荐流 进度" }));
+    await screen.findByRole("dialog", { name: "招聘任务进度" });
+    await user.click(screen.getByRole("button", { name: "关闭任务进度" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "招聘任务进度" })).not.toBeInTheDocument());
+    await user.click(await screen.findByRole("button", { name: "查看 猎聘推荐流 进度" }));
+    const dialog = await screen.findByRole("dialog", { name: "招聘任务进度" });
+    expect(await within(dialog).findByRole("heading", { level: 2, name: "猎聘推荐流" })).toBeInTheDocument();
+
+    progressQueue[11].resolve({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({
+        task_id: 11,
+        task_name: "Boss 推荐流",
+        task_status: "running",
+        job_profile_id: 7,
+        job_profile_version: 2,
+        job_title: "量化研究员",
+        target_count: 20,
+        is_plugin_context: true,
+        batch_count: 99,
+        batch_item_count: 99,
+        unique_candidate_count: 99,
+        total_received: 99,
+        total_added: 99,
+        total_updated: 0,
+        total_skipped: 0,
+        total_failed: 0,
+        rated_candidate_count: 0,
+        unrated_candidate_count: 99,
+        rating_counts: { UR: 0, SSR: 0, SR: 0, R: 0, N: 0 },
+        first_capture_time: "",
+        latest_capture_time: "",
+        recent_batches: [],
+      }),
+    } as Response);
+
+    await waitFor(() => {
+      expect(within(dialog).getByRole("heading", { level: 2, name: "猎聘推荐流" })).toBeInTheDocument();
+      expect(within(dialog).queryByText("Boss 推荐流")).not.toBeInTheDocument();
+      expect(within(dialog).queryByText("99")).not.toBeInTheDocument();
+    });
+  });
+});
+
 describe("workbench candidate intake views", () => {
+  it("manages job profiles, fixed versions, tasks, and plugin context", async () => {
+    let taskStatus = "ready";
+    const fetchMock = vi.fn((input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/job-profiles") && !init?.method) {
+        return response({
+          rows: [{
+            id: 7,
+            job_title: "量化研究员",
+            department: "投研",
+            location: "上海",
+            employment_type: "全职",
+            target_hires: 2,
+            priority: "high",
+            status: "active",
+            version: 2,
+            updated_at: "2026-08-19T10:00:00",
+          }],
+        });
+      }
+      if (url.endsWith("/api/recruitment-tasks") && !init?.method) {
+        return response({
+          rows: [{
+            id: 11,
+            name: "Boss 推荐流",
+            role_id: 7,
+            role_title: "量化研究员",
+            profile_version: 2,
+            platform: "boss",
+            source_url: "https://www.zhipin.com/web/geek/recommend",
+            target_candidates: 20,
+            status: taskStatus,
+            current_step: taskStatus === "running" ? "采集与筛选" : "待启动",
+            latest_message: "",
+            batch_count: 0,
+            candidate_count: 0,
+            run_count: 0,
+            export_count: 0,
+            created_at: "2026-08-19T09:00:00",
+            updated_at: "2026-08-19T09:00:00",
+          }],
+        });
+      }
+      if (url.endsWith("/api/plugin-context") && !init?.method) {
+        return response({ context: null });
+      }
+      if (url.endsWith("/api/job-profiles/7")) {
+        return response({
+          id: 7,
+          job_title: "量化研究员",
+          department: "投研",
+          hiring_manager: "招聘经理",
+          location: "上海",
+          employment_type: "全职",
+          target_hires: 2,
+          priority: "high",
+          status: "active",
+          version: 2,
+          updated_at: "2026-08-19T10:00:00",
+          created_at: "2026-08-19T09:00:00",
+          experience_requirement: "3 年以上",
+          education_requirement: "本科",
+          recruitment_deadline: "2026-10-01",
+          jd_text: "负责策略研究",
+          must_have: ["Python"],
+          nice_to_have: ["期货"],
+          risk_flags: [],
+          exclusions: [],
+          interview_checks: ["策略复盘"],
+          evidence_policy: { required: ["项目"] },
+        });
+      }
+      if (url.endsWith("/api/job-profiles/7/versions")) {
+        return response({
+          rows: [
+            {
+              version: 2,
+              created_at: "2026-08-19T10:00:00",
+              snapshot: {
+                id: 7,
+                job_title: "量化研究员",
+                department: "投研",
+                hiring_manager: "招聘经理",
+                location: "上海",
+                employment_type: "全职",
+                target_hires: 2,
+                priority: "high",
+                status: "active",
+                version: 2,
+                updated_at: "2026-08-19T10:00:00",
+                created_at: "2026-08-19T09:00:00",
+                experience_requirement: "3 年以上",
+                education_requirement: "本科",
+                recruitment_deadline: "2026-10-01",
+                jd_text: "负责策略研究",
+                must_have: ["Python"],
+                nice_to_have: ["期货"],
+                risk_flags: [],
+                exclusions: [],
+                interview_checks: ["策略复盘"],
+                evidence_policy: { required: ["项目"] },
+              },
+            },
+            {
+              version: 1,
+              created_at: "2026-08-19T09:00:00",
+              snapshot: {
+                id: 7,
+                job_title: "量化研究员",
+                department: "投研",
+                hiring_manager: "招聘经理",
+                location: "上海",
+                employment_type: "全职",
+                target_hires: 2,
+                priority: "high",
+                status: "draft",
+                version: 1,
+                updated_at: "2026-08-18T11:00:00",
+                created_at: "2026-08-18T09:00:00",
+                experience_requirement: "3 年以上",
+                education_requirement: "本科",
+                recruitment_deadline: "2026-10-01",
+                jd_text: "旧 JD",
+                must_have: [],
+                nice_to_have: [],
+                risk_flags: [],
+                exclusions: [],
+                interview_checks: [],
+                evidence_policy: {},
+              },
+            },
+          ],
+        });
+      }
+      if (url.endsWith("/api/plugin-context") && init?.method === "PUT") {
+        return response({
+          ok: true,
+          context: {
+            recruitment_task_id: 11,
+            job_profile_id: 7,
+            job_profile_version: 2,
+            job_title: "量化研究员",
+            platform: "boss",
+            source_url: "https://www.zhipin.com/web/geek/recommend",
+            task_status: "running",
+            context_updated_at: "2026-08-19T10:05:00",
+          },
+          message: "已更新插件当前任务。",
+        });
+      }
+      if (url.endsWith("/api/recruitment-tasks/11/status") && init?.method === "POST") {
+        taskStatus = JSON.parse(String(init.body)).status;
+        return response({
+          id: 11,
+          name: "Boss 推荐流",
+          role_id: 7,
+          role_title: "量化研究员",
+          profile_version: 2,
+          platform: "boss",
+          source_url: "https://www.zhipin.com/web/geek/recommend",
+          target_candidates: 20,
+          status: taskStatus,
+          current_step: taskStatus === "running" ? "采集与筛选" : "待启动",
+          latest_message: "",
+          batch_count: 0,
+          candidate_count: 0,
+          run_count: 0,
+          export_count: 0,
+          created_at: "2026-08-19T09:00:00",
+          updated_at: "2026-08-19T10:05:00",
+        });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    render(<Workbench status={status} />);
+
+    await user.click(screen.getByRole("button", { name: "岗位" }));
+    expect(await screen.findByRole("heading", { name: "岗位、版本与招聘任务" })).toBeInTheDocument();
+    expect(screen.getByText("量化研究员")).toBeInTheDocument();
+    expect(screen.queryByText("待开发")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "查看" }));
+    expect(await screen.findByRole("dialog", { name: "岗位档案详情" })).toBeInTheDocument();
+    expect(screen.getByText("版本历史")).toBeInTheDocument();
+    expect(screen.getAllByText("v2").length).toBeGreaterThanOrEqual(1);
+    const latestVersionCard = document.querySelector(".version-card") as HTMLElement;
+    expect(latestVersionCard).toBeTruthy();
+    await user.click(latestVersionCard.querySelector("summary") as HTMLElement);
+    expect(within(latestVersionCard).getByText("岗位 ID")).toBeInTheDocument();
+    expect(within(latestVersionCard).getByText("#7")).toBeInTheDocument();
+    expect(within(latestVersionCard).getByText("岗位版本")).toBeInTheDocument();
+    expect(within(latestVersionCard).getByText("岗位创建时间")).toBeInTheDocument();
+    expect(within(latestVersionCard).getByText("2026/8/19 09:00:00")).toBeInTheDocument();
+    expect(within(latestVersionCard).getByText("岗位更新时间")).toBeInTheDocument();
+    expect(within(latestVersionCard).getAllByText("2026/8/19 10:00:00").length).toBeGreaterThanOrEqual(1);
+    expect(within(latestVersionCard).getByText("证据要求")).toBeInTheDocument();
+    expect(within(latestVersionCard).getByText(/required/)).toBeInTheDocument();
+    const firstVersionCard = document.querySelectorAll(".version-card")[1] as HTMLElement;
+    await user.click(firstVersionCard.querySelector("summary") as HTMLElement);
+    expect(within(firstVersionCard).getByText("2026/8/18 09:00:00")).toBeInTheDocument();
+    expect(within(firstVersionCard).getByText("2026/8/18 11:00:00")).toBeInTheDocument();
+
+    expect(screen.queryByRole("button", { name: /设为插件当前任务/ })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "启动" }));
+    await user.click(screen.getByRole("button", { name: "设为插件当前任务" }));
+    expect(await screen.findByText("已设为插件当前任务：Boss 推荐流")).toBeInTheDocument();
+    const contextCall = fetchMock.mock.calls.find(([url, init]) => String(url).endsWith("/api/plugin-context") && init?.method === "PUT");
+    expect(contextCall?.[1]?.body).toBe(JSON.stringify({ recruitment_task_id: 11 }));
+    expect(fetchMock.mock.calls.map(([url]) => String(url)).join("|")).not.toContain("prompt_text");
+  });
+
+  it("keeps dangerous confirmation drawers open on failure and retries safely", async () => {
+    let closeAttempts = 0;
+    let cancelAttempts = 0;
+    let taskStatus = "running";
+    const fetchMock = vi.fn((input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/job-profiles") && !init?.method) {
+        return response({
+          rows: [{
+            id: 7,
+            job_title: "关闭测试岗位",
+            department: "投研",
+            location: "上海",
+            employment_type: "全职",
+            target_hires: 2,
+            priority: "high",
+            status: closeAttempts >= 2 ? "closed" : "active",
+            version: closeAttempts >= 2 ? 3 : 2,
+            updated_at: "2026-08-19T10:00:00",
+          }],
+        });
+      }
+      if (url.endsWith("/api/recruitment-tasks") && !init?.method) {
+        return response({
+          rows: [{
+            id: 11,
+            name: "待取消任务",
+            role_id: 7,
+            role_title: "关闭测试岗位",
+            profile_version: 2,
+            platform: "boss",
+            source_url: "https://www.zhipin.com/web/geek/recommend",
+            target_candidates: 20,
+            status: taskStatus,
+            current_step: taskStatus === "cancelled" ? "已取消" : "采集与筛选",
+            latest_message: "",
+            batch_count: 0,
+            candidate_count: 0,
+            run_count: 0,
+            export_count: 0,
+            created_at: "2026-08-19T09:00:00",
+            updated_at: "2026-08-19T09:00:00",
+          }],
+        });
+      }
+      if (url.endsWith("/api/plugin-context") && !init?.method) {
+        return response({ context: null });
+      }
+      if (url.endsWith("/api/job-profiles/7") && !url.endsWith("/versions")) {
+        return response({
+          id: 7,
+          job_title: "关闭测试岗位",
+          department: "投研",
+          hiring_manager: "招聘经理",
+          location: "上海",
+          employment_type: "全职",
+          target_hires: 2,
+          priority: "high",
+          status: closeAttempts >= 2 ? "closed" : "active",
+          version: closeAttempts >= 2 ? 3 : 2,
+          updated_at: "2026-08-19T10:00:00",
+          created_at: "2026-08-19T09:00:00",
+          experience_requirement: "",
+          education_requirement: "",
+          recruitment_deadline: "",
+          jd_text: "JD",
+          must_have: [],
+          nice_to_have: [],
+          risk_flags: [],
+          exclusions: [],
+          interview_checks: [],
+          evidence_policy: {},
+        });
+      }
+      if (url.endsWith("/api/job-profiles/7/versions")) {
+        return response({ rows: [] });
+      }
+      if (url.endsWith("/api/job-profiles/7/status") && init?.method === "POST") {
+        closeAttempts += 1;
+        if (closeAttempts === 1) {
+          return errorResponse("岗位关闭失败，请稍后重试。");
+        }
+        return response({
+          id: 7,
+          job_title: "关闭测试岗位",
+          department: "投研",
+          hiring_manager: "招聘经理",
+          location: "上海",
+          employment_type: "全职",
+          target_hires: 2,
+          priority: "high",
+          status: "closed",
+          version: 3,
+          updated_at: "2026-08-19T10:10:00",
+          created_at: "2026-08-19T09:00:00",
+          experience_requirement: "",
+          education_requirement: "",
+          recruitment_deadline: "",
+          jd_text: "JD",
+          must_have: [],
+          nice_to_have: [],
+          risk_flags: [],
+          exclusions: [],
+          interview_checks: [],
+          evidence_policy: {},
+        });
+      }
+      if (url.endsWith("/api/recruitment-tasks/11/status") && init?.method === "POST") {
+        cancelAttempts += 1;
+        if (cancelAttempts === 1) {
+          return errorResponse("招聘任务取消失败，请稍后重试。");
+        }
+        taskStatus = "cancelled";
+        return response({
+          id: 11,
+          name: "待取消任务",
+          role_id: 7,
+          role_title: "关闭测试岗位",
+          profile_version: 2,
+          platform: "boss",
+          source_url: "https://www.zhipin.com/web/geek/recommend",
+          target_candidates: 20,
+          status: "cancelled",
+          current_step: "已取消",
+          latest_message: "",
+          batch_count: 0,
+          candidate_count: 0,
+          run_count: 0,
+          export_count: 0,
+          created_at: "2026-08-19T09:00:00",
+          updated_at: "2026-08-19T10:10:00",
+        });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    render(<Workbench status={status} />);
+
+    await user.click(screen.getByRole("button", { name: "岗位" }));
+    await user.click(await screen.findByRole("button", { name: "查看" }));
+    await screen.findByRole("dialog", { name: "岗位档案详情" });
+    await user.click(screen.getByRole("button", { name: "关闭岗位" }));
+    const closeDialog = await screen.findByRole("dialog", { name: "确认关闭岗位" });
+    await user.click(within(closeDialog).getByRole("button", { name: "先不关闭" }));
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/api/job-profiles/7/status"))).toHaveLength(0);
+
+    await user.click(screen.getByRole("button", { name: "关闭岗位" }));
+    const failingCloseDialog = await screen.findByRole("dialog", { name: "确认关闭岗位" });
+    await user.click(within(failingCloseDialog).getByRole("button", { name: "确认关闭岗位" }));
+    expect(await within(failingCloseDialog).findByRole("alert")).toHaveTextContent("岗位关闭失败，请稍后重试。");
+    expect(screen.queryByText("岗位状态已更新。")).not.toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "确认关闭岗位" })).toBeInTheDocument();
+    await user.click(within(failingCloseDialog).getByRole("button", { name: "确认关闭岗位" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "确认关闭岗位" })).not.toBeInTheDocument());
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/api/job-profiles/7/status"))).toHaveLength(2);
+    expect(await screen.findByText("岗位状态已更新。")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "取消" }));
+    const cancelDialog = await screen.findByRole("dialog", { name: "确认取消招聘任务" });
+    await user.click(within(cancelDialog).getByRole("button", { name: "先不取消" }));
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/api/recruitment-tasks/11/status"))).toHaveLength(0);
+
+    await user.click(screen.getByRole("button", { name: "取消" }));
+    const failingCancelDialog = await screen.findByRole("dialog", { name: "确认取消招聘任务" });
+    await user.click(within(failingCancelDialog).getByRole("button", { name: "确认取消任务" }));
+    expect(await within(failingCancelDialog).findByRole("alert")).toHaveTextContent("招聘任务取消失败，请稍后重试。");
+    expect(screen.queryByText("任务状态已更新。")).not.toBeInTheDocument();
+    expect(screen.getByText("待取消任务")).toBeInTheDocument();
+    await user.click(within(failingCancelDialog).getByRole("button", { name: "确认取消任务" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "确认取消招聘任务" })).not.toBeInTheDocument());
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/api/recruitment-tasks/11/status"))).toHaveLength(2);
+    expect(await screen.findByText("任务状态已更新。")).toBeInTheDocument();
+  });
+
+  it("previews and imports external ratings for running recruitment tasks", async () => {
+    let importAttempts = 0;
+    const fetchMock = vi.fn((input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/job-profiles") && !init?.method) {
+        return response({ rows: [] });
+      }
+      if (url.endsWith("/api/recruitment-tasks") && !init?.method) {
+        return response({
+          rows: [{
+            id: 11,
+            name: "Boss 推荐流",
+            role_id: 7,
+            role_title: "量化研究员",
+            profile_version: 2,
+            platform: "boss",
+            source_url: "https://www.zhipin.com/web/geek/recommend",
+            target_candidates: 20,
+            status: "running",
+            current_step: "采集与筛选",
+            latest_message: "",
+            batch_count: 1,
+            candidate_count: 2,
+            run_count: 0,
+            export_count: 0,
+            created_at: "2026-08-19T09:00:00",
+            updated_at: "2026-08-19T09:00:00",
+          }],
+        });
+      }
+      if (url.endsWith("/api/plugin-context") && !init?.method) {
+        return response({ context: null });
+      }
+      if (url.endsWith("/api/recruitment-tasks/11/external-ratings/preview") && init?.method === "POST") {
+        return response({
+          task_id: 11,
+          received: 7,
+          rows: [
+            {
+              line: 3,
+              candidate_id: "",
+              name: "测试甲",
+              rating: "",
+              original_rating: "SSR- / 强SR",
+              rating_status: "needs_confirmation",
+              track: "高频 / ML量化",
+              reason: "测试理由甲",
+              batch_id: "166",
+              source_platform: "",
+              source_job_title: "",
+            },
+            {
+              line: 4,
+              candidate_id: "",
+              name: "测试乙",
+              rating: "",
+              original_rating: "SSR- / 强SR",
+              rating_status: "needs_confirmation",
+              track: "Alpha / 多因子",
+              reason: "测试理由乙",
+              batch_id: "166",
+              source_platform: "",
+              source_job_title: "",
+            },
+            {
+              line: 5,
+              candidate_id: "",
+              name: "测试丙",
+              rating: "SR",
+              original_rating: "强SR",
+              rating_status: "normalized",
+              track: "Alpha / 多因子",
+              reason: "测试理由丙",
+              batch_id: "166",
+              source_platform: "",
+              source_job_title: "",
+            },
+            {
+              line: 6,
+              candidate_id: "",
+              name: "测试丁",
+              rating: "SR",
+              original_rating: "强SR",
+              rating_status: "normalized",
+              track: "高频储备",
+              reason: "测试理由丁",
+              batch_id: "166",
+              source_platform: "",
+              source_job_title: "",
+            },
+            {
+              line: 7,
+              candidate_id: "",
+              name: "测试戊",
+              rating: "SR",
+              original_rating: "强SR",
+              rating_status: "normalized",
+              track: "CTA",
+              reason: "测试理由戊",
+              batch_id: "166",
+              source_platform: "",
+              source_job_title: "",
+            },
+            {
+              line: 8,
+              candidate_id: "",
+              name: "测试己",
+              rating: "SR",
+              original_rating: "SR",
+              rating_status: "exact",
+              track: "策略研究",
+              reason: "测试理由己",
+              batch_id: "166",
+              source_platform: "",
+              source_job_title: "",
+            },
+            {
+              line: 9,
+              candidate_id: "",
+              name: "测试庚",
+              rating: "SR",
+              original_rating: "SR",
+              rating_status: "exact",
+              track: "数据工程",
+              reason: "测试理由庚",
+              batch_id: "166",
+              source_platform: "",
+              source_job_title: "",
+            },
+          ],
+        });
+      }
+      if (url.endsWith("/api/recruitment-tasks/11/external-ratings/import") && init?.method === "POST") {
+        importAttempts += 1;
+        if (importAttempts === 1) {
+          return errorResponse("外部评级导入失败，请稍后重试。");
+        }
+        return response({
+          task_id: 11,
+          run_id: 32,
+          status: "completed",
+          received: 2,
+          imported: 2,
+          unmatched: 0,
+          ambiguous: 0,
+          invalid: 0,
+          rows: [
+            { line: 3, candidate_id: 7, name: "测试甲", rating: "SR", status: "imported", message: "已导入外部评级。" },
+            { line: 4, candidate_id: 8, name: "测试乙", rating: "SR", status: "imported", message: "已导入外部评级。" },
+          ],
+        });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    render(<Workbench status={status} />);
+
+    await user.click(screen.getByRole("button", { name: "岗位" }));
+    await screen.findByText("Boss 推荐流");
+    await user.click(screen.getByRole("button", { name: "导入外部评级" }));
+    const dialog = await screen.findByRole("dialog", { name: "导入外部评级" });
+    const pastedTable = "| 排名 | 候选人     | 当前评级           | 最值得看的方向     | 判断    | batch_id |\n| -- | ------- | -------------- | ----------- | ----- | --- |\n| 1  | **测试甲** | **SSR- / 强SR** | 高频 / ML量化   | 测试理由甲 | 166 |\n| 2  | **测试乙** | **SSR- / 强SR** | Alpha / 多因子 | 测试理由乙 | 166 |\n| 3  | **测试丙** | **强SR**        | Alpha / 多因子 | 测试理由丙 | 166 |\n| 4  | **测试丁** | **强SR**        | 高频储备        | 测试理由丁 | 166 |\n| 5  | **测试戊** | **强SR**        | CTA         | 测试理由戊 | 166 |\n| 6  | **测试己** | **SR**         | 策略研究        | 测试理由己 | 166 |\n| 7  | **测试庚** | **SR**         | 数据工程        | 测试理由庚 | 166 |";
+    await user.click(within(dialog).getByLabelText("粘贴评级名单"));
+    await user.paste(pastedTable);
+    expect(await within(dialog).findByText("解析 7 行")).toBeInTheDocument();
+    expect(within(dialog).getByText("可导入 5 行")).toBeInTheDocument();
+    expect(within(dialog).getByText("格式待修正 2 行")).toBeInTheDocument();
+    expect(within(dialog).getAllByText("1SR")).toHaveLength(5);
+    expect(within(dialog).getAllByText("已自动归一")).toHaveLength(3);
+    expect(within(dialog).getAllByText("需要确认")).toHaveLength(2);
+    expect(within(dialog).getAllByText("已识别")).toHaveLength(2);
+    expect(within(dialog).queryByText(/^-+$/)).not.toBeInTheDocument();
+    expect(within(dialog).getAllByText("Alpha / 多因子")).toHaveLength(2);
+    expect(within(dialog).getByText("测试理由乙")).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "确认导入外部评级" })).toBeDisabled();
+    expectTableHeaderBeforeFirstRow(dialog.querySelector("table"));
+
+    await user.selectOptions(within(dialog).getByLabelText("第 4 行标准评级"), "SSR");
+    await user.selectOptions(within(dialog).getByLabelText("第 3 行标准评级"), "SR");
+    expect(within(dialog).getByRole("button", { name: "确认导入外部评级" })).toBeEnabled();
+
+    await user.click(within(dialog).getByRole("button", { name: "确认导入外部评级" }));
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("外部评级导入失败，请稍后重试。");
+    expect(within(dialog).getByLabelText("粘贴评级名单")).toHaveValue(pastedTable);
+    expect(within(dialog).getByLabelText("第 3 行标准评级")).toHaveValue("SR");
+    expect(within(dialog).getByLabelText("第 4 行标准评级")).toHaveValue("SSR");
+    await user.click(within(dialog).getByRole("button", { name: "确认导入外部评级" }));
+    expect(await within(dialog).findByRole("status")).toHaveTextContent("成功 2");
+    expect(within(dialog).getByText("未匹配 0")).toBeInTheDocument();
+    expect(within(dialog).getByText("无效 0")).toBeInTheDocument();
+    const tables = dialog.querySelectorAll("table");
+    expectTableHeaderBeforeFirstRow(tables[tables.length - 1]);
+    const importCall = fetchMock.mock.calls.find(([url]) => String(url).endsWith("/api/recruitment-tasks/11/external-ratings/import"));
+    expect(importCall?.[1]?.body).toContain("SSR- / 强SR");
+    expect(importCall?.[1]?.body).toContain("\"batch_id\":\"166\"");
+    expect(importCall?.[1]?.body).toContain("测试理由乙");
+    expect(importCall?.[1]?.body).toContain("\"rating\":\"SSR\"");
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/api/recruitment-tasks/11/external-ratings/import"))).toHaveLength(2);
+  });
+
+  it("keeps candidate and batch list headers before data rows", async () => {
+    const candidateFetch = vi.fn((input: string | URL) => {
+      const url = String(input);
+      if (url.includes("/api/candidates?")) {
+        return response({
+          rows: [{
+            id: 1,
+            name: "测试甲",
+            source_platform: "boss",
+            latest_source_platform: "boss",
+            latest_source_job_title: "量化研究员",
+            latest_batch_id: 166,
+            latest_capture_time: "2026-08-19T09:00:00",
+            latest_ingest_status: "new",
+            latest_rating: "SR",
+            latest_batch_role_id: 7,
+            has_role_binding: true,
+            batch_count: 1,
+          }],
+          total: 1,
+          page: 1,
+          page_size: 100,
+        });
+      }
+      throw new Error(`unexpected candidate request: ${url}`);
+    });
+    vi.stubGlobal("fetch", candidateFetch);
+    const candidateView = render(<CandidatesPage active onOpenBatch={() => {}} />);
+    expect(await screen.findByText("测试甲")).toBeInTheDocument();
+    expectTableHeaderBeforeFirstRow(candidateView.container.querySelector(".candidate-table-readability"));
+    candidateView.unmount();
+
+    const batchFetch = vi.fn((input: string | URL) => {
+      const url = String(input);
+      if (url.includes("/api/capture-batches?")) {
+        return response({
+          rows: [{
+            id: 166,
+            start_time: "2026-08-19T09:00:00",
+            source_platform: "boss",
+            total_collected: 2,
+            total_new: 2,
+            total_updated: 0,
+            total_skipped: 0,
+            total_failed: 0,
+            status: "completed",
+            role_id: 7,
+          }],
+          total: 1,
+          page: 1,
+          page_size: 20,
+          today_summary: { received: 2, added: 2 },
+        });
+      }
+      throw new Error(`unexpected batch request: ${url}`);
+    });
+    vi.stubGlobal("fetch", batchFetch);
+    const batchView = render(<BatchesPage active />);
+    expect(await screen.findByText("#166")).toBeInTheDocument();
+    expectTableHeaderBeforeFirstRow(batchView.container.querySelector(".batch-table-readability"));
+    batchView.unmount();
+  });
+
+  it("previews TSV external rating headers without disabling import", async () => {
+    const fetchMock = vi.fn((input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/job-profiles") && !init?.method) return response({ rows: [] });
+      if (url.endsWith("/api/recruitment-tasks") && !init?.method) {
+        return response({
+          rows: [{
+            id: 11,
+            name: "Boss 推荐流",
+            role_id: 7,
+            role_title: "量化研究员",
+            profile_version: 2,
+            platform: "boss",
+            source_url: "https://www.zhipin.com/web/geek/recommend",
+            target_candidates: 20,
+            status: "running",
+            current_step: "采集与筛选",
+            latest_message: "",
+            batch_count: 1,
+            candidate_count: 2,
+            run_count: 0,
+            export_count: 0,
+            created_at: "2026-08-19T09:00:00",
+            updated_at: "2026-08-19T09:00:00",
+          }],
+        });
+      }
+      if (url.endsWith("/api/plugin-context") && !init?.method) return response({ context: null });
+      if (url.endsWith("/api/recruitment-tasks/11/external-ratings/preview") && init?.method === "POST") {
+        return response({
+          task_id: 11,
+          received: 1,
+          rows: [{
+            line: 2,
+            candidate_id: "8",
+            name: "Bob",
+            rating: "SR",
+            original_rating: "SR",
+            rating_status: "exact",
+            track: "",
+            reason: "",
+            batch_id: "",
+            source_platform: "",
+            source_job_title: "",
+          }],
+        });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    render(<Workbench status={status} />);
+
+    await user.click(screen.getByRole("button", { name: "岗位" }));
+    await screen.findByText("Boss 推荐流");
+    await user.click(screen.getByRole("button", { name: "导入外部评级" }));
+    const dialog = await screen.findByRole("dialog", { name: "导入外部评级" });
+    await user.click(within(dialog).getByLabelText("粘贴评级名单"));
+    await user.paste("id\tcandidate_name\trating\n8\tBob\tSR");
+
+    expect(await within(dialog).findByText("解析 1 行")).toBeInTheDocument();
+    expect(within(dialog).getByText("可导入 1 行")).toBeInTheDocument();
+    expect(within(dialog).getByText("Bob")).toBeInTheDocument();
+    expect(within(dialog).getByText("1SR")).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "确认导入外部评级" })).toBeEnabled();
+  });
+
+  it("keeps keyword rule input when a running task rejects rule changes", async () => {
+    let saveAttempts = 0;
+    const fetchMock = vi.fn((input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/job-profiles") && !init?.method) return response({ rows: [] });
+      if (url.endsWith("/api/recruitment-tasks") && !init?.method) {
+        return response({
+          rows: [{
+            id: 11,
+            name: "Boss 推荐流",
+            role_id: 7,
+            role_title: "量化研究员",
+            profile_version: 2,
+            platform: "boss",
+            source_url: "https://www.zhipin.com/web/geek/recommend",
+            target_candidates: 20,
+            status: "running",
+            current_step: "采集与筛选",
+            latest_message: "",
+            batch_count: 1,
+            candidate_count: 2,
+            run_count: 0,
+            export_count: 0,
+            created_at: "2026-08-19T09:00:00",
+            updated_at: "2026-08-19T09:00:00",
+          }],
+        });
+      }
+      if (url.endsWith("/api/plugin-context") && !init?.method) return response({ context: null });
+      if (url.endsWith("/api/recruitment-tasks/11/keyword-rules") && !init?.method) {
+        return response({
+          task_id: 11,
+          job_profile_id: 7,
+          job_profile_version: 2,
+          task_status: "running",
+          keyword_rules: { must: ["Python"], plus: [], risk: [], note: [] },
+        });
+      }
+      if (url.endsWith("/api/recruitment-tasks/11/keyword-rules") && init?.method === "PUT") {
+        saveAttempts += 1;
+        return errorResponse("关键词规则属于岗位版本快照；当前招聘任务已固定引用该版本。请更新岗位档案后新建任务。");
+      }
+      throw new Error(`unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    render(<Workbench status={status} />);
+
+    await user.click(screen.getByRole("button", { name: "岗位" }));
+    await screen.findByText("Boss 推荐流");
+    await user.click(screen.getByRole("button", { name: "关键词筛选规则" }));
+    const dialog = await screen.findByRole("dialog", { name: "关键词筛选规则" });
+    expect(within(dialog).getByLabelText("必须关键词")).toHaveValue("Python");
+    expect(within(dialog).queryByText(/AI 评级/)).not.toBeInTheDocument();
+    await user.type(within(dialog).getByLabelText("必须关键词"), "\n量化");
+    await user.type(within(dialog).getByLabelText("加分关键词"), "React");
+    await user.type(within(dialog).getByLabelText("风险关键词"), "外包");
+    expect(within(dialog).getByText("合计 4")).toBeInTheDocument();
+
+    await user.click(within(dialog).getByRole("button", { name: "保存关键词筛选规则" }));
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("当前招聘任务已固定引用该版本");
+    expect(within(dialog).getByLabelText("风险关键词")).toHaveValue("外包");
+    await user.click(within(dialog).getByRole("button", { name: "保存关键词筛选规则" }));
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("当前招聘任务已固定引用该版本");
+    expect(saveAttempts).toBe(2);
+    const saveCall = fetchMock.mock.calls.find(([url], index) =>
+      index > 0 && String(url).endsWith("/api/recruitment-tasks/11/keyword-rules")
+        && fetchMock.mock.calls[index][1]?.method === "PUT",
+    );
+    expect(saveCall?.[1]?.body).toContain('"expected_version":2');
+    expect(saveCall?.[1]?.body).toContain('"risk":["外包"]');
+  });
+
+  it("hides keyword rule editing for non-running recruitment tasks", async () => {
+    const fetchMock = vi.fn((input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/job-profiles") && !init?.method) return response({ rows: [] });
+      if (url.endsWith("/api/recruitment-tasks") && !init?.method) {
+        return response({
+          rows: [{
+            id: 11,
+            name: "Boss 推荐流",
+            role_id: 7,
+            role_title: "量化研究员",
+            profile_version: 2,
+            platform: "boss",
+            source_url: "https://www.zhipin.com/web/geek/recommend",
+            target_candidates: 20,
+            status: "paused",
+            current_step: "暂停",
+            latest_message: "",
+            batch_count: 1,
+            candidate_count: 2,
+            run_count: 0,
+            export_count: 0,
+            created_at: "2026-08-19T09:00:00",
+            updated_at: "2026-08-19T09:00:00",
+          }],
+        });
+      }
+      if (url.endsWith("/api/plugin-context") && !init?.method) return response({ context: null });
+      throw new Error(`unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    render(<Workbench status={status} />);
+
+    await user.click(screen.getByRole("button", { name: "岗位" }));
+    await screen.findByText("Boss 推荐流");
+    expect(screen.queryByRole("button", { name: "关键词筛选规则" })).not.toBeInTheDocument();
+  });
+
   it("generates and copies a one-time plugin pairing code without exposing a token", async () => {
     const fetchMock = vi.fn((input: string | URL, init?: RequestInit) => {
       const url = String(input);
@@ -773,6 +1915,7 @@ describe("workbench candidate intake views", () => {
               latest_batch_id: 11,
               latest_capture_time: "2026-08-11T10:30:00",
               latest_ingest_status: "updated",
+              latest_rating: "SSR",
               latest_batch_role_id: null,
               has_role_binding: 0,
             }],
@@ -793,6 +1936,7 @@ describe("workbench candidate intake views", () => {
           latest_batch_id: 11,
           latest_capture_time: "2026-08-11T10:30:00",
           latest_ingest_status: "updated",
+          latest_rating: "SSR",
           latest_batch_role_id: null,
           has_role_binding: 0,
           job_title: "量化研究员",
@@ -857,10 +2001,16 @@ describe("workbench candidate intake views", () => {
     await user.type(screen.getByLabelText("候选人搜索"), "原始卡片");
     await user.click(screen.getByRole("button", { name: "搜索" }));
     expect(await screen.findByText("Bob Li")).toBeInTheDocument();
+    expect(screen.getAllByText("1SSR").length).toBeGreaterThanOrEqual(1);
+    await user.selectOptions(screen.getByLabelText("外部评级"), "SSR");
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.some(([url]) => String(url).includes("rating=SSR"))).toBe(true);
+    });
 
     await user.click(screen.getByRole("button", { name: "查看详情" }));
     const detailDrawer = await screen.findByRole("dialog", { name: "候选人详情" });
     expect(within(detailDrawer).getAllByText("量化研究员").length).toBeGreaterThan(0);
+    expect(within(detailDrawer).getByText("1SSR")).toBeInTheDocument();
     expect(screen.getByText("原始卡片关键词与快照")).toBeInTheDocument();
 
     await user.click(within(detailDrawer).getByRole("button", { name: "打开最近批次 #11" }));

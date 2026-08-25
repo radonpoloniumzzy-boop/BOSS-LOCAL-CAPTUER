@@ -5,18 +5,37 @@ import { AppStatus } from "../api";
 import { CountUp } from "./CountUp";
 import { BatchesPage } from "./workbench/BatchesPage";
 import { CandidatesPage } from "./workbench/CandidatesPage";
+import { JobsPage } from "./workbench/JobsPage";
 import { SettingsPage } from "./workbench/SettingsPage";
 
-type View = "home" | "candidates" | "batches" | "settings";
+type View = "home" | "candidates" | "batches" | "jobs" | "settings";
+type TaskScope = { id: number; label: string };
+
+const taskScopeStorageKey = "boss-local-task-scope-v1";
+
+function readStoredTaskScope(): TaskScope | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.sessionStorage.getItem(taskScopeStorageKey);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<TaskScope>;
+    if (!Number.isInteger(parsed.id) || Number(parsed.id) <= 0) return null;
+    return { id: Number(parsed.id), label: String(parsed.label || `任务 #${parsed.id}`) };
+  } catch {
+    return null;
+  }
+}
 
 export function Workbench({ status }: { status: AppStatus }) {
   const [view, setView] = useState<View>("home");
   const [requestedBatch, setRequestedBatch] = useState<number | null>(null);
   const [requestedBatchOrigin, setRequestedBatchOrigin] = useState<View | null>(null);
+  const [taskScope, setTaskScopeState] = useState<TaskScope | null>(() => readStoredTaskScope());
   const [visited, setVisited] = useState<Record<View, boolean>>({
     home: true,
     candidates: false,
     batches: false,
+    jobs: false,
     settings: false,
   });
 
@@ -25,9 +44,32 @@ export function Workbench({ status }: { status: AppStatus }) {
     setView(nextView);
   };
 
+  const setTaskScope = (nextScope: TaskScope | null) => {
+    setTaskScopeState(nextScope);
+    try {
+      if (nextScope) {
+        window.sessionStorage.setItem(taskScopeStorageKey, JSON.stringify(nextScope));
+      } else {
+        window.sessionStorage.removeItem(taskScopeStorageKey);
+      }
+    } catch {
+      // Session persistence is optional; task-scoped navigation still works without it.
+    }
+  };
+
   const openBatch = (batchId: number, origin: View = view) => {
     setRequestedBatch(batchId);
     setRequestedBatchOrigin(origin);
+    activateView("batches");
+  };
+
+  const openTaskCandidates = (taskId: number, taskName: string) => {
+    setTaskScope({ id: taskId, label: taskName || `任务 #${taskId}` });
+    activateView("candidates");
+  };
+
+  const openTaskBatches = (taskId: number, taskName: string) => {
+    setTaskScope({ id: taskId, label: taskName || `任务 #${taskId}` });
     activateView("batches");
   };
 
@@ -59,11 +101,7 @@ export function Workbench({ status }: { status: AppStatus }) {
             <NavButton active={view === "home"} onClick={() => activateView("home")} icon={<Home size={16} />} label="概览" />
             <NavButton active={view === "candidates"} onClick={() => activateView("candidates")} icon={<Users size={16} />} label="候选人" />
             <NavButton active={view === "batches"} onClick={() => activateView("batches")} icon={<Layers3 size={16} />} label="最近批次" />
-            <button className="nav-item" disabled aria-label="岗位，待开发">
-              <BriefcaseBusiness size={16} />
-              <span>岗位</span>
-              <small>待开发</small>
-            </button>
+            <NavButton active={view === "jobs"} onClick={() => activateView("jobs")} icon={<BriefcaseBusiness size={16} />} label="岗位" />
             <NavButton active={view === "settings"} onClick={() => activateView("settings")} icon={<Settings size={16} />} label="设置" />
           </div>
         </nav>
@@ -128,13 +166,22 @@ export function Workbench({ status }: { status: AppStatus }) {
         )}
         {visited.candidates && (
           <section hidden={view !== "candidates"} aria-hidden={view !== "candidates"}>
-            <CandidatesPage active={view === "candidates"} onOpenBatch={(batchId) => openBatch(batchId, "candidates")} />
+            <CandidatesPage
+              active={view === "candidates"}
+              taskId={taskScope?.id ?? null}
+              taskLabel={taskScope?.label ?? ""}
+              onClearTaskScope={() => setTaskScope(null)}
+              onOpenBatch={(batchId) => openBatch(batchId, "candidates")}
+            />
           </section>
         )}
         {visited.batches && (
           <section hidden={view !== "batches"} aria-hidden={view !== "batches"}>
             <BatchesPage
               active={view === "batches"}
+              taskId={taskScope?.id ?? null}
+              taskLabel={taskScope?.label ?? ""}
+              onClearTaskScope={() => setTaskScope(null)}
               initialBatchId={requestedBatch}
               initialReturnView={requestedBatchOrigin}
               onInitialBatchConsumed={() => setRequestedBatch(null)}
@@ -143,6 +190,11 @@ export function Workbench({ status }: { status: AppStatus }) {
                 setRequestedBatchOrigin(null);
               }}
             />
+          </section>
+        )}
+        {visited.jobs && (
+          <section hidden={view !== "jobs"} aria-hidden={view !== "jobs"}>
+            <JobsPage active={view === "jobs"} onOpenTaskCandidates={openTaskCandidates} onOpenTaskBatches={openTaskBatches} onOpenBatch={(batchId) => openBatch(batchId, "jobs")} />
           </section>
         )}
         {visited.settings && (

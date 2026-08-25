@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowLeft, Download, X } from "lucide-react";
 import { ApiRequestError, BatchCandidateRow, CaptureBatchRow, downloadBatchMarkdown, PagedResponse, requestJson } from "../../api";
 import { Drawer } from "./Drawer";
-import { formatDate, Loadable, Pager, RefreshButton, StatusBadge, TableState } from "./common";
+import { formatDate, Loadable, Pager, RatingBadge, RefreshButton, StatusBadge, TableState } from "./common";
 import { SnapshotTextBlock } from "./SnapshotTextBlock";
 
 const emptyBatches: Loadable<CaptureBatchRow> = { rows: [], total: 0, page: 1, page_size: 20, loading: false, error: "" };
@@ -13,14 +13,20 @@ type BatchStatusFilter = "" | "completed" | "partial" | "failed";
 
 export function BatchesPage({
   active = true,
+  taskId = null,
+  taskLabel = "",
+  onClearTaskScope,
   initialBatchId = null,
   initialReturnView = null,
   onInitialBatchConsumed,
   onReturnFromInitialBatch,
 }: {
   active?: boolean;
+  taskId?: number | null;
+  taskLabel?: string;
+  onClearTaskScope?: () => void;
   initialBatchId?: number | null;
-  initialReturnView?: "home" | "candidates" | "batches" | "settings" | null;
+  initialReturnView?: "home" | "candidates" | "batches" | "jobs" | "settings" | null;
   onInitialBatchConsumed?: () => void;
   onReturnFromInitialBatch?: () => void;
 }) {
@@ -93,7 +99,7 @@ export function BatchesPage({
     if (noticeTimer.current !== null) window.clearTimeout(noticeTimer.current);
   }, []);
 
-  useEffect(() => setPage(1), [platform, statusFilter, failedOnly, todayOnly]);
+  useEffect(() => setPage(1), [platform, statusFilter, failedOnly, taskId, todayOnly]);
 
   useEffect(() => {
     if (active) return;
@@ -110,6 +116,7 @@ export function BatchesPage({
     if (statusFilter) params.set("status", statusFilter);
     if (failedOnly) params.set("failed_only", "true");
     if (todayOnly) params.set("today_only", "true");
+    if (taskId) params.set("task_id", String(taskId));
     void requestJson<BatchPageResponse>(`/api/capture-batches?${params}`)
       .then((payload) => {
         if (latest.current !== requestId) return;
@@ -130,7 +137,7 @@ export function BatchesPage({
           }));
         }
       });
-  }, [active, page, platform, statusFilter, failedOnly, todayOnly, refresh, showNotice]);
+  }, [active, page, platform, statusFilter, failedOnly, taskId, todayOnly, refresh, showNotice]);
 
   useEffect(() => {
     if (!active || !initialBatchId) return;
@@ -179,7 +186,7 @@ export function BatchesPage({
     );
   }
 
-  const hasFilters = Boolean(platform || statusFilter || failedOnly || todayOnly);
+  const hasFilters = Boolean(platform || statusFilter || failedOnly || taskId || todayOnly);
 
   return (
     <div className="page-content page-enter">
@@ -236,11 +243,21 @@ export function BatchesPage({
         <div><span>今日新增</span><strong>{todaySummary.added}</strong></div>
       </section>
       <section className="data-panel">
+        {taskId && (
+          <div className="scope-banner">
+            <span>正在查看：{taskLabel || `任务 #${taskId}`} 的采集批次。</span>
+            <button className="text-button" onClick={onClearTaskScope}>返回全部批次</button>
+          </div>
+        )}
         <TableState
           loading={data.loading}
           error={data.error}
           empty={!data.rows.length}
-          emptyText={hasFilters ? "当前筛选条件下还没有采集批次。" : "还没有采集批次。"}
+          emptyText={hasFilters
+            ? taskId
+              ? "这个任务还没有符合当前条件的采集批次。请回到任务工作台确认插件当前任务后再采集。"
+              : "当前筛选条件下还没有采集批次。"
+            : "还没有采集批次。"}
         />
         {!data.loading && !data.error && data.rows.length > 0 && (
           <div className="table-scroll">
@@ -390,6 +407,7 @@ function BatchDetail({
                   <th>候选人</th>
                   <th>来源岗位</th>
                   <th>本次结果</th>
+                  <th>外部评级</th>
                   <th>本次正式岗位</th>
                   <th>采集时间</th>
                   <th>快照</th>
@@ -407,6 +425,7 @@ function BatchDetail({
                       </span>
                     </td>
                     <td><StatusBadge tone={row.ingest_status === "updated" ? "info" : "success"}>{row.ingest_status === "updated" ? "更新" : "新增"}</StatusBadge></td>
+                    <td><RatingBadge rating={row.latest_rating} /></td>
                     <td><StatusBadge tone={batch.role_id !== null ? "success" : "muted"}>{batch.role_id !== null ? `岗位档案 #${batch.role_id}` : "未提供正式岗位"}</StatusBadge></td>
                     <td className="numeric">{formatDate(row.capture_time)}</td>
                     <td><button className="secondary-button" onClick={() => setSnapshotIndex(index)}>查看原始快照</button></td>
@@ -442,6 +461,7 @@ function BatchDetail({
           </header>
           <div className="detail-chip-row">
             <StatusBadge tone={snapshot.ingest_status === "updated" ? "info" : "success"}>{snapshot.ingest_status === "updated" ? "更新" : "新增"}</StatusBadge>
+            <RatingBadge rating={snapshot.latest_rating} />
           </div>
           <SnapshotTextBlock text={snapshot.raw_card_text || ""} />
           <div className="snapshot-pagination">

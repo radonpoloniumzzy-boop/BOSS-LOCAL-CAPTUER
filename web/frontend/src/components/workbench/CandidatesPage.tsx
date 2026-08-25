@@ -2,7 +2,7 @@ import { FormEvent, useEffect, useRef, useState } from "react";
 import { ExternalLink, Search, X } from "lucide-react";
 import { ApiRequestError, CandidateAppearanceRow, CandidateDetail, CandidateRow, PagedResponse, requestJson } from "../../api";
 import { Drawer } from "./Drawer";
-import { formatDate, Loadable, Pager, RefreshButton, StatusBadge, TableState } from "./common";
+import { formatDate, Loadable, Pager, RatingBadge, RefreshButton, StatusBadge, TableState } from "./common";
 import { SnapshotTextBlock } from "./SnapshotTextBlock";
 
 const empty: Loadable<CandidateRow> = { rows: [], total: 0, page: 1, page_size: 100, loading: false, error: "" };
@@ -32,15 +32,22 @@ function safeHttpUrl(value: string) {
 
 export function CandidatesPage({
   active = true,
+  taskId = null,
+  taskLabel = "",
+  onClearTaskScope,
   onOpenBatch,
 }: {
   active?: boolean;
+  taskId?: number | null;
+  taskLabel?: string;
+  onClearTaskScope?: () => void;
   onOpenBatch: (batchId: number) => void;
 }) {
   const [keywordInput, setKeywordInput] = useState("");
   const [keyword, setKeyword] = useState("");
   const [platform, setPlatform] = useState("");
   const [unbound, setUnbound] = useState(false);
+  const [rating, setRating] = useState("");
   const [sort, setSort] = useState("latest_capture_desc");
   const [page, setPage] = useState(1);
   const [refresh, setRefresh] = useState(0);
@@ -55,7 +62,7 @@ export function CandidatesPage({
   const latestDetail = useRef(0);
   const latestAppearances = useRef(0);
 
-  useEffect(() => setPage(1), [keyword, platform, sort, unbound]);
+  useEffect(() => setPage(1), [keyword, platform, rating, sort, taskId, unbound]);
 
   useEffect(() => {
     if (active) return;
@@ -69,6 +76,8 @@ export function CandidatesPage({
     if (keyword) params.set("keyword", keyword);
     if (platform) params.set("source_platform", platform);
     if (unbound) params.set("unbound_only", "true");
+    if (rating) params.set("rating", rating);
+    if (taskId) params.set("task_id", String(taskId));
     void requestJson<PagedResponse<CandidateRow>>(`/api/candidates?${params}`).then((payload) => {
       if (latest.current === requestId) setData({ ...payload, loading: false, error: "" });
     }).catch((error: unknown) => {
@@ -81,7 +90,7 @@ export function CandidatesPage({
         }));
       }
     });
-  }, [keyword, page, platform, refresh, sort, unbound]);
+  }, [keyword, page, platform, rating, refresh, sort, taskId, unbound]);
 
   useEffect(() => {
     if (selectedId === null) {
@@ -169,6 +178,15 @@ export function CandidatesPage({
               <option value="latest_capture_desc">最近采集优先</option>
               <option value="latest_capture_asc">最早采集优先</option>
             </select>
+            <select aria-label="外部评级" value={rating} onChange={(event) => setRating(event.target.value)}>
+              <option value="">全部评级</option>
+              <option value="UR">1UR</option>
+              <option value="SSR">1SSR</option>
+              <option value="SR">1SR</option>
+              <option value="R">1R</option>
+              <option value="N">1N</option>
+              <option value="unrated">未评级</option>
+            </select>
             <label className="compact-check">
               <input type="checkbox" checked={unbound} onChange={(event) => setUnbound(event.target.checked)} />
               只看未绑定岗位
@@ -178,11 +196,21 @@ export function CandidatesPage({
         </div>
       </div>
       <section className="data-panel">
+        {taskId && (
+          <div className="scope-banner">
+            <span>正在查看：{taskLabel || `任务 #${taskId}`} 的候选人。</span>
+            <button className="text-button" onClick={onClearTaskScope}>返回全部候选人</button>
+          </div>
+        )}
         <TableState
           loading={data.loading}
           error={data.error}
           empty={!data.rows.length}
-          emptyText={keyword || platform || unbound ? "没有符合当前筛选条件的候选人。" : "当前还没有候选人。"}
+          emptyText={keyword || platform || rating || unbound
+            ? "没有符合当前筛选条件的候选人。"
+            : taskId
+              ? "这个任务还没有候选人。请先在插件中将当前任务用于采集。"
+              : "当前还没有候选人。"}
         />
         {!data.loading && !data.error && data.rows.length > 0 && (
           <div className="table-scroll">
@@ -193,6 +221,7 @@ export function CandidatesPage({
                   <th>来源岗位</th>
                   <th>来源平台</th>
                   <th>岗位绑定</th>
+                  <th>外部评级</th>
                   <th>最近采集</th>
                   <th>最近批次</th>
                   <th>本次结果</th>
@@ -217,6 +246,7 @@ export function CandidatesPage({
                     </td>
                     <td><StatusBadge>{row.latest_source_platform || row.source_platform || "unknown"}</StatusBadge></td>
                     <td><StatusBadge tone={row.has_role_binding ? "success" : "muted"}>{row.has_role_binding ? "已绑定岗位" : "未绑定岗位"}</StatusBadge></td>
+                    <td><RatingBadge rating={row.latest_rating} /></td>
                     <td className="numeric">{formatDate(row.latest_capture_time)}</td>
                     <td className="numeric">
                       {row.latest_batch_id ? <button className="text-button" onClick={() => onOpenBatch(row.latest_batch_id)}>#{row.latest_batch_id}</button> : "未提供"}
@@ -301,6 +331,7 @@ function CandidateDetailDrawer({
                   <StatusBadge>{detail.latest_source_platform || detail.source_platform || "unknown"}</StatusBadge>
                   <StatusBadge tone={detail.has_role_binding ? "success" : "muted"}>{detail.has_role_binding ? "已绑定岗位" : "未绑定岗位"}</StatusBadge>
                   <StatusBadge tone={detail.latest_ingest_status === "updated" ? "info" : "success"}>{detail.latest_ingest_status === "updated" ? "最近为更新" : "最近为新增"}</StatusBadge>
+                  <RatingBadge rating={detail.latest_rating} />
                 </div>
               </div>
               <dl className="detail-summary-grid">

@@ -4,6 +4,7 @@ const path = require("path");
 const { webcrypto } = require("crypto");
 const { TextEncoder } = require("util");
 const vm = require("vm");
+const { JSDOM } = require("../../web/frontend/node_modules/jsdom");
 
 const EXTENSION_DIR = path.resolve(__dirname, "..");
 
@@ -275,6 +276,7 @@ function createPopupTestContext(options = {}) {
     "batchStatus",
     "batchLog",
     "webIntakeStatus",
+    "pluginContextStatus",
     "automationAuto",
     "pairingCode",
     "applyPairingCode",
@@ -286,6 +288,7 @@ function createPopupTestContext(options = {}) {
     "collectCurrent",
     "collectAuto",
     "pauseScroll",
+    "captureCurrentDetail",
     "requestResume",
     "downloadResume",
     "requestAndDownload",
@@ -309,6 +312,7 @@ function createPopupTestContext(options = {}) {
   elements.batchActionDelaySeconds.value = "5";
   elements.maxBatchSessions.value = "50";
   elements.webIntakeStatus.textContent = "网页入库：等待发送";
+  elements.pluginContextStatus.textContent = "当前未选择招聘任务；仍可进行无岗位采集。";
 
   const chrome = {
     storage: {
@@ -526,6 +530,48 @@ function loadCollectorForTest() {
     filename: "collector.js",
   });
   return context.BossLocalCollectorTest;
+}
+
+function loadCollectorForDom(dom, href = "https://www.zhipin.com/web/geek/recommend") {
+  const context = {
+    HTMLElement: dom.window.HTMLElement,
+    HTMLAnchorElement: dom.window.HTMLAnchorElement,
+    KeyboardEvent: dom.window.KeyboardEvent,
+    NodeFilter: dom.window.NodeFilter,
+    URL,
+    document: dom.window.document,
+    window: dom.window,
+    globalThis: {},
+    location: new URL(href),
+    getComputedStyle: dom.window.getComputedStyle.bind(dom.window),
+    setTimeout,
+    clearTimeout,
+    Date,
+    __bossLocalCollectorTestMode: true,
+  };
+  context.globalThis = context;
+  vm.runInNewContext(fs.readFileSync(path.join(EXTENSION_DIR, "collector.js"), "utf8"), context, {
+    filename: "collector.js",
+  });
+  return context.BossLocalCollectorTest;
+}
+
+function giveCardsLayout(dom) {
+  for (const node of dom.window.document.querySelectorAll(".candidate-card, .resume-card, .ad-card, .filter-card")) {
+    node.getBoundingClientRect = () => ({ width: 720, height: 180, top: 0, left: 0, right: 720, bottom: 180 });
+  }
+}
+
+function giveDetailLayout(dom) {
+  for (const node of dom.window.document.querySelectorAll(".candidate-detail, .resume-detail, .hidden-detail, .loading-detail")) {
+    node.getBoundingClientRect = () => ({ width: 760, height: 520, top: 0, left: 0, right: 760, bottom: 520 });
+  }
+}
+
+function giveBossNestedCardsLayout(dom) {
+  for (const node of dom.window.document.querySelectorAll(".candidate-card-wrap, .card-inner, .candidate-card")) {
+    node.getBoundingClientRect = () => ({ width: 720, height: 180, top: 0, left: 0, right: 720, bottom: 180 });
+  }
 }
 
 async function testDownloadEndpointValidation() {
@@ -798,6 +844,29 @@ function testChatAutomationIsOptIn() {
   assert(manifest.description.includes("opt-in Boss chat"));
 }
 
+function testPopupClientFirstScreenKeepsCoreWebActionsVisibleAndLegacyFolded() {
+  const html = fs.readFileSync(path.join(EXTENSION_DIR, "popup.html"), "utf8");
+  const dom = new JSDOM(html);
+  const document = dom.window.document;
+  const coreIds = ["applyPairingCode", "collectCurrent", "collectAuto", "pauseScroll", "downloadCurrentBatch", "retryWebIntake", "openWebWorkbench"];
+  for (const id of coreIds) {
+    const element = document.getElementById(id);
+    assert(element, `missing ${id}`);
+    assert.strictEqual(element.closest("details"), null, `${id} should be on the client first screen`);
+  }
+  for (const id of ["desktopAdvanced", "scrollAdvanced", "detailEnrichmentAdvanced", "legacyChatAdvanced", "legacyBatchAdvanced"]) {
+    const details = document.getElementById(id);
+    assert(details, `missing ${id}`);
+    assert.strictEqual(details.open, false, `${id} should be folded by default`);
+  }
+  assert.strictEqual(document.getElementById("automationAuto").closest("details")?.id, "desktopAdvanced");
+  assert.strictEqual(document.getElementById("captureCurrentDetail").closest("details")?.id, "detailEnrichmentAdvanced");
+  assert.strictEqual(document.getElementById("chatAutomationEnabled").closest("details")?.id, "legacyChatAdvanced");
+  assert.strictEqual(document.getElementById("startBatchRequest").closest("details")?.id, "legacyBatchAdvanced");
+  assert(document.body.textContent.includes("网页工作台采集助手"));
+  assert(document.body.textContent.includes("后续聊天与附件能力（默认关闭）"));
+}
+
 function testScrollWaitDefaultsToThirtyMillisecondsAndHasAdjusters() {
   const popup = fs.readFileSync(path.join(EXTENSION_DIR, "popup.js"), "utf8");
   const html = fs.readFileSync(path.join(EXTENSION_DIR, "popup.html"), "utf8");
@@ -845,6 +914,12 @@ function testRuntimeFingerprintAndVersionAwareRunnerInjection() {
   assert(source.includes("runnerVersion"));
   assert(source.includes("runToken: runnerState.runToken"));
   assert(popup.includes("formatRuntimeFingerprint"));
+}
+
+function testChatRunnerRuntimeLogsDoNotExposeRunToken() {
+  const source = fs.readFileSync(path.join(EXTENSION_DIR, "chat_batch_runner.js"), "utf8");
+  assert(!source.includes("token=${runToken}"));
+  assert(!source.includes("token=${runnerState.runToken}"));
 }
 
 function loadRemoteControlForBehaviorTest() {
@@ -1009,6 +1084,15 @@ async function testPopupPairsWithSingleWebCodeAndRemembersConnection() {
         assert.strictEqual(options.headers["X-Boss-Local-Token"], "remembered-web-token");
         return { ok: true, status: 200, async json() { return { ok: true }; } };
       }
+      if (String(url).endsWith("/api/plugin/context")) {
+        return {
+          ok: false,
+          status: 409,
+          async json() {
+            return { error: { code: "context_unavailable", message: "当前未选择可用招聘任务。" } };
+          },
+        };
+      }
       throw new Error(`Unexpected fetch: ${String(url)}`);
     },
   });
@@ -1023,6 +1107,7 @@ async function testPopupPairsWithSingleWebCodeAndRemembersConnection() {
 }
 
 async function testPopupPairsAndUsesConfiguredWebPortEndToEnd() {
+  let webIntakePayload = null;
   const popup = createPopupTestContext({
     runtimeHandler: createPopupWebRuntimeHandler(),
     fetchImpl: async (url, options = {}) => {
@@ -1041,8 +1126,28 @@ async function testPopupPairsAndUsesConfiguredWebPortEndToEnd() {
         assert.strictEqual(options.headers["X-Boss-Local-Token"], "configured-port-token");
         return { ok: true, status: 200, async json() { return { ok: true }; } };
       }
+      if (endpoint === "http://127.0.0.1:19064/api/plugin/context") {
+        assert.strictEqual(options.headers["X-Boss-Local-Token"], "configured-port-token");
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return {
+              recruitment_task_id: 42,
+              job_profile_id: 17,
+              job_profile_version: 3,
+              job_title: "量化研究员",
+              platform: "boss",
+              source_url: "https://www.zhipin.com/web/geek/recommend",
+              task_status: "running",
+              context_updated_at: "2026-08-19T10:00:00",
+            };
+          },
+        };
+      }
       if (endpoint === "http://127.0.0.1:19064/api/intake/candidates") {
         assert.strictEqual(options.headers["X-Boss-Local-Token"], "configured-port-token");
+        webIntakePayload = JSON.parse(options.body);
         return {
           ok: true,
           status: 200,
@@ -1073,7 +1178,15 @@ async function testPopupPairsAndUsesConfiguredWebPortEndToEnd() {
   assert.strictEqual(popup.store.apiBase, "http://127.0.0.1:19064", popup.elements.status.textContent);
   assert.strictEqual(popup.store.apiToken, "configured-port-token");
   assert.strictEqual(popup.store.connectionMode, "web");
+  assert.strictEqual(popup.store.jobProfileId, 17);
+  assert.strictEqual(popup.store.recruitmentTaskId, 42);
+  assert(popup.elements.pluginContextStatus.textContent.includes("当前招聘任务已连接"));
+  assert(popup.elements.pluginContextStatus.textContent.includes("v3"));
   await popup.api.runCollection(false);
+  assert.notStrictEqual(webIntakePayload, null, popup.elements.status.textContent);
+  assert.strictEqual(webIntakePayload.job_profile_id, 17);
+  assert.strictEqual(webIntakePayload.recruitment_task_id, 42);
+  assert.strictEqual(webIntakePayload.source_job_title, "量化研究员");
   await popup.api.downloadCurrentBatch();
   await popup.api.openWebWorkbench();
 
@@ -1258,12 +1371,93 @@ async function testPopupManualDesktopAdvancedSettingsOverrideWebMode() {
   assert(!popup.fetchCalls.some((call) => call.url.endsWith("/api/intake/candidates")));
 }
 
+async function testPopupClearsOldTaskContextWhenNewConnectionContextFails() {
+  let intakePayload = null;
+  const popup = createPopupTestContext({
+    store: {
+      apiBase: "http://127.0.0.1:17864",
+      apiToken: "old-token",
+      connectionMode: "web",
+      connectionModeConfirmed: true,
+      jobProfileId: 99,
+      recruitmentTaskId: 88,
+    },
+    runtimeHandler: createPopupWebRuntimeHandler(),
+    fetchImpl: async (url, options = {}) => {
+      const endpoint = String(url);
+      if (endpoint === "http://127.0.0.1:19064/api/plugin/pair") {
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return { api_base: "http://127.0.0.1:19064", api_token: "new-token" };
+          },
+        };
+      }
+      if (endpoint === "http://127.0.0.1:19064/api/plugin/connection/check") {
+        assert.strictEqual(options.headers["X-Boss-Local-Token"], "new-token");
+        return { ok: true, status: 200, async json() { return { ok: true }; } };
+      }
+      if (endpoint === "http://127.0.0.1:19064/api/plugin/context") {
+        return {
+          ok: false,
+          status: 401,
+          async json() {
+            return { error: { code: "unauthorized", message: "本地写入鉴权失败。" } };
+          },
+        };
+      }
+      if (endpoint === "http://127.0.0.1:19064/api/intake/candidates") {
+        intakePayload = JSON.parse(options.body);
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return {
+              batch_id: 19065,
+              status: "completed",
+              received_count: 1,
+              inserted_candidates: 1,
+              updated_candidates: 0,
+              skipped_candidates: 0,
+              failed_candidates: 0,
+            };
+          },
+        };
+      }
+      throw new Error(`Unexpected fetch: ${endpoint}`);
+    },
+  });
+
+  popup.elements.pairingCode.value =
+    "boss-local://web-pair?apiBase=http%3A%2F%2F127.0.0.1%3A19064&pairingCode=ABC123-DEF456";
+  await popup.api.applyPairingCodeAndTest();
+  assert.strictEqual(popup.store.apiBase, "http://127.0.0.1:19064");
+  assert.strictEqual(popup.store.jobProfileId, null);
+  assert.strictEqual(popup.store.recruitmentTaskId, null);
+  assert(popup.elements.pluginContextStatus.textContent.includes("上下文未确认"));
+
+  await popup.api.runCollection(false);
+  assert.notStrictEqual(intakePayload, null);
+  assert.strictEqual(intakePayload.job_profile_id, null);
+  assert.strictEqual(intakePayload.recruitment_task_id, null);
+}
+
 async function testPopupWebModeCollectCurrentPostsDirectlyToWebIntake() {
   const popup = createPopupTestContext({
     apiBase: "http://127.0.0.1:17864",
     apiToken: "web-token",
     runtimeHandler: createPopupWebRuntimeHandler(),
     fetchImpl: async (url, requestOptions) => {
+      if (String(url).endsWith("/api/plugin/context")) {
+        return {
+          ok: false,
+          status: 409,
+          async json() {
+            return { error: { code: "context_unavailable", message: "当前未选择可用招聘任务。" } };
+          },
+        };
+      }
       if (String(url).endsWith("/api/intake/candidates")) {
         return {
           ok: true,
@@ -1288,14 +1482,15 @@ async function testPopupWebModeCollectCurrentPostsDirectlyToWebIntake() {
   await popup.api.init();
   await popup.api.runCollection(false);
 
-  assert.strictEqual(popup.fetchCalls.length, 1);
-  assert.strictEqual(popup.fetchCalls[0].url, "http://127.0.0.1:17864/api/intake/candidates");
-  assert(!("Origin" in popup.fetchCalls[0].options.headers));
-  const payload = JSON.parse(popup.fetchCalls[0].options.body);
+  const intakeCalls = popup.fetchCalls.filter((call) => call.url === "http://127.0.0.1:17864/api/intake/candidates");
+  assert.strictEqual(intakeCalls.length, 1);
+  assert(!("Origin" in intakeCalls[0].options.headers));
+  const payload = JSON.parse(intakeCalls[0].options.body);
   assert.strictEqual(payload.job_profile_id, null);
   assert.strictEqual(payload.recruitment_task_id, null);
   assert.strictEqual(payload.candidates[0].platform_uid, "boss:1");
   assert.strictEqual(payload.candidates[0].source_candidate_id, "boss-1");
+  assert(popup.elements.pluginContextStatus.textContent.includes("上下文未确认"));
   assert(popup.elements.automationAuto.title.includes("Web"));
 
   await popup.api.downloadCurrentBatch();
@@ -1316,6 +1511,15 @@ async function testPopupWebModeCollectAutoPostsDirectlyToWebIntake() {
     apiToken: "web-token",
     runtimeHandler: createPopupWebRuntimeHandler(),
     fetchImpl: async (url) => {
+      if (String(url).endsWith("/api/plugin/context")) {
+        return {
+          ok: false,
+          status: 409,
+          async json() {
+            return { error: { code: "context_unavailable", message: "当前未选择可用招聘任务。" } };
+          },
+        };
+      }
       if (String(url).endsWith("/api/intake/candidates")) {
         return {
           ok: true,
@@ -1340,8 +1544,8 @@ async function testPopupWebModeCollectAutoPostsDirectlyToWebIntake() {
   await popup.api.init();
   await popup.api.runCollection(true);
 
-  assert.strictEqual(popup.fetchCalls.length, 1);
-  assert.strictEqual(popup.fetchCalls[0].url, "http://127.0.0.1:17864/api/intake/candidates");
+  const intakeCalls = popup.fetchCalls.filter((call) => call.url === "http://127.0.0.1:17864/api/intake/candidates");
+  assert.strictEqual(intakeCalls.length, 1);
 }
 
 async function testPopupDesktopModeStillUsesDesktopImportOnly() {
@@ -1360,7 +1564,7 @@ async function testPopupDesktopModeStillUsesDesktopImportOnly() {
               result: {
                 job_profile_id: 9,
                 recruitment_task_id: 12,
-                job_title: "????",
+                job_title: "测试岗位",
               },
             };
           },
@@ -1386,7 +1590,7 @@ async function testPopupDesktopModeStillUsesDesktopImportOnly() {
   assert(popup.fetchCalls.some((call) => call.url.endsWith("/api/extension/config")));
   assert(popup.fetchCalls.some((call) => call.url.endsWith("/api/import/cards")));
   assert(!popup.fetchCalls.some((call) => call.url.endsWith("/api/intake/candidates")));
-  assert(!popup.elements.automationAuto.title.includes("Web ??????????? AUTO ???"));
+  assert(!popup.elements.automationAuto.title.includes("Web mojibake AUTO text"));
 }
 
 async function testPopupRetryRestoresPendingStateAcrossInit() {
@@ -1439,10 +1643,10 @@ async function testPopupRetryRestoresPendingStateAcrossInit() {
 
 async function testWebIntakeConnectionChangeDoesNotResendOldPendingBatch() {
   const popup = createPopupTestContext({ apiBase: "http://127.0.0.1:17864", apiToken: "token-a" });
-  const settingsA = { apiBase: "http://127.0.0.1:17864", apiToken: "token-a", jobTitle: "Boss ????" };
+  const settingsA = { apiBase: "http://127.0.0.1:17864", apiToken: "token-a", jobTitle: "Boss 测试岗位" };
   const merged = {
     platform: "boss",
-    cards: [{ source_candidate_id: "boss-1", raw_card_text: "??? A" }],
+    cards: [{ source_candidate_id: "boss-1", raw_card_text: "测试原文 A" }],
   };
   const queued = await popup.context.BossLocalWebIntake.queueCapturedBatch({
     settings: settingsA,
@@ -1468,10 +1672,10 @@ async function testWebIntakeConnectionChangeDoesNotResendOldPendingBatch() {
 
 async function testWebIntakeSameRunIdDoesNotDuplicatePendingBatch() {
   const popup = createPopupTestContext({ apiBase: "http://127.0.0.1:17864", apiToken: "token-a" });
-  const settings = { apiBase: "http://127.0.0.1:17864", apiToken: "token-a", jobTitle: "Boss ????" };
+  const settings = { apiBase: "http://127.0.0.1:17864", apiToken: "token-a", jobTitle: "Boss 测试岗位" };
   const merged = {
     platform: "boss",
-    cards: [{ source_candidate_id: "boss-1", raw_card_text: "??? A" }],
+    cards: [{ source_candidate_id: "boss-1", raw_card_text: "测试原文 A" }],
   };
   const first = await popup.context.BossLocalWebIntake.queueCapturedBatch({
     settings,
@@ -1495,12 +1699,12 @@ async function testWebIntakeSameRunIdDoesNotDuplicatePendingBatch() {
 
 async function testWebIntakeConcurrentCompletionDoesNotOverwriteQueuedBatch() {
   const popup = createPopupTestContext({ apiBase: "http://127.0.0.1:17864", apiToken: "web-token" });
-  const settings = { apiBase: "http://127.0.0.1:17864", apiToken: "web-token", jobTitle: "Boss ????" };
+  const settings = { apiBase: "http://127.0.0.1:17864", apiToken: "web-token", jobTitle: "Boss 测试岗位" };
   const fetchStarted = createDeferred();
   const releaseFetch = createDeferred();
   const queuedA = await popup.context.BossLocalWebIntake.queueCapturedBatch({
     settings,
-    merged: { platform: "boss", cards: [{ source_candidate_id: "boss-1", raw_card_text: "???A" }] },
+    merged: { platform: "boss", cards: [{ source_candidate_id: "boss-1", raw_card_text: "测试原文A" }] },
     sourceUrl: "https://www.zhipin.com/web/geek/recommend",
     idempotencyKey: "concurrent-a",
     storageArea: popup.chrome.storage.local,
@@ -1518,7 +1722,7 @@ async function testWebIntakeConcurrentCompletionDoesNotOverwriteQueuedBatch() {
   await fetchStarted.promise;
   const queuedB = await popup.context.BossLocalWebIntake.queueCapturedBatch({
     settings,
-    merged: { platform: "boss", cards: [{ source_candidate_id: "boss-2", raw_card_text: "???B" }] },
+    merged: { platform: "boss", cards: [{ source_candidate_id: "boss-2", raw_card_text: "测试原文B" }] },
     sourceUrl: "https://www.zhipin.com/web/geek/recommend",
     idempotencyKey: "concurrent-b",
     storageArea: popup.chrome.storage.local,
@@ -1819,7 +2023,7 @@ async function testPendingLimitConcurrentEnqueueStaysWithinTen() {
 
 async function testWebIntakeSuccessSanitizesCompletedPayload() {
   const popup = createPopupTestContext({ apiBase: "http://127.0.0.1:17864", apiToken: "web-token" });
-  const settings = { apiBase: "http://127.0.0.1:17864", apiToken: "web-token", jobTitle: "Boss ????" };
+  const settings = { apiBase: "http://127.0.0.1:17864", apiToken: "web-token", jobTitle: "Boss 测试岗位" };
   const queued = await popup.context.BossLocalWebIntake.queueCapturedBatch({
     settings,
     merged: {
@@ -1828,7 +2032,7 @@ async function testWebIntakeSuccessSanitizesCompletedPayload() {
         {
           source_candidate_id: "boss-1",
           detail_url: "https://www.zhipin.com/candidate/1",
-          raw_card_text: "?? ???",
+          raw_card_text: "测试 原文",
           name: "??",
         },
       ],
@@ -1871,8 +2075,8 @@ async function testWebIntakeQuotaFailureIsReportedSeparately() {
   await assert.rejects(
     () =>
       popup.context.BossLocalWebIntake.queueCapturedBatch({
-        settings: { apiBase: "http://127.0.0.1:17864", apiToken: "web-token", jobTitle: "Boss ????" },
-        merged: { platform: "boss", cards: [{ source_candidate_id: "boss-1", raw_card_text: "???A" }] },
+        settings: { apiBase: "http://127.0.0.1:17864", apiToken: "web-token", jobTitle: "Boss 测试岗位" },
+        merged: { platform: "boss", cards: [{ source_candidate_id: "boss-1", raw_card_text: "测试原文A" }] },
         sourceUrl: "https://www.zhipin.com/web/geek/recommend",
         idempotencyKey: "quota-1",
         storageArea: popup.chrome.storage.local,
@@ -1886,9 +2090,9 @@ async function testServiceWorkerRestoresPendingBatchViaAlarm() {
     throw new Error("connect ECONNREFUSED 127.0.0.1:17864");
   });
   await first.api.enqueueAndSendWebIntake({
-    settings: { apiBase: "http://127.0.0.1:17864", apiToken: "web-token", jobTitle: "Boss ????" },
+    settings: { apiBase: "http://127.0.0.1:17864", apiToken: "web-token", jobTitle: "Boss 测试岗位" },
     sourceUrl: "https://www.zhipin.com/web/geek/recommend",
-    merged: { platform: "boss", cards: [{ source_candidate_id: "boss-1", raw_card_text: "???A" }] },
+    merged: { platform: "boss", cards: [{ source_candidate_id: "boss-1", raw_card_text: "测试原文A" }] },
     idempotencyKey: "restore-1",
   });
   const second = loadServiceWorker(async () => ({
@@ -1906,7 +2110,7 @@ async function testServiceWorkerRestoresPendingBatchViaAlarm() {
       };
     },
   }));
-  Object.assign(second.chrome.__store, first.chrome.__store, { apiBase: "http://127.0.0.1:17864", apiToken: "web-token", jobTitle: "Boss ????" });
+  Object.assign(second.chrome.__store, first.chrome.__store, { apiBase: "http://127.0.0.1:17864", apiToken: "web-token", jobTitle: "Boss 测试岗位" });
   await triggerRetryAlarm(second);
   const state = await second.context.BossLocalWebIntake.loadState(second.chrome.storage.local);
   assert.strictEqual(state.pendingOrder.length, 0);
@@ -2183,7 +2387,16 @@ async function testWorkerKeepsCustomPortPendingWhenMigrationNeedsRePair() {
 
 async function testPopupAndWorkerConcurrentMigrationIsIdempotent() {
   let fetchCalls = 0;
-  const worker = loadServiceWorker(async () => {
+  const worker = loadServiceWorker(async (url) => {
+    if (String(url).endsWith("/api/plugin/context")) {
+      return {
+        ok: false,
+        status: 409,
+        async json() {
+          return { error: { code: "context_unavailable", message: "当前未选择可用招聘任务。" } };
+        },
+      };
+    }
     fetchCalls += 1;
     return {
       ok: true,
@@ -2543,7 +2756,7 @@ function testCollectorDoesNotPromoteGenericDataIdToPlatformUid() {
       return [];
     },
   });
-  const first = collector.extractCardPayload(createCard({ "data-id": "same-data-id" }, "?? ???"), bossPlatform);
+  const first = collector.extractCardPayload(createCard({ "data-id": "same-data-id" }, "测试 原文"), bossPlatform);
   const second = collector.extractCardPayload(createCard({ "data-id": "same-data-id" }, "?? ??"), bossPlatform);
   assert.strictEqual(first.platform_uid, "");
   assert.strictEqual(second.platform_uid, "");
@@ -2551,9 +2764,598 @@ function testCollectorDoesNotPromoteGenericDataIdToPlatformUid() {
   assert.strictEqual(second.source_candidate_id, "same-data-id");
 }
 
+async function testCollectorAcceptsBossAndLiepinStableCardsOnly() {
+  const bossDom = new JSDOM(`
+    <main>
+      <article class="candidate-card" data-geek-id="boss-alpha">
+        <strong class="name">测试甲</strong>
+        <span class="salary">30K-45K</span>
+        <span class="experience">5年经验</span>
+        <span class="education">本科</span>
+        <p class="summary">高频交易系统经验</p>
+        <a href="/geek/detail/boss-alpha">详情</a>
+        <button>打招呼</button>
+      </article>
+      <article class="ad-card candidate-card">
+        <strong>广告位</strong>
+        <p>企业服务 首页 导航 筛选</p>
+      </article>
+      <article class="candidate-card" data-geek-id="hidden-alpha" style="display:none">
+        <strong class="name">隐藏候选人</strong>
+        <span class="salary">30K-45K</span>
+        <span class="experience">5年经验</span>
+        <span class="education">本科</span>
+        <button>打招呼</button>
+      </article>
+    </main>
+  `, { url: "https://www.zhipin.com/web/geek/recommend" });
+  giveCardsLayout(bossDom);
+  const bossCollector = loadCollectorForDom(bossDom);
+  const boss = bossCollector.platforms.find((platform) => platform.id === "boss");
+  const bossResult = await bossCollector.collectCards(boss, false, {});
+
+  assert.strictEqual(bossResult.cards.length, 1);
+  assert.strictEqual(bossResult.cards[0].name, "测试甲");
+  assert.strictEqual(bossResult.cards[0].platform_uid, "boss:boss-alpha");
+  assert.strictEqual(bossResult.cards[0].source_candidate_id, "boss-alpha");
+  assert(!bossResult.cards[0].raw_card_text.includes("打招呼"));
+  assert(bossResult.diagnostics.hidden >= 1);
+  assert(bossResult.diagnostics.missing_name >= 1 || bossResult.diagnostics.missing_candidate_structure >= 1);
+
+  const liepinDom = new JSDOM(`
+    <main>
+      <article class="resume-card" data-resume-id="lp-101">
+        <strong class="resume-name">测试乙</strong>
+        <span class="salary">40K-60K</span>
+        <span class="work-exp">8年经验</span>
+        <span class="degree">硕士</span>
+        <p class="summary">当前职位 量化研究员，求职状态开放</p>
+        <a href="/candidate/lp-101">查看简历</a>
+      </article>
+    </main>
+  `, { url: "https://lpt.liepin.com/recommend" });
+  giveCardsLayout(liepinDom);
+  const liepinCollector = loadCollectorForDom(liepinDom, "https://lpt.liepin.com/recommend");
+  const liepin = liepinCollector.platforms.find((platform) => platform.id === "liepin");
+  const liepinResult = await liepinCollector.collectCards(liepin, false, {});
+
+  assert.strictEqual(liepinResult.cards.length, 1);
+  assert.strictEqual(liepinResult.cards[0].name, "测试乙");
+  assert.strictEqual(liepinResult.cards[0].platform_uid, "liepin:lp-101");
+}
+
+async function testCollectorDedupesByStableUidButKeepsSameNameDifferentUid() {
+  const dom = new JSDOM(`
+    <main>
+      <article class="candidate-card" data-geek-id="same-uid">
+        <strong class="name">测试甲</strong>
+        <span class="salary">30K-45K</span>
+        <span class="experience">5年经验</span>
+        <span class="education">本科</span>
+        <p>Alpha</p>
+        <button>打招呼</button>
+      </article>
+      <article class="candidate-card" data-geek-id="same-uid">
+        <strong class="name">测试甲</strong>
+        <span class="salary">30K-45K</span>
+        <span class="experience">5年经验</span>
+        <span class="education">本科</span>
+        <p>Alpha duplicated</p>
+        <button>打招呼</button>
+      </article>
+      <article class="candidate-card" data-geek-id="unique-uid">
+        <strong class="name">测试甲</strong>
+        <span class="salary">32K-50K</span>
+        <span class="experience">6年经验</span>
+        <span class="education">硕士</span>
+        <p>Beta</p>
+        <button>打招呼</button>
+      </article>
+      <article class="candidate-card" data-id="generic-only">
+        <strong class="name">测试丙</strong>
+        <span class="salary">25K-35K</span>
+        <span class="experience">4年经验</span>
+        <span class="education">本科</span>
+        <p>无稳定 UID</p>
+        <button>打招呼</button>
+      </article>
+    </main>
+  `, { url: "https://www.zhipin.com/web/geek/recommend" });
+  giveBossNestedCardsLayout(dom);
+  const collector = loadCollectorForDom(dom);
+  const boss = collector.platforms.find((platform) => platform.id === "boss");
+  const result = await collector.collectCards(boss, false, {});
+
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(result.cards.map((card) => card.platform_uid))), ["boss:same-uid", "boss:unique-uid", ""]);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(result.cards.map((card) => card.name))), ["测试甲", "测试甲", "测试丙"]);
+  assert.strictEqual(result.diagnostics.duplicate_identity, 1);
+  assert.strictEqual(result.diagnostics.missing_stable_identity, 1);
+}
+
+async function testCollectorFindsBossStableUidBeyondCardRoot() {
+  const dom = new JSDOM(`
+    <main>
+      <article class="candidate-card">
+        <div class="content">
+          <strong class="name">测试甲</strong>
+          <span class="salary">30K-45K</span>
+          <span class="experience">5年经验</span>
+          <span class="education">本科</span>
+          <p>真实结构中稳定身份可能在内部节点。</p>
+          <div class="geek-meta" data-geek-id="inner-alpha"></div>
+          <button>打招呼</button>
+        </div>
+      </article>
+    </main>
+  `, { url: "https://www.zhipin.com/web/geek/recommend" });
+  giveBossNestedCardsLayout(dom);
+  const collector = loadCollectorForDom(dom);
+  const boss = collector.platforms.find((platform) => platform.id === "boss");
+  const result = await collector.collectCards(boss, false, {});
+
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(result.cards.map((card) => card.platform_uid))), ["boss:inner-alpha"]);
+  assert.strictEqual(result.diagnostics.accepted_cards, 1);
+  assert.strictEqual(result.diagnostics.stable_identity_found, 1);
+  assert.strictEqual(result.diagnostics.identity_from_descendant, 1);
+  assert.strictEqual(Number(result.diagnostics.identity_from_bounded_ancestor || 0), 0);
+  assert.strictEqual(result.diagnostics.missing_stable_identity, 0);
+  assert.strictEqual(result.diagnostics.stable_identity_ambiguous, 0);
+  assert.strictEqual(
+    result.diagnostics.stable_identity_found + result.diagnostics.missing_stable_identity + result.diagnostics.stable_identity_ambiguous,
+    result.diagnostics.accepted_cards,
+  );
+
+  const ancestorDom = new JSDOM(`
+    <main>
+      <section class="candidate-card-wrap" data-geek-id="ancestor-beta">
+        <article class="card-inner">
+          <strong class="name">测试乙</strong>
+          <span class="salary">35K-55K</span>
+          <span class="experience">6年经验</span>
+          <span class="education">硕士</span>
+          <p>真实结构中稳定身份可能在受控祖先。</p>
+          <button>打招呼</button>
+        </article>
+      </section>
+    </main>
+  `, { url: "https://www.zhipin.com/web/geek/recommend" });
+  giveBossNestedCardsLayout(ancestorDom);
+  ancestorDom.window.document.querySelector(".candidate-card-wrap").getBoundingClientRect = () => ({
+    width: 720,
+    height: 5000,
+    top: 0,
+    left: 0,
+    right: 720,
+    bottom: 5000,
+  });
+  const ancestorCollector = loadCollectorForDom(ancestorDom);
+  const ancestorBoss = ancestorCollector.platforms.find((platform) => platform.id === "boss");
+  const ancestorResult = await ancestorCollector.collectCards(ancestorBoss, false, {});
+
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(ancestorResult.cards.map((card) => card.platform_uid))), ["boss:ancestor-beta"]);
+  assert.strictEqual(ancestorResult.diagnostics.stable_identity_found, 1);
+  assert.strictEqual(ancestorResult.diagnostics.identity_from_bounded_ancestor, 1);
+  assert.strictEqual(ancestorResult.diagnostics.missing_stable_identity, 0);
+}
+
+async function testCollectorTreatsBossStableUidAmbiguityAsMissingIdentity() {
+  const dom = new JSDOM(`
+    <main>
+      <article class="candidate-card">
+        <strong class="name">测试丙</strong>
+        <span class="salary">30K-45K</span>
+        <span class="experience">5年经验</span>
+        <span class="education">本科</span>
+        <p>两个不同稳定身份不能随便选择。</p>
+        <span data-geek-id="ambiguous-a"></span>
+        <span data-candidate-id="ambiguous-b"></span>
+        <button>打招呼</button>
+      </article>
+      <article class="candidate-card">
+        <strong class="name">测试丁</strong>
+        <span class="salary">32K-46K</span>
+        <span class="experience">6年经验</span>
+        <span class="education">硕士</span>
+        <p>多个节点同一稳定身份可以采用。</p>
+        <span data-geek-id="same-inner"></span>
+        <span data-candidate-id="same-inner"></span>
+        <button>打招呼</button>
+      </article>
+      <article class="candidate-card" data-id="generic-only">
+        <strong class="name">测试戊</strong>
+        <span class="salary">25K-35K</span>
+        <span class="experience">4年经验</span>
+        <span class="education">本科</span>
+        <p>只有泛化 data-id。</p>
+        <a href="/geek/detail/generic-only">详情</a>
+        <button>打招呼</button>
+      </article>
+      <article class="candidate-card" data-geek-id="liepin:foreign">
+        <strong class="name">测试己</strong>
+        <span class="salary">28K-40K</span>
+        <span class="experience">5年经验</span>
+        <span class="education">本科</span>
+        <p>其他平台前缀不能冒充 Boss 身份。</p>
+        <button>打招呼</button>
+      </article>
+    </main>
+  `, { url: "https://www.zhipin.com/web/geek/recommend" });
+  giveCardsLayout(dom);
+  const collector = loadCollectorForDom(dom);
+  const boss = collector.platforms.find((platform) => platform.id === "boss");
+  const result = await collector.collectCards(boss, false, {});
+
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(result.cards.map((card) => card.platform_uid))), ["", "boss:same-inner", "", ""]);
+  assert.strictEqual(result.diagnostics.accepted_cards, 4);
+  assert.strictEqual(result.diagnostics.stable_identity_found, 1);
+  assert.strictEqual(result.diagnostics.stable_identity_ambiguous, 1);
+  assert.strictEqual(result.diagnostics.missing_stable_identity, 2);
+  assert.strictEqual(
+    result.diagnostics.stable_identity_found + result.diagnostics.missing_stable_identity + result.diagnostics.stable_identity_ambiguous,
+    result.diagnostics.accepted_cards,
+  );
+}
+
+async function testCollectorRawCardTextIgnoresPluginBadgesAndKeywordMarkup() {
+  const dom = new JSDOM(`
+    <main>
+      <article class="candidate-card" data-geek-id="clean-uid">
+        <span class="boss-local-rating-badge">1SSR</span>
+        <strong class="name">测试丁</strong>
+        <span class="salary">35K-55K</span>
+        <span class="experience">7年经验</span>
+        <span class="education">硕士</span>
+        <p class="summary">熟悉<span class="boss-local-keyword-highlight must">Python</span>与交易系统</p>
+        <span class="boss-local-keyword-badge">关键词 3</span>
+        <div class="boss-local-keyword-filterbar"><button>风险 1</button></div>
+        <button>打招呼</button>
+      </article>
+    </main>
+  `, { url: "https://www.zhipin.com/web/geek/recommend" });
+  giveCardsLayout(dom);
+  const collector = loadCollectorForDom(dom);
+  const boss = collector.platforms.find((platform) => platform.id === "boss");
+  const payload = collector.extractCardPayload(dom.window.document.querySelector(".candidate-card"), boss);
+
+  assert.strictEqual(payload.platform_uid, "boss:clean-uid");
+  assert(payload.raw_card_text.includes("测试丁"));
+  assert(payload.raw_card_text.includes("Python"));
+  assert(!payload.raw_card_text.includes("1SSR"));
+  assert(!payload.raw_card_text.includes("关键词 3"));
+  assert(!payload.raw_card_text.includes("风险 1"));
+  assert(!payload.raw_card_text.includes("打招呼"));
+}
+
+async function testCollectorIgnoresDetachedNodesAndUsesFreshDomSnapshots() {
+  const dom = new JSDOM(`
+    <main>
+      <article class="candidate-card" data-geek-id="page-a">
+        <strong class="name">页面甲</strong>
+        <span class="salary">30K-45K</span>
+        <span class="experience">5年经验</span>
+        <span class="education">本科</span>
+        <p>第一页候选人</p>
+        <button>打招呼</button>
+      </article>
+    </main>
+  `, { url: "https://www.zhipin.com/web/geek/recommend" });
+  giveCardsLayout(dom);
+  const collector = loadCollectorForDom(dom);
+  const boss = collector.platforms.find((platform) => platform.id === "boss");
+  const first = await collector.collectCards(boss, false, {});
+  assert.strictEqual(first.cards.length, 1);
+  assert.strictEqual(first.cards[0].platform_uid, "boss:page-a");
+
+  const staleNode = dom.window.document.querySelector(".candidate-card");
+  staleNode.remove();
+  assert.strictEqual(collector.extractCardPayload(staleNode, boss).platform_uid, "boss:page-a");
+
+  dom.window.document.querySelector("main").innerHTML = `
+    <article class="candidate-card" data-geek-id="page-b">
+      <strong class="name">页面乙</strong>
+      <span class="salary">35K-55K</span>
+      <span class="experience">6年经验</span>
+      <span class="education">硕士</span>
+      <p>第二页候选人</p>
+      <button>打招呼</button>
+    </article>
+  `;
+  giveCardsLayout(dom);
+  const second = await collector.collectCards(boss, false, {});
+  assert.strictEqual(second.cards.length, 1);
+  assert.strictEqual(second.cards[0].platform_uid, "boss:page-b");
+  assert.strictEqual(second.cards[0].name, "页面乙");
+  assert(!second.cards.some((card) => card.platform_uid === "boss:page-a"));
+
+  const reused = dom.window.document.querySelector(".candidate-card");
+  reused.setAttribute("data-geek-id", "page-c");
+  reused.querySelector(".name").textContent = "页面丙";
+  reused.querySelector(".salary").textContent = "40K-60K";
+  reused.querySelector(".experience").textContent = "7年经验";
+  reused.querySelector(".education").textContent = "博士";
+  const third = await collector.collectCards(boss, false, {});
+  assert.strictEqual(third.cards.length, 1);
+  assert.strictEqual(third.cards[0].platform_uid, "boss:page-c");
+  assert.strictEqual(third.cards[0].name, "页面丙");
+}
+
+async function testCollectorExtractsBossCurrentDetailSafely() {
+  const dom = new JSDOM(`
+    <main>
+      <section class="candidate-detail" data-geek-id="detail-alpha">
+        <h2 class="name">详情测试甲</h2>
+        <span class="salary">45K-65K</span>
+        <span class="experience">8年经验</span>
+        <span class="education">本科</span>
+        <p>城市：上海</p>
+        <p>职能：技术</p>
+        <p>方向：策略平台</p>
+        <p class="summary">长期做策略平台 Python</p>
+        <span class="boss-local-rating-badge">1SSR</span>
+        <span class="boss-local-keyword-badge">关键词 2</span>
+        <button>打招呼</button>
+        <p>邮箱：safe@example.invalid</p>
+      </section>
+      <article class="candidate-card" data-geek-id="list-alpha">
+        <strong class="name">列表候选</strong>
+        <span class="salary">35K-45K</span>
+        <span class="experience">6年经验</span>
+        <span class="education">本科</span>
+        <button>打招呼</button>
+      </article>
+    </main>
+  `, { url: "https://www.zhipin.com/web/geek/recommend" });
+  giveCardsLayout(dom);
+  giveDetailLayout(dom);
+  const collector = loadCollectorForDom(dom);
+  const boss = collector.platforms.find((platform) => platform.id === "boss");
+  const result = collector.extractCurrentDetail(boss, { recruitmentTaskId: 11, jobProfileId: 22 });
+
+  assert.strictEqual(result.status, "capturable");
+  assert.strictEqual(result.detail.platform_uid, "boss:detail-alpha");
+  assert.strictEqual(result.detail.recruitment_task_id, 11);
+  assert.strictEqual(result.detail.job_profile_id, 22);
+  assert.strictEqual(result.detail.city, "上海");
+  assert.strictEqual(result.detail.years_experience, 8);
+  assert.strictEqual(result.detail.job_family, "技术");
+  assert.strictEqual(result.detail.job_track, "策略平台");
+  assert(result.detail.raw_card_text.includes("详情测试甲"));
+  assert(!result.detail.raw_card_text.includes("1SSR"));
+  assert(!result.detail.raw_card_text.includes("关键词 2"));
+  assert(!result.detail.raw_card_text.includes("打招呼"));
+  assert(!result.detail.raw_card_text.includes("safe@example.invalid"));
+}
+
+async function testCollectorExtractsLiepinCurrentDetail() {
+  const dom = new JSDOM(`
+    <main>
+      <section class="resume-detail" data-resume-id="resume-alpha">
+        <h2 class="name">详情测试乙</h2>
+        <span class="salary">35K-50K</span>
+        <span class="experience">6年经验</span>
+        <span class="education">硕士</span>
+        <p>城市：深圳</p>
+        <p>方向：数据工程</p>
+        <p>候选人长期负责数据平台建设</p>
+      </section>
+    </main>
+  `, { url: "https://lpt.liepin.com/recommend" });
+  giveDetailLayout(dom);
+  const collector = loadCollectorForDom(dom, "https://lpt.liepin.com/recommend");
+  const liepin = collector.platforms.find((platform) => platform.id === "liepin");
+  const result = collector.extractCurrentDetail(liepin, { recruitmentTaskId: 33, jobProfileId: 44 });
+
+  assert.strictEqual(result.status, "capturable");
+  assert.strictEqual(result.detail.platform_uid, "liepin:resume-alpha");
+  assert.strictEqual(result.detail.source_platform, "liepin");
+  assert.strictEqual(result.detail.city, "深圳");
+  assert.strictEqual(result.detail.job_track, "数据工程");
+}
+
+async function testCollectorDetailRejectsHiddenLoadingMultipleAndUnconfirmed() {
+  const hidden = new JSDOM(`
+    <main>
+      <section class="candidate-detail hidden-detail" data-geek-id="hidden-alpha" style="display:none">
+        <h2 class="name">隐藏详情</h2><p>45K-65K</p><p>8年经验</p><p>本科</p>
+      </section>
+    </main>
+  `, { url: "https://www.zhipin.com/web/geek/recommend" });
+  giveDetailLayout(hidden);
+  let collector = loadCollectorForDom(hidden);
+  let boss = collector.platforms.find((platform) => platform.id === "boss");
+  assert.strictEqual(collector.extractCurrentDetail(boss, {}).status, "not_opened");
+
+  const loading = new JSDOM(`
+    <main>
+      <section class="candidate-detail loading-detail" data-geek-id="loading-alpha">
+        <p>加载中</p><p>45K-65K</p><p>8年经验</p><p>本科</p>
+      </section>
+    </main>
+  `, { url: "https://www.zhipin.com/web/geek/recommend" });
+  giveDetailLayout(loading);
+  collector = loadCollectorForDom(loading);
+  boss = collector.platforms.find((platform) => platform.id === "boss");
+  assert.strictEqual(collector.extractCurrentDetail(boss, {}).status, "not_opened");
+
+  const multiple = new JSDOM(`
+    <main>
+      <section class="candidate-detail" data-geek-id="multi-a"><h2 class="name">多详情甲</h2><p>45K-65K</p><p>8年经验</p><p>本科</p><p>策略平台</p></section>
+      <section class="candidate-detail" data-geek-id="multi-b"><h2 class="name">多详情乙</h2><p>35K-50K</p><p>6年经验</p><p>硕士</p><p>数据平台</p></section>
+    </main>
+  `, { url: "https://www.zhipin.com/web/geek/recommend" });
+  giveDetailLayout(multiple);
+  collector = loadCollectorForDom(multiple);
+  boss = collector.platforms.find((platform) => platform.id === "boss");
+  assert.strictEqual(collector.extractCurrentDetail(boss, {}).status, "ambiguous");
+
+  const unconfirmed = new JSDOM(`
+    <main>
+      <section class="candidate-detail"><h2 class="name">无身份详情</h2><p>45K-65K</p><p>8年经验</p><p>本科</p><p>策略平台</p></section>
+    </main>
+  `, { url: "https://www.zhipin.com/web/geek/recommend" });
+  giveDetailLayout(unconfirmed);
+  collector = loadCollectorForDom(unconfirmed);
+  boss = collector.platforms.find((platform) => platform.id === "boss");
+  assert.strictEqual(collector.extractCurrentDetail(boss, {}).status, "unconfirmed");
+}
+
+async function testCollectorDetailUsesFreshDomAfterCandidateSwitchAndClose() {
+  const dom = new JSDOM(`
+    <main>
+      <section class="candidate-detail" data-geek-id="detail-a">
+        <h2 class="name">详情甲</h2><p>45K-65K</p><p>8年经验</p><p>本科</p><p>策略平台</p>
+      </section>
+    </main>
+  `, { url: "https://www.zhipin.com/web/geek/recommend" });
+  giveDetailLayout(dom);
+  const collector = loadCollectorForDom(dom);
+  const boss = collector.platforms.find((platform) => platform.id === "boss");
+  const first = collector.extractCurrentDetail(boss, {});
+  assert.strictEqual(first.detail.platform_uid, "boss:detail-a");
+
+  dom.window.document.querySelector("main").innerHTML = `
+    <section class="candidate-detail" data-geek-id="detail-b">
+      <h2 class="name">详情乙</h2><p>35K-50K</p><p>6年经验</p><p>硕士</p><p>数据平台</p>
+    </section>
+  `;
+  giveDetailLayout(dom);
+  const second = collector.extractCurrentDetail(boss, {});
+  assert.strictEqual(second.detail.platform_uid, "boss:detail-b");
+  assert(!second.detail.raw_card_text.includes("详情甲"));
+
+  dom.window.document.querySelector(".candidate-detail").remove();
+  const closed = collector.extractCurrentDetail(boss, {});
+  assert.strictEqual(closed.status, "not_opened");
+}
+
+async function testPopupCurrentDetailEnrichmentPostsSafePayloadInWebModeOnly() {
+  const frameResults = [{ result: {
+    status: "capturable",
+    detail: {
+      source_platform: "boss",
+      platform_uid: "boss:detail-alpha",
+      recruitment_task_id: 11,
+      job_profile_id: 22,
+      raw_card_text: "详情测试甲\n长期做策略平台",
+      summary_text: "长期做策略平台",
+    },
+  } }];
+  const fetchCalls = [];
+  const popup = createPopupTestContext({
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "web-token",
+    connectionMode: "web",
+    runtimeHandler: createPopupWebRuntimeHandler(),
+    fetchImpl: async (url, requestOptions = {}) => {
+      fetchCalls.push({ url: String(url), options: requestOptions });
+      if (String(url).endsWith("/api/plugin/context")) {
+        return {
+          ok: true,
+          json: async () => ({
+            recruitment_task_id: 11,
+            job_profile_id: 22,
+            job_profile_version: 3,
+            job_title: "量化研究员",
+            task_status: "running",
+          }),
+        };
+      }
+      if (String(url).endsWith("/api/plugin/candidate-detail/enrich")) {
+        return { ok: true, json: async () => ({ status: "updated", updated_fields: ["summary_text"] }) };
+      }
+      throw new Error(`unexpected fetch ${String(url)}`);
+    },
+  });
+  popup.chrome.scripting.executeScript = async (details) => {
+    if (details.files) return [{ result: true }];
+    return frameResults;
+  };
+
+  await popup.api.init();
+  await popup.api.runCurrentDetailEnrichment();
+
+  const enrichCalls = fetchCalls.filter((call) => call.url.endsWith("/api/plugin/candidate-detail/enrich"));
+  assert.strictEqual(enrichCalls.length, 1);
+  assert.strictEqual(enrichCalls[0].options.headers["X-Boss-Local-Token"], "web-token");
+  assert(!enrichCalls[0].url.includes("web-token"));
+  const body = JSON.parse(enrichCalls[0].options.body);
+  assert.strictEqual(body.platform_uid, "boss:detail-alpha");
+  assert(!("name" in body));
+  assert(popup.elements.status.textContent.includes("已安全更新"));
+
+  const desktop = createPopupTestContext({
+    apiBase: "http://127.0.0.1:19001",
+    apiToken: "desktop-token",
+    connectionMode: "desktop",
+    runtimeHandler: createPopupWebRuntimeHandler(),
+    fetchImpl: async () => {
+      throw new Error("desktop mode must not fetch");
+    },
+  });
+  await desktop.api.init();
+  await desktop.api.runCurrentDetailEnrichment();
+  assert(desktop.elements.status.textContent.includes("仅支持网页工作台模式"));
+}
+
+async function testPopupCurrentDetailEnrichmentRejectsUnconfirmedAndAllowsRetryAfterFailure() {
+  let frameStatus = "unconfirmed";
+  let failWrite = true;
+  let enrichCount = 0;
+  const popup = createPopupTestContext({
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "web-token",
+    connectionMode: "web",
+    runtimeHandler: createPopupWebRuntimeHandler(),
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/api/plugin/context")) {
+        return {
+          ok: true,
+          json: async () => ({
+            recruitment_task_id: 11,
+            job_profile_id: 22,
+            job_profile_version: 3,
+            job_title: "量化研究员",
+            task_status: "running",
+          }),
+        };
+      }
+      if (String(url).endsWith("/api/plugin/candidate-detail/enrich")) {
+        enrichCount += 1;
+        if (failWrite) {
+          return { ok: false, json: async () => ({ error: { message: "无法确认当前详情对应的候选人。" } }) };
+        }
+        return { ok: true, json: async () => ({ status: "unchanged" }) };
+      }
+      throw new Error(`unexpected fetch ${String(url)}`);
+    },
+  });
+  popup.chrome.scripting.executeScript = async (details) => {
+    if (details.files) return [{ result: true }];
+    if (frameStatus === "unconfirmed") {
+      return [{ result: { status: "unconfirmed", detail: null } }];
+    }
+    return [{ result: { status: "capturable", detail: { source_platform: "boss", platform_uid: "boss:retry", raw_card_text: "安全详情" } } }];
+  };
+
+  await popup.api.init();
+  await popup.api.runCurrentDetailEnrichment();
+  assert.strictEqual(enrichCount, 0);
+  assert(popup.elements.status.textContent.includes("当前页面暂不支持安全详情关联"));
+
+  frameStatus = "capturable";
+  await popup.api.runCurrentDetailEnrichment();
+  assert.strictEqual(enrichCount, 1);
+  assert(popup.elements.status.textContent.includes("采集当前详情失败"));
+
+  failWrite = false;
+  await popup.api.runCurrentDetailEnrichment();
+  assert.strictEqual(enrichCount, 2);
+  assert(popup.elements.status.textContent.includes("没有新的可更新信息"));
+}
+
 async function testWebIntakeStatusMatrixFollowsServerStatus() {
   const popup = createPopupTestContext({ apiBase: "http://127.0.0.1:17864", apiToken: "web-token" });
-  const settings = { apiBase: "http://127.0.0.1:17864", apiToken: "web-token", jobTitle: "Boss ????" };
+  const settings = { apiBase: "http://127.0.0.1:17864", apiToken: "web-token", jobTitle: "Boss 测试岗位" };
   const runStatus = async (status) => {
     const queued = await popup.context.BossLocalWebIntake.queueCapturedBatch({
       settings,
@@ -3376,7 +4178,16 @@ async function testLegacyWarningRemainsVisibleAlongsideCurrentWaitingRetry() {
   let fetchCount = 0;
   const popup = createPopupTestContext({
     store: sharedStore,
-    fetchImpl: async () => {
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/api/plugin/context")) {
+        return {
+          ok: false,
+          status: 409,
+          async json() {
+            return { error: { code: "context_unavailable", message: "当前未选择可用招聘任务。" } };
+          },
+        };
+      }
       fetchCount += 1;
       return {
         ok: true,
@@ -3556,6 +4367,558 @@ async function testLegacyWarningDisappearsAfterSwitchingBackAndMigrating() {
   assert.strictEqual(sharedStore[popup.context.BossLocalWebIntake.LEGACY_STATE_KEY], undefined);
 }
 
+async function testPopupWebModeRefreshesSearchableRatingBadges() {
+  const inserted = [];
+  const removed = [];
+  function makeCard(rawUid, label) {
+    const nameNode = {
+      innerText: label,
+      textContent: label,
+      insertAdjacentElement(_position, node) {
+        inserted.push(node);
+      },
+    };
+    return {
+      getAttribute(name) {
+        return name === "data-geek-id" ? rawUid : "";
+      },
+      querySelector(selector) {
+        if (String(selector).includes("href")) {
+          return { href: `https://www.zhipin.com/candidate/${rawUid}` };
+        }
+        return nameNode;
+      },
+    };
+  }
+  const cards = {
+    alice: makeCard("alice", "Alice"),
+    bob: makeCard("bob", "Bob"),
+  };
+  const fakeDocument = {
+    querySelectorAll(selector) {
+      if (String(selector).includes(".boss-local-rating-badge")) {
+        return inserted.slice();
+      }
+      return [cards.alice, cards.bob];
+    },
+    createElement() {
+      return {
+        className: "",
+        textContent: "",
+        style: {},
+        setAttribute(name, value) {
+          this[name] = value;
+        },
+        remove() {
+          removed.push(this);
+          const index = inserted.indexOf(this);
+          if (index >= 0) inserted.splice(index, 1);
+        },
+      };
+    },
+  };
+  const badgeFetches = [];
+  const popup = createPopupTestContext({
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "web-token",
+    connectionMode: "web",
+    fetchImpl: async (url, requestOptions = {}) => {
+      badgeFetches.push({ url: String(url), headers: requestOptions.headers || {} });
+      return {
+        ok: true,
+        json: async () => ({
+          task_id: 11,
+          badges: [
+            {
+              source_platform: "boss",
+              platform_uid: "boss:alice",
+              rating: "SR",
+              badge_text: "1SR",
+            },
+            {
+              source_platform: "boss",
+              platform_uid: "boss:bob",
+              rating: "SR",
+              badge_text: "1SR",
+            },
+          ],
+        }),
+      };
+    },
+  });
+  popup.chrome.scripting.executeScript = async (details) => {
+    const previousDocument = global.document;
+    const previousVmDocument = popup.context.document;
+    global.document = fakeDocument;
+    popup.context.document = fakeDocument;
+    try {
+      details.func(...(details.args || []));
+    } finally {
+      global.document = previousDocument;
+      popup.context.document = previousVmDocument;
+    }
+    return [{ result: true }];
+  };
+
+  await popup.api.refreshRatingBadges(7, {
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "web-token",
+    connectionMode: "web",
+  });
+  assert.strictEqual(badgeFetches[0].url, "http://127.0.0.1:17864/api/plugin/ratings/badges");
+  assert.strictEqual(badgeFetches[0].headers["X-Boss-Local-Token"], "web-token");
+  assert(!badgeFetches[0].url.includes("web-token"));
+  assert.strictEqual(inserted.length, 2);
+  assert.deepStrictEqual(inserted.map((node) => node.textContent), ["1SR", "1SR"]);
+  await popup.api.refreshRatingBadges(7, {
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "web-token",
+    connectionMode: "web",
+  });
+  assert.strictEqual(inserted.length, 2);
+  assert.deepStrictEqual(inserted.map((node) => node.textContent), ["1SR", "1SR"]);
+  assert(removed.length >= 2);
+}
+
+async function testPopupRatingBadgesIgnoreGenericDataId() {
+  const inserted = [];
+  const card = {
+    getAttribute(name) {
+      return name === "data-id" ? "shared-data-id" : "";
+    },
+    querySelector() {
+      return {
+        insertAdjacentElement(_position, node) {
+          inserted.push(node);
+        },
+      };
+    },
+  };
+  const fakeDocument = {
+    querySelectorAll(selector) {
+      if (String(selector).includes(".boss-local-rating-badge")) return [];
+      return [card];
+    },
+    createElement() {
+      return {
+        textContent: "",
+        style: {},
+        setAttribute() {},
+      };
+    },
+  };
+  const popup = createPopupTestContext({
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "web-token",
+    connectionMode: "web",
+    fetchImpl: async () => ({
+      ok: true,
+      json: async () => ({
+        badges: [{ platform_uid: "shared-data-id", rating: "SSR", badge_text: "1SSR" }],
+      }),
+    }),
+  });
+  popup.chrome.scripting.executeScript = async (details) => {
+    const previousDocument = global.document;
+    const previousVmDocument = popup.context.document;
+    global.document = fakeDocument;
+    popup.context.document = fakeDocument;
+    try {
+      details.func(...(details.args || []));
+    } finally {
+      global.document = previousDocument;
+      popup.context.document = previousVmDocument;
+    }
+    return [{ result: true }];
+  };
+
+  await popup.api.refreshRatingBadges(7, {
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "web-token",
+    connectionMode: "web",
+  });
+
+  assert.strictEqual(inserted.length, 0);
+}
+
+async function testPopupRatingBadgesIgnoreRowsWithoutStableIdentity() {
+  const inserted = [];
+  const card = {
+    getAttribute(name) {
+      return name === "data-geek-id" ? "boss:alice" : "";
+    },
+    querySelector() {
+      return {
+        insertAdjacentElement(_position, node) {
+          inserted.push(node);
+        },
+      };
+    },
+  };
+  const fakeDocument = {
+    querySelectorAll(selector) {
+      if (String(selector).includes(".boss-local-rating-badge")) return [];
+      return [card];
+    },
+    createElement() {
+      return {
+        textContent: "",
+        style: {},
+        setAttribute() {},
+      };
+    },
+  };
+  const popup = createPopupTestContext({
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "web-token",
+    connectionMode: "web",
+    fetchImpl: async () => ({
+      ok: true,
+      json: async () => ({
+        badges: [{ candidate_id: 1, rating: "SSR", badge_text: "1SSR" }],
+      }),
+    }),
+  });
+  popup.chrome.scripting.executeScript = async (details) => {
+    const previousDocument = global.document;
+    const previousVmDocument = popup.context.document;
+    global.document = fakeDocument;
+    popup.context.document = fakeDocument;
+    try {
+      details.func(...(details.args || []));
+    } finally {
+      global.document = previousDocument;
+      popup.context.document = previousVmDocument;
+    }
+    return [{ result: true }];
+  };
+
+  await popup.api.refreshRatingBadges(7, {
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "web-token",
+    connectionMode: "web",
+  });
+
+  assert.strictEqual(inserted.length, 0);
+}
+
+async function testPopupRatingBadgesDoNotCanonicalizeUnknownPlatform() {
+  const inserted = [];
+  const card = {
+    getAttribute(name) {
+      return name === "data-geek-id" ? "alice" : "";
+    },
+    querySelector() {
+      return {
+        insertAdjacentElement(_position, node) {
+          inserted.push(node);
+        },
+      };
+    },
+  };
+  const fakeDocument = {
+    querySelectorAll(selector) {
+      if (String(selector).includes(".boss-local-rating-badge")) return [];
+      return [card];
+    },
+    createElement() {
+      return {
+        textContent: "",
+        style: {},
+        setAttribute() {},
+      };
+    },
+  };
+  const popup = createPopupTestContext({
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "web-token",
+    connectionMode: "web",
+    fetchImpl: async () => ({
+      ok: true,
+      json: async () => ({
+        badges: [{ source_platform: "unknown", platform_uid: "unknown:alice", rating: "SSR", badge_text: "1SSR" }],
+      }),
+    }),
+  });
+  popup.chrome.scripting.executeScript = async (details) => {
+    const previousDocument = global.document;
+    const previousVmDocument = popup.context.document;
+    global.document = fakeDocument;
+    popup.context.document = fakeDocument;
+    try {
+      details.func(...(details.args || []));
+    } finally {
+      global.document = previousDocument;
+      popup.context.document = previousVmDocument;
+    }
+    return [{ result: true }];
+  };
+
+  await popup.api.refreshRatingBadges(7, {
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "web-token",
+    connectionMode: "web",
+  });
+
+  assert.strictEqual(inserted.length, 0);
+}
+
+async function testPopupDesktopModeDoesNotRequestRatingBadgesAndClearsOldBadges() {
+  let fetchCount = 0;
+  let clearCount = 0;
+  const popup = createPopupTestContext({
+    apiBase: "http://127.0.0.1:19001",
+    apiToken: "desktop-token",
+    connectionMode: "desktop",
+    fetchImpl: async () => {
+      fetchCount += 1;
+      throw new Error("badge fetch should not happen");
+    },
+  });
+  popup.chrome.scripting.executeScript = async (details) => {
+    if (details.func && !details.args) {
+      clearCount += 1;
+    }
+    return [{ result: true }];
+  };
+
+  await popup.api.refreshRatingBadges(7, {
+    apiBase: "http://127.0.0.1:19001",
+    apiToken: "desktop-token",
+    connectionMode: "desktop",
+  });
+  assert.strictEqual(fetchCount, 0);
+  assert.strictEqual(clearCount, 1);
+}
+
+function createKeywordHighlightDom() {
+  const dom = new JSDOM(`
+    <!doctype html>
+    <html>
+      <head></head>
+      <body>
+        <main id="feed">
+          <article class="candidate-card" data-name="class-token" style="display:flex">
+            <span class="boss-local-rating-badge">1SSR</span>
+            <span class="name" data-source="class-value">Alice Python 外包 React class</span>
+            <a class="profile-link" href="https://example.test/class">候选人详情</a>
+            <button type="button">Python button</button>
+            <span hidden>hidden</span>
+            <span aria-hidden="true">hidden</span>
+            <span style="display:none">hidden</span>
+            <span style="visibility:hidden">hidden</span>
+          </article>
+          <article class="candidate-card unmatched-card" style="display:grid">
+            <span class="boss-local-rating-badge">1SSR</span>
+            <span class="name">Bob 普通候选人</span>
+            <button type="button">Python button</button>
+            <span hidden>class hidden</span>
+          </article>
+          <article class="candidate-card block-card" style="display:block">
+            <span class="name">Carol 未命中</span>
+          </article>
+        </main>
+      </body>
+    </html>
+  `);
+  return {
+    document: dom.window.document,
+    window: dom.window,
+    card: dom.window.document.querySelector(".candidate-card"),
+    unmatchedCard: dom.window.document.querySelector(".unmatched-card"),
+    blockCard: dom.window.document.querySelector(".block-card"),
+  };
+}
+
+function installKeywordDomExecutor(popup, dom, onExecute = () => {}) {
+  popup.chrome.scripting.executeScript = async (details) => {
+    onExecute(details);
+    const previousDocument = global.document;
+    const previousVmDocument = popup.context.document;
+    const previousGetComputedStyle = global.getComputedStyle;
+    const previousVmGetComputedStyle = popup.context.getComputedStyle;
+    global.document = dom.document;
+    popup.context.document = dom.document;
+    global.getComputedStyle = dom.window.getComputedStyle.bind(dom.window);
+    popup.context.getComputedStyle = dom.window.getComputedStyle.bind(dom.window);
+    try {
+      details.func(...(details.args || []));
+    } finally {
+      global.document = previousDocument;
+      popup.context.document = previousVmDocument;
+      global.getComputedStyle = previousGetComputedStyle;
+      popup.context.getComputedStyle = previousVmGetComputedStyle;
+    }
+    return [{ result: true }];
+  };
+}
+
+async function testPopupWebModeRefreshesKeywordHighlights() {
+  const dom = createKeywordHighlightDom();
+  const keywordFetches = [];
+  const popup = createPopupTestContext({
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "web-token",
+    connectionMode: "web",
+    fetchImpl: async (url, requestOptions = {}) => {
+      keywordFetches.push({ url: String(url), headers: requestOptions.headers || {} });
+      return {
+        ok: true,
+        json: async () => ({
+          task_id: 11,
+          keyword_rules: {
+            must: ["python", "class", "SSR", "hidden"],
+            plus: ["React"],
+            risk: ["外包"],
+            note: [],
+          },
+        }),
+      };
+    },
+  });
+  installKeywordDomExecutor(popup, dom);
+
+  await popup.api.refreshKeywordHighlights(7, {
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "web-token",
+    connectionMode: "web",
+  });
+
+  assert.strictEqual(keywordFetches[0].url, "http://127.0.0.1:17864/api/plugin/keyword-rules");
+  assert.strictEqual(keywordFetches[0].headers["X-Boss-Local-Token"], "web-token");
+  assert(!keywordFetches[0].url.includes("web-token"));
+  assert.strictEqual(dom.card.querySelectorAll(".boss-local-rating-badge").length, 1);
+  assert.strictEqual(dom.card.querySelector(".boss-local-rating-badge").textContent, "1SSR");
+  assert.strictEqual(dom.card.querySelectorAll(".boss-local-keyword-highlight.must").length, 2);
+  assert.strictEqual(dom.card.querySelectorAll(".boss-local-keyword-highlight.plus").length, 1);
+  assert.strictEqual(dom.card.querySelectorAll(".boss-local-keyword-highlight.risk").length, 1);
+  assert.strictEqual(dom.card.querySelector(".boss-local-keyword-badge").textContent, "风险 1");
+  assert.strictEqual(dom.document.querySelectorAll(".boss-local-keyword-filterbar").length, 1);
+  assert.strictEqual(dom.unmatchedCard.querySelectorAll(".boss-local-keyword-highlight").length, 0);
+  assert.strictEqual(dom.unmatchedCard.getAttribute("data-boss-local-keyword-groups"), null);
+  assert.strictEqual(dom.blockCard.querySelectorAll(".boss-local-keyword-highlight").length, 0);
+  assert.strictEqual(dom.card.getAttribute("data-name"), "class-token");
+  assert.strictEqual(dom.card.querySelector(".name").getAttribute("data-source"), "class-value");
+  assert.strictEqual(dom.card.querySelector(".profile-link").getAttribute("href"), "https://example.test/class");
+  assert.strictEqual(dom.card.querySelector("button .boss-local-keyword-highlight"), null);
+  assert.strictEqual(dom.card.textContent.includes("hidden"), true);
+
+  await popup.api.refreshKeywordHighlights(7, {
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "web-token",
+    connectionMode: "web",
+  });
+  assert.strictEqual(dom.card.querySelectorAll(".boss-local-keyword-highlight").length, 4);
+  assert.strictEqual(dom.document.querySelectorAll(".boss-local-keyword-filterbar").length, 1);
+  assert.strictEqual(dom.card.querySelectorAll(".boss-local-keyword-badge").length, 2);
+  assert.strictEqual(dom.unmatchedCard.querySelectorAll(".boss-local-keyword-highlight").length, 0);
+
+  const mustButton = Array.from(dom.document.querySelectorAll(".boss-local-keyword-filterbar button"))
+    .find((button) => button.textContent === "有必须");
+  const allButton = Array.from(dom.document.querySelectorAll(".boss-local-keyword-filterbar button"))
+    .find((button) => button.textContent === "全部");
+  mustButton.click();
+  assert.strictEqual(dom.card.style.display, "flex");
+  assert.strictEqual(dom.unmatchedCard.style.display, "none");
+  assert.strictEqual(dom.blockCard.style.display, "none");
+  allButton.click();
+  assert.strictEqual(dom.card.style.display, "flex");
+  assert.strictEqual(dom.unmatchedCard.style.display, "grid");
+  assert.strictEqual(dom.blockCard.style.display, "block");
+
+  dom.card.querySelector(".boss-local-rating-badge").textContent = "1SR";
+  await popup.api.refreshKeywordHighlights(7, {
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "web-token",
+    connectionMode: "web",
+  });
+  assert.strictEqual(dom.card.querySelector(".boss-local-rating-badge").textContent, "1SR");
+  await popup.api.clearKeywordHighlights(7);
+  assert.strictEqual(dom.card.querySelectorAll(".boss-local-keyword-highlight").length, 0);
+  assert.strictEqual(dom.card.querySelectorAll(".boss-local-keyword-badge").length, 0);
+  assert.strictEqual(dom.document.querySelectorAll(".boss-local-keyword-filterbar").length, 0);
+  assert.strictEqual(dom.card.querySelector(".boss-local-rating-badge").textContent, "1SR");
+  assert.strictEqual(dom.card.getAttribute("data-name"), "class-token");
+  assert.strictEqual(dom.card.style.display, "flex");
+  assert.strictEqual(dom.unmatchedCard.style.display, "grid");
+  assert.strictEqual(dom.blockCard.style.display, "block");
+}
+
+async function testPopupKeywordHighlightsClearOnFailureAndDesktopMode() {
+  const dom = createKeywordHighlightDom();
+  let fetchCount = 0;
+  let executeCount = 0;
+  let failFetch = false;
+  const popup = createPopupTestContext({
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "web-token",
+    connectionMode: "web",
+    fetchImpl: async () => {
+      fetchCount += 1;
+      if (failFetch) return { ok: false, json: async () => ({}) };
+      return {
+        ok: true,
+        json: async () => ({
+          keyword_rules: { must: ["Python"], plus: [], risk: ["外包"], note: [] },
+        }),
+      };
+    },
+  });
+  installKeywordDomExecutor(popup, dom, () => {
+    executeCount += 1;
+  });
+
+  await popup.api.refreshKeywordHighlights(7, {
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "web-token",
+    connectionMode: "web",
+  });
+  assert.strictEqual(fetchCount, 1);
+  assert.strictEqual(executeCount, 1);
+  assert.strictEqual(dom.card.querySelectorAll(".boss-local-keyword-highlight").length, 2);
+  assert.strictEqual(dom.card.querySelector(".boss-local-rating-badge").textContent, "1SSR");
+  const riskButton = Array.from(dom.document.querySelectorAll(".boss-local-keyword-filterbar button"))
+    .find((button) => button.textContent === "有风险");
+  riskButton.click();
+  assert.strictEqual(dom.card.style.display, "flex");
+  assert.strictEqual(dom.unmatchedCard.style.display, "none");
+  assert.strictEqual(dom.blockCard.style.display, "none");
+
+  failFetch = true;
+  await popup.api.refreshKeywordHighlights(7, {
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "web-token",
+    connectionMode: "web",
+  });
+  assert.strictEqual(fetchCount, 2);
+  assert.strictEqual(dom.card.querySelectorAll(".boss-local-keyword-highlight").length, 0);
+  assert.strictEqual(dom.card.querySelector(".boss-local-rating-badge").textContent, "1SSR");
+  assert.strictEqual(dom.card.style.display, "flex");
+  assert.strictEqual(dom.unmatchedCard.style.display, "grid");
+  assert.strictEqual(dom.blockCard.style.display, "block");
+
+  failFetch = false;
+  await popup.api.refreshKeywordHighlights(7, {
+    apiBase: "http://127.0.0.1:17864",
+    apiToken: "web-token",
+    connectionMode: "web",
+  });
+  const restoredRiskButton = Array.from(dom.document.querySelectorAll(".boss-local-keyword-filterbar button"))
+    .find((button) => button.textContent === "有风险");
+  restoredRiskButton.click();
+  await popup.api.refreshKeywordHighlights(7, {
+    apiBase: "http://127.0.0.1:19001",
+    apiToken: "desktop-token",
+    connectionMode: "desktop",
+  });
+  assert.strictEqual(fetchCount, 3);
+  assert.strictEqual(dom.card.querySelectorAll(".boss-local-keyword-highlight").length, 0);
+  assert.strictEqual(dom.card.querySelector(".boss-local-rating-badge").textContent, "1SSR");
+  assert.strictEqual(dom.card.style.display, "flex");
+  assert.strictEqual(dom.unmatchedCard.style.display, "grid");
+  assert.strictEqual(dom.blockCard.style.display, "block");
+}
+
 async function main() {
   await testDownloadEndpointValidation();
   await testStopGuardIgnoresStaleProgress();
@@ -3571,12 +4934,18 @@ async function main() {
   testBatchRequestSkipsAlreadyRequestedConversation();
   testPreviewToolbarDownloadDoesNotSaveHtmlPreviewPage();
   testCollectionSupportsBossAndLiepinAdapters();
+  await testCollectorExtractsBossCurrentDetailSafely();
+  await testCollectorExtractsLiepinCurrentDetail();
+  await testCollectorDetailRejectsHiddenLoadingMultipleAndUnconfirmed();
+  await testCollectorDetailUsesFreshDomAfterCandidateSwitchAndClose();
   testAutoScrollCanBePausedFromPopup();
   testAutomationAutoButtonStartsDesktopWorkflow();
   testChatAutomationIsOptIn();
+  testPopupClientFirstScreenKeepsCoreWebActionsVisibleAndLegacyFolded();
   testScrollWaitDefaultsToThirtyMillisecondsAndHasAdjusters();
   testHoldEndScrollStrategyIsDefault();
   testRuntimeFingerprintAndVersionAwareRunnerInjection();
+  testChatRunnerRuntimeLogsDoNotExposeRunToken();
   testPairingCodeParsesAndRejectsInvalidInput();
   testPopupSupportsPairingAndAuthenticatedConnectionCheck();
   await testPopupPairsWithSingleWebCodeAndRemembersConnection();
@@ -3585,6 +4954,7 @@ async function main() {
   await testPopupManualDesktopAdvancedSettingsOverrideWebMode();
   await testPopupPairingSuccessDoesNotReferenceCollectionVariables();
   await testPopupDesktopCustomPortRemainsDesktopMode();
+  await testPopupClearsOldTaskContextWhenNewConnectionContextFails();
   await testPopupWebModeCollectCurrentPostsDirectlyToWebIntake();
   await testPopupWebModeCollectAutoPostsDirectlyToWebIntake();
   await testPopupDesktopModeStillUsesDesktopImportOnly();
@@ -3604,6 +4974,15 @@ async function main() {
   await testLegacyWarningRemainsVisibleAlongsideCurrentCompleted();
   await testLegacyWarningRemainsVisibleAlongsideCurrentWaitingRetry();
   await testLegacyWarningDisappearsAfterSwitchingBackAndMigrating();
+  await testPopupWebModeRefreshesSearchableRatingBadges();
+  await testPopupRatingBadgesIgnoreGenericDataId();
+  await testPopupRatingBadgesIgnoreRowsWithoutStableIdentity();
+  await testPopupRatingBadgesDoNotCanonicalizeUnknownPlatform();
+  await testPopupDesktopModeDoesNotRequestRatingBadgesAndClearsOldBadges();
+  await testPopupWebModeRefreshesKeywordHighlights();
+  await testPopupKeywordHighlightsClearOnFailureAndDesktopMode();
+  await testPopupCurrentDetailEnrichmentPostsSafePayloadInWebModeOnly();
+  await testPopupCurrentDetailEnrichmentRejectsUnconfirmedAndAllowsRetryAfterFailure();
   await testPendingLimitConcurrentEnqueueStaysWithinTen();
   await testWebIntakeSuccessSanitizesCompletedPayload();
   await testCompletedTransitionScrubsSensitivePendingBeforeDelete();
@@ -3624,6 +5003,12 @@ async function main() {
   await testDesktopModeOpenWorkbenchShowsReadableChinesePrompt();
   await testConnectionModeKeepsWebAndDesktopStateIsolated();
   testCollectorDoesNotPromoteGenericDataIdToPlatformUid();
+  await testCollectorAcceptsBossAndLiepinStableCardsOnly();
+  await testCollectorDedupesByStableUidButKeepsSameNameDifferentUid();
+  await testCollectorFindsBossStableUidBeyondCardRoot();
+  await testCollectorTreatsBossStableUidAmbiguityAsMissingIdentity();
+  await testCollectorRawCardTextIgnoresPluginBadgesAndKeywordMarkup();
+  await testCollectorIgnoresDetachedNodesAndUsesFreshDomSnapshots();
   await testWebIntakeStatusMatrixFollowsServerStatus();
   await testPopupWebModeAutoShowsDesktopOnlyBoundary();
   await testPopupReopenRestoresWebBatchMarkdownExport();

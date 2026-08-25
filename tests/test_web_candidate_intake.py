@@ -225,6 +225,103 @@ class CandidateIntakeWebApiTest(unittest.TestCase):
         self.assertEqual(first.json()["inserted_candidates"], 1)
         self.assertEqual(second.json()["updated_candidates"], 1)
 
+    def test_candidate_intake_keeps_same_name_different_stable_uid_separate(self) -> None:
+        first = self.client.post(
+            "/api/intake/candidates",
+            json={
+                "source_platform": "boss",
+                "source_job_title": "Boss 推荐",
+                "idempotency_key": "same-name-uid-a",
+                "candidates": [
+                    {
+                        "name": "测试同名",
+                        "platform_uid": "boss:same-name-a",
+                        "source_candidate_id": "same-name-a",
+                        "raw_card_text": "测试同名 A\n30K-45K\n5年经验\n本科",
+                    }
+                ],
+            },
+            headers=self._headers(),
+        )
+        second = self.client.post(
+            "/api/intake/candidates",
+            json={
+                "source_platform": "boss",
+                "source_job_title": "Boss 推荐",
+                "idempotency_key": "same-name-uid-b",
+                "candidates": [
+                    {
+                        "name": "测试同名",
+                        "platform_uid": "boss:same-name-b",
+                        "source_candidate_id": "same-name-b",
+                        "raw_card_text": "测试同名 B\n35K-55K\n6年经验\n硕士",
+                    }
+                ],
+            },
+            headers=self._headers(),
+        )
+
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(second.status_code, 200, second.text)
+        self.assertEqual(first.json()["inserted_candidates"], 1)
+        self.assertEqual(second.json()["inserted_candidates"], 1)
+        candidates = self.client.get("/api/candidates?keyword=测试同名&page=1&page_size=100")
+        self.assertEqual(candidates.status_code, 200, candidates.text)
+        rows = candidates.json()["rows"]
+        self.assertEqual(len(rows), 2)
+        self.assertEqual({row["name"] for row in rows}, {"测试同名"})
+
+    def test_candidate_intake_same_stable_uid_updates_without_plugin_snapshot_pollution(self) -> None:
+        first = self.client.post(
+            "/api/intake/candidates",
+            json={
+                "source_platform": "boss",
+                "source_job_title": "Boss 推荐",
+                "idempotency_key": "stable-update-a",
+                "candidates": [
+                    {
+                        "name": "测试更新",
+                        "platform_uid": "stable-update",
+                        "source_candidate_id": "stable-update",
+                        "raw_card_text": "测试更新\n30K-45K\nPython\n5年经验\n本科",
+                    }
+                ],
+            },
+            headers=self._headers(),
+        )
+        second = self.client.post(
+            "/api/intake/candidates",
+            json={
+                "source_platform": "boss",
+                "source_job_title": "Boss 推荐",
+                "idempotency_key": "stable-update-b",
+                "candidates": [
+                    {
+                        "name": "测试更新",
+                        "platform_uid": "boss:stable-update",
+                        "source_candidate_id": "stable-update",
+                        "raw_card_text": "测试更新\n35K-50K\nPython\n6年经验\n本科",
+                    }
+                ],
+            },
+            headers=self._headers(),
+        )
+
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(second.status_code, 200, second.text)
+        self.assertEqual(first.json()["inserted_candidates"], 1)
+        self.assertEqual(second.json()["updated_candidates"], 1)
+        candidates = self.client.get("/api/candidates?keyword=测试更新&page=1&page_size=100")
+        rows = candidates.json()["rows"]
+        self.assertEqual(len(rows), 1)
+        detail = self.client.get(f"/api/candidates/{rows[0]['id']}")
+        self.assertEqual(detail.status_code, 200, detail.text)
+        latest_raw_card_text = detail.json()["latest_raw_card_text"]
+        self.assertIn("Python", latest_raw_card_text)
+        self.assertNotIn("1SSR", latest_raw_card_text)
+        self.assertNotIn("关键词 3", latest_raw_card_text)
+        self.assertNotIn("风险 1", latest_raw_card_text)
+
     def test_candidate_intake_keeps_prefixed_raw_source_id_separate_from_explicit_platform_uid(self) -> None:
         first = self.client.post(
             "/api/intake/candidates",
@@ -330,6 +427,7 @@ class CandidateIntakeWebApiTest(unittest.TestCase):
                 "latest_batch_id",
                 "latest_capture_time",
                 "latest_ingest_status",
+                "latest_rating",
                 "latest_batch_role_id",
                 "has_role_binding",
                 "batch_count",
@@ -387,6 +485,7 @@ class CandidateIntakeWebApiTest(unittest.TestCase):
                 "latest_batch_id",
                 "latest_capture_time",
                 "latest_ingest_status",
+                "latest_rating",
                 "latest_batch_role_id",
                 "has_role_binding",
                 "batch_count",

@@ -89,6 +89,29 @@
         line-height: 1.4;
       }
 
+      .popup-kicker {
+        margin: 0 0 6px;
+        color: #516071;
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      .section-title {
+        margin-top: 12px;
+        font-size: 13px;
+        font-weight: 700;
+        color: #182433;
+      }
+
+      .primary-action {
+        border: 1px solid #1d5fbf;
+        border-radius: 4px;
+        background: #2563eb;
+        color: white;
+        font-weight: 700;
+        cursor: pointer;
+      }
+
       #automationAuto {
         margin-top: 12px;
         padding: 12px;
@@ -135,72 +158,93 @@
     </style>
   </head>
   <body>
-    <label for="jobTitle">岗位名称</label>
-    <input id="jobTitle" type="text" placeholder="Boss 推荐牛人 / 猎聘推荐人才">
+    <p class="popup-kicker">网页工作台采集助手</p>
+    <div id="pluginContextStatus" class="status-box">当前未选择招聘任务；仍可进行无岗位采集。</div>
+    <div id="webIntakeStatus" class="status-box">网页入库：等待发送。</div>
 
+    <div class="section-title">连接网页工作台</div>
     <label for="pairingCode">工作台连接码</label>
     <input id="pairingCode" type="password" placeholder="粘贴网页工作台设置页生成的连接码">
-    <button id="applyPairingCode" type="button">连接并记住</button>
-    <div class="hint">Web 模式只需粘贴一次连接码；桌面端旧连接码仍可继续使用。</div>
+    <button id="applyPairingCode" type="button" class="primary-action">连接并记住</button>
+    <div class="hint">Web 模式只需粘贴一次连接码；成功后会自动记住连接状态。</div>
+
+    <div class="section-title">采集到当前任务</div>
+    <div class="triple-row" style="margin-top: 10px;">
+      <button id="collectCurrent" class="primary-action">采集当前已加载</button>
+      <button id="collectAuto">自动滚动采集</button>
+      <button id="pauseScroll">暂停滚动</button>
+    </div>
+    <div class="hint">推荐采集支持 Boss 推荐页和猎聘推荐页。自动滚动中点击“暂停滚动”，会停止继续滚动并导入已采集卡片。</div>
+
+    <button id="downloadCurrentBatch" type="button" disabled>导出本批次 Markdown</button>
+    <div class="hint">Web 模式使用网页工作台的统一 Markdown 导出；不会把 Token 放进 URL。</div>
+
+    <div class="row" style="margin-top: 8px;">
+      <button id="retryWebIntake" type="button">重新发送到网页工作台</button>
+      <button id="openWebWorkbench" type="button">打开网页工作台</button>
+    </div>
 
     <details class="advanced-settings" id="desktopAdvanced">
       <summary>桌面兼容模式 / 高级设置</summary>
+      <div class="hint">仅旧桌面流程需要手工设置。本轮网页试用默认使用上方连接码。</div>
+      <label for="jobTitle">岗位名称</label>
+      <input id="jobTitle" type="text" placeholder="Boss 推荐牛人 / 猎聘推荐人才">
+
       <label for="apiBase">本地接口地址</label>
       <input id="apiBase" type="text" value="http://127.0.0.1:17863">
 
       <label for="apiToken">本地接口 Token</label>
       <input id="apiToken" type="password" placeholder="桌面兼容模式手工设置">
+
+      <button id="automationAuto">AUTO：滚动采集 + AI 初筛</button>
+      <div class="hint">旧桌面兼容模式专用；网页工作台试用不在这里执行 AI 初筛。</div>
     </details>
 
-    <div class="row">
-      <div>
-        <label for="scrollMode">滚动策略</label>
-        <select id="scrollMode">
-          <option value="hold_end">长按 End 键到底</option>
-          <option value="end">单次 End 键</option>
-          <option value="page">整页滚动</option>
-          <option value="fixed">固定步长</option>
-        </select>
-      </div>
-      <div>
-        <label for="scrollStep">滚动步长</label>
-        <input id="scrollStep" type="number" value="900">
-      </div>
-    </div>
-
-    <div class="row">
-      <div>
-        <label for="scrollWaitMs">滚动等待毫秒</label>
-        <div class="wait-control">
-          <button id="scrollWaitDown" type="button">-30ms</button>
-          <input id="scrollWaitMs" type="number" min="0" step="30" value="30">
-          <button id="scrollWaitUp" type="button">+30ms</button>
+    <details class="advanced-settings" id="scrollAdvanced">
+      <summary>滚动采集参数</summary>
+      <div class="row">
+        <div>
+          <label for="scrollMode">滚动策略</label>
+          <select id="scrollMode">
+            <option value="hold_end">长按 End 键到底</option>
+            <option value="end">单次 End 键</option>
+            <option value="page">整页滚动</option>
+            <option value="fixed">固定步长</option>
+          </select>
+        </div>
+        <div>
+          <label for="scrollStep">滚动步长</label>
+          <input id="scrollStep" type="number" value="900">
         </div>
       </div>
-      <div>
-        <label for="maxScrollCount">最大滚动轮次</label>
-        <input id="maxScrollCount" type="number" value="80">
+
+      <div class="row">
+        <div>
+          <label for="scrollWaitMs">滚动等待毫秒</label>
+          <div class="wait-control">
+            <button id="scrollWaitDown" type="button">-30ms</button>
+            <input id="scrollWaitMs" type="number" min="0" step="30" value="30">
+            <button id="scrollWaitUp" type="button">+30ms</button>
+          </div>
+        </div>
+        <div>
+          <label for="maxScrollCount">最大滚动轮次</label>
+          <input id="maxScrollCount" type="number" value="80">
+        </div>
       </div>
-    </div>
 
-    <label for="noNewStopRounds">无新增停止轮次</label>
-    <input id="noNewStopRounds" type="number" value="4">
+      <label for="noNewStopRounds">无新增停止轮次</label>
+      <input id="noNewStopRounds" type="number" value="4">
+    </details>
 
-    <button id="automationAuto">AUTO：滚动采集 + AI 初筛</button>
-    <div class="hint">使用桌面端“自动化流程”页面已保存的筛选方案，一键滚动采集，导入后立即进行 AI 初筛。</div>
+    <details class="advanced-settings" id="detailEnrichmentAdvanced">
+      <summary>详情增强采集（试验入口）</summary>
+      <button id="captureCurrentDetail" type="button">采集当前详情</button>
+      <div class="hint">仅在当前详情页可以安全关联到已采集候选人时可用；无法确认时会提示“当前页面暂不支持安全详情关联。”</div>
+    </details>
 
-    <div class="triple-row" style="margin-top: 10px;">
-      <button id="collectCurrent">采集当前已加载</button>
-      <button id="collectAuto">自动滚动后采集</button>
-      <button id="pauseScroll">暂停滚动</button>
-    </div>
-
-    <button id="downloadCurrentBatch" type="button" disabled>导出本批次 Markdown</button>
-    <div class="hint">Web 模式导出 Markdown；桌面兼容模式继续使用原 CSV 导出链路。</div>
-
-    <div class="hint">推荐采集支持 Boss 推荐页和猎聘推荐页。自动滚动中点击“暂停滚动”，会停止继续滚动并导入已采集卡片。</div>
-
-    <div class="section">
+    <details class="advanced-settings" id="legacyChatAdvanced">
+      <summary>后续聊天与附件能力（默认关闭）</summary>
       <label for="resumeMessage">沟通请求话术</label>
       <textarea id="resumeMessage" placeholder="方便发一份你的简历过来吗？"></textarea>
 
@@ -228,9 +272,10 @@
       <button id="requestAndDownload" style="margin-top: 8px;">发送后等待并下载</button>
 
       <div class="hint">单会话功能只处理当前 Boss 聊天页里当前打开的会话。PDF 会下载到 Chrome 默认下载目录下的 <code>BossResumes/</code>。</div>
-    </div>
+    </details>
 
-    <div class="section">
+    <details class="advanced-settings" id="legacyBatchAdvanced">
+      <summary>旧批量聊天 / 附件任务</summary>
       <div class="triple-row">
         <button id="startBatchRequest">批量求简历</button>
         <button id="startBatchDownload">批量下载附件</button>
@@ -250,13 +295,8 @@
       <div id="batchStatus" class="status-box">批量任务：未启动。</div>
       <div class="hint">Runtime Log</div>
       <div id="batchLog" class="status-box">No runtime log yet.</div>
-    </div>
+    </details>
 
-    <div class="row" style="margin-top: 8px;">
-      <button id="retryWebIntake" type="button">重新发送到网页工作台</button>
-      <button id="openWebWorkbench" type="button">打开网页工作台</button>
-    </div>
-    <div id="webIntakeStatus" class="status-box">网页入库：等待发送。</div>
     <div id="status" class="status-box">就绪。</div>
 
     <script src="pairing.js"></script>

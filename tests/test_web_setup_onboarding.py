@@ -407,8 +407,9 @@ class SetupWorkbenchTest(unittest.TestCase):
         self.assertIn("[备份与恢复](docs/guides/backup-and-recovery.md)", readme)
         self.assertIn("[当前预览版本说明](docs/releases/current-preview.md)", readme)
         self.assertIn("<项目目录>", readme)
+        legacy_local_path = "D:" + r"\codex\BOSS-LOCAL-CAPTURE-review"
         for text in (readme, quick_start, backup, current_preview):
-            self.assertNotIn(r"D:\codex\BOSS-LOCAL-CAPTURE-review", text)
+            self.assertNotIn(legacy_local_path, text)
         self.assertIn("正式下载基准", current_preview)
         self.assertIn("GitHub `main`", current_preview)
         self.assertIn("M0 开始时的审计基线", current_preview)

@@ -65,12 +65,14 @@ const statusEl = document.getElementById("status");
 const batchStatusEl = document.getElementById("batchStatus");
 const batchLogEl = document.getElementById("batchLog");
 const webIntakeStatusEl = document.getElementById("webIntakeStatus");
+const pluginContextStatusEl = document.getElementById("pluginContextStatus");
 const automationAutoButton = document.getElementById("automationAuto");
 const pairingCodeInput = document.getElementById("pairingCode");
 const applyPairingCodeButton = document.getElementById("applyPairingCode");
 const downloadCurrentBatchButton = document.getElementById("downloadCurrentBatch");
 const retryWebIntakeButton = document.getElementById("retryWebIntake");
 const openWebWorkbenchButton = document.getElementById("openWebWorkbench");
+const captureCurrentDetailButton = document.getElementById("captureCurrentDetail");
 let batchStatusTimer = null;
 let activeJobProfileId = null;
 let activeRecruitmentTaskId = null;
@@ -90,6 +92,7 @@ document.getElementById("scrollWaitUp").addEventListener("click", () => adjustSc
 document.getElementById("collectCurrent").addEventListener("click", () => runCollection(false));
 document.getElementById("collectAuto").addEventListener("click", () => runCollection(true));
 document.getElementById("pauseScroll").addEventListener("click", () => requestScrollPause());
+captureCurrentDetailButton.addEventListener("click", () => runCurrentDetailEnrichment());
 document.getElementById("requestResume").addEventListener("click", () => runSingleChatAction("request_resume"));
 document.getElementById("downloadResume").addEventListener("click", () => runSingleChatAction("download_current_resume"));
 document.getElementById("requestAndDownload").addEventListener("click", () => runSingleChatAction("request_and_download"));
@@ -188,6 +191,7 @@ async function init() {
     await clearDesktopBatchDownloadState();
   }
   await refreshWebIntakeStatus(collectSettings(), { updateDownloadButton: false });
+  await refreshPluginContext(collectSettings());
   updateBatchDownloadButton();
   await refreshBatchStatus();
   batchStatusTimer = window.setInterval(() => {
@@ -312,6 +316,7 @@ async function applyPairingCodeAndTest() {
     });
     syncConnectionControls(verifiedSettings);
     updateBatchDownloadButton();
+    verifiedSettings = await refreshPluginContext(verifiedSettings);
     pairingCodeInput.value = "";
     const target = isWebWorkbenchMode(verifiedSettings) ? "网页工作台" : "桌面兼容模式";
     setStatus(`已连接${target}。\n服务地址：${fields.apiBase.value}\n连接已记住`);
@@ -423,6 +428,71 @@ async function refreshWebIntakeStatus(settingsOverride = null, options = {}) {
   }
 }
 
+async function refreshPluginContext(settingsOverride = null) {
+  const settings = settingsOverride ? { ...DEFAULTS, ...settingsOverride } : collectSettings();
+  async function clearContextIds(message) {
+    activeJobProfileId = null;
+    activeRecruitmentTaskId = null;
+    await chrome.storage.local.set({ jobProfileId: null, recruitmentTaskId: null });
+    pluginContextStatusEl.textContent = message;
+    return { ...settings, jobProfileId: null, recruitmentTaskId: null };
+  }
+  if (!isWebWorkbenchMode(settings)) {
+    activeJobProfileId = null;
+    activeRecruitmentTaskId = null;
+    await chrome.storage.local.set({ jobProfileId: null, recruitmentTaskId: null });
+    pluginContextStatusEl.textContent = "当前为桌面兼容模式，岗位上下文由桌面端自动化流程决定。";
+    return { ...settings, jobProfileId: null, recruitmentTaskId: null };
+  }
+  if (!settings.apiToken) {
+    return clearContextIds("当前未选择招聘任务；仍可进行无岗位采集。");
+  }
+
+  const apiBase = BossLocalWebIntake.deriveWebApiBase(settings);
+  await chrome.storage.local.set({ jobProfileId: null, recruitmentTaskId: null });
+  activeJobProfileId = null;
+  activeRecruitmentTaskId = null;
+  try {
+    const response = await fetch(`${apiBase}/api/plugin/context`, {
+      method: "GET",
+      headers: {
+        "X-Boss-Local-Token": settings.apiToken || "",
+      },
+    });
+    if (response.status === 409) {
+      return clearContextIds("上下文未确认，将按无岗位采集。");
+    }
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload?.error?.message || `网页工作台返回状态码 ${response.status}`);
+    }
+    activeJobProfileId = Number(payload.job_profile_id);
+    activeRecruitmentTaskId = Number(payload.recruitment_task_id);
+    fields.jobTitle.value = String(payload.job_title || settings.jobTitle || DEFAULTS.jobTitle);
+    const synced = {
+      ...settings,
+      jobTitle: fields.jobTitle.value,
+      jobProfileId: activeJobProfileId,
+      recruitmentTaskId: activeRecruitmentTaskId,
+    };
+    await chrome.storage.local.set({
+      jobTitle: synced.jobTitle,
+      jobProfileId: activeJobProfileId,
+      recruitmentTaskId: activeRecruitmentTaskId,
+    });
+    pluginContextStatusEl.textContent = [
+      "当前招聘任务已连接。",
+      `任务 #${payload.recruitment_task_id}`,
+      `岗位：${payload.job_title || "-"}`,
+      `版本：v${payload.job_profile_version || "-"}`,
+      `状态：${payload.task_status || "-"}`,
+    ].join("\n");
+    return synced;
+  } catch (_error) {
+    return clearContextIds("上下文未确认，将按无岗位采集。");
+  }
+}
+
 async function queueAndSendWebBatch(settings, sourceUrl, merged, runId) {
   const response = await chrome.runtime.sendMessage({
     type: "web_intake_enqueue_and_send",
@@ -495,13 +565,14 @@ async function runCollection(autoScroll, options = {}) {
 
   const platform = detectCollectPlatform(tab.url);
   const settings = applyPlatformDefaults(baseSettings, platform);
-  const webSettings = webMode
-    ? {
-        ...settings,
-        jobProfileId: null,
-        recruitmentTaskId: null,
-      }
-    : settings;
+  const webSettings = webMode ? await refreshPluginContext(settings) : settings;
+  if (webMode) {
+    await refreshRatingBadges(tab.id, webSettings);
+    await refreshKeywordHighlights(tab.id, webSettings);
+  } else {
+    await clearRatingBadges(tab.id);
+    await clearKeywordHighlights(tab.id);
+  }
   await resetScrollPause(tab.id);
   setStatus(
     autoScroll
@@ -525,6 +596,7 @@ async function runCollection(autoScroll, options = {}) {
         "页面中没有识别到候选人卡片。",
         `扫描 frame: ${merged.framesSeen}`,
         `命中 frame: ${merged.framesWithCards}`,
+        ...formatCaptureDiagnosticLines(merged.diagnostics),
         `调试信息: ${merged.debugSummary || "-"}`,
       ].join("\n"),
     );
@@ -547,6 +619,7 @@ async function runCollection(autoScroll, options = {}) {
           `本地去重卡片: ${merged.cards.length}`,
           `来源平台: ${platform.label}`,
           `命中 frame: ${merged.framesWithCards}/${merged.framesSeen}`,
+          ...formatCaptureDiagnosticLines(merged.diagnostics),
           `网页批次: ${resultStats.batch_id ?? "-"}`,
           `接收数: ${resultStats.received_count ?? 0}`,
           `新增数: ${resultStats.inserted_candidates ?? 0}`,
@@ -574,6 +647,7 @@ async function runCollection(autoScroll, options = {}) {
         `本地去重卡片: ${merged.cards.length}`,
         `来源平台: ${platform.label}`,
         `命中 frame: ${merged.framesWithCards}/${merged.framesSeen}`,
+        ...formatCaptureDiagnosticLines(merged.diagnostics),
         `导入批次: ${imported.batch_id ?? "-"}`,
         `解析卡片: ${imported.parsed_cards ?? 0}`,
         `写入批次快照: ${imported.total_batch_items ?? 0}`,
@@ -582,6 +656,449 @@ async function runCollection(autoScroll, options = {}) {
   } catch (error) {
     setStatus(`${webMode ? "发送到网页工作台失败" : "导入本地程序失败"}。\n${formatWebIntakeError(error)}`);
   }
+}
+
+async function runCurrentDetailEnrichment() {
+  const baseSettings = collectSettings();
+  if (!isWebWorkbenchMode(baseSettings)) {
+    setStatus("采集当前详情仅支持网页工作台模式。桌面兼容模式请继续使用原采集入口。");
+    return;
+  }
+  if (!baseSettings.apiToken) {
+    setStatus("插件尚未连接网页工作台，请先在设置页使用连接码配对。");
+    return;
+  }
+
+  const tab = await getActiveSupportedTab();
+  if (!tab) {
+    return;
+  }
+  const platform = detectCollectPlatform(tab.url);
+  const settings = await refreshPluginContext(applyPlatformDefaults(baseSettings, platform));
+  if (!settings.recruitmentTaskId || !settings.jobProfileId) {
+    setStatus("当前未选择可用招聘任务，无法安全绑定详情。");
+    return;
+  }
+
+  captureCurrentDetailButton.disabled = true;
+  setStatus("正在识别当前已打开的候选人详情...");
+  try {
+    const frameResults = await collectCurrentDetailFromAllFrames(tab.id, settings);
+    const candidates = (frameResults || [])
+      .map((item) => item?.result)
+      .filter((result) => result && result.status === "capturable" && result.detail);
+    const ambiguous = (frameResults || []).some((item) => item?.result?.status === "ambiguous");
+    const unconfirmed = (frameResults || []).some((item) => item?.result?.status === "unconfirmed");
+    if (ambiguous || candidates.length > 1) {
+      setStatus("当前页面存在多个候选人详情，已停止采集。请只保留一个详情后重试。");
+      return;
+    }
+    if (unconfirmed) {
+      setStatus("当前页面暂不支持安全详情关联。请先从推荐页完成卡片采集后再重试。");
+      return;
+    }
+    if (candidates.length === 0) {
+      setStatus("未识别到已打开的候选人详情。请先手动打开候选人详情后再采集。");
+      return;
+    }
+
+    const apiBase = BossLocalWebIntake.deriveWebApiBase(settings);
+    const response = await fetch(`${apiBase}/api/plugin/candidate-detail/enrich`, {
+      method: "POST",
+      headers: localApiHeaders(settings),
+      body: JSON.stringify(candidates[0].detail),
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      const message = payload?.error?.message || "详情增强写入失败，请稍后重试。";
+      throw new Error(message);
+    }
+    setStatus(payload.status === "unchanged" ? "当前详情没有新的可更新信息。" : "当前详情已安全更新到候选人主档。");
+  } catch (error) {
+    setStatus(`采集当前详情失败。\n${safeDetailEnrichmentError(error)}`);
+  } finally {
+    captureCurrentDetailButton.disabled = false;
+  }
+}
+
+function safeDetailEnrichmentError(error) {
+  const text = String(error?.message || error || "");
+  if (!text) {
+    return "请稍后重试。";
+  }
+  return text.length > 80 ? "本地服务返回详情采集失败，请确认当前任务和候选人身份后重试。" : text;
+}
+
+async function refreshRatingBadges(tabId, settings) {
+  if (!isWebWorkbenchMode(settings) || !settings.apiToken) {
+    await clearRatingBadges(tabId);
+    return;
+  }
+  try {
+    const apiBase = BossLocalWebIntake.deriveWebApiBase(settings);
+    const response = await fetch(`${apiBase}/api/plugin/ratings/badges`, {
+      headers: { "X-Boss-Local-Token": settings.apiToken || "" },
+    });
+    if (!response.ok) {
+      await clearRatingBadges(tabId);
+      return;
+    }
+    const payload = await response.json();
+    await applyRatingBadges(tabId, Array.isArray(payload?.badges) ? payload.badges : []);
+  } catch (_error) {
+    await clearRatingBadges(tabId);
+  }
+}
+
+async function clearRatingBadges(tabId) {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      func: () => {
+        document.querySelectorAll(".boss-local-rating-badge").forEach((node) => node.remove());
+      },
+    });
+  } catch (_error) {}
+}
+
+async function refreshKeywordHighlights(tabId, settings) {
+  if (!isWebWorkbenchMode(settings) || !settings.apiToken) {
+    await clearKeywordHighlights(tabId);
+    return;
+  }
+  try {
+    const apiBase = BossLocalWebIntake.deriveWebApiBase(settings);
+    const response = await fetch(`${apiBase}/api/plugin/keyword-rules`, {
+      headers: { "X-Boss-Local-Token": settings.apiToken || "" },
+    });
+    if (!response.ok) {
+      await clearKeywordHighlights(tabId);
+      return;
+    }
+    const payload = await response.json();
+    await applyKeywordHighlights(tabId, payload?.keyword_rules || {});
+  } catch (_error) {
+    await clearKeywordHighlights(tabId);
+  }
+}
+
+async function clearKeywordHighlights(tabId) {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      func: () => {
+        const displayStore = globalThis.__bossLocalKeywordDisplayStore || new WeakMap();
+        globalThis.__bossLocalKeywordDisplayStore = displayStore;
+        const candidateSelectors = [
+          ".candidate-card-wrap",
+          ".candidate-card",
+          ".geek-card",
+          "[data-testid='candidate-card']",
+          "[class*='card'][class*='candidate']",
+          "[data-boss-local-keyword-display-tracked]",
+        ];
+        const restoreDisplay = (card) => {
+          if (!card || card.nodeType !== 1) return;
+          card.style.display = displayStore.has(card) ? displayStore.get(card) : "";
+          card.removeAttribute("data-boss-local-keyword-groups");
+          card.removeAttribute("data-boss-local-keyword-display-tracked");
+        };
+        document.querySelectorAll(".boss-local-keyword-filterbar").forEach((node) => node.remove());
+        document.querySelectorAll(".boss-local-keyword-badge").forEach((node) => node.remove());
+        document.querySelectorAll(".boss-local-keyword-highlight").forEach((node) => {
+          const text = document.createTextNode(node.textContent || "");
+          node.replaceWith(text);
+          text.parentElement?.normalize?.();
+        });
+        document.querySelectorAll(candidateSelectors.join(",")).forEach(restoreDisplay);
+      },
+    });
+  } catch (_error) {}
+}
+
+async function applyKeywordHighlights(tabId, keywordRules) {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      args: [keywordRules],
+      func: (rules) => {
+        const groups = ["must", "plus", "risk", "note"];
+        const normalizeRules = (payload) => {
+          const result = {};
+          for (const group of groups) {
+            const values = Array.isArray(payload?.[group]) ? payload[group] : [];
+            const seen = new Set();
+            result[group] = [];
+            for (const value of values) {
+              const keyword = String(value || "").trim();
+              if (!keyword) continue;
+              const key = keyword.toLocaleLowerCase();
+              if (seen.has(key)) continue;
+              seen.add(key);
+              result[group].push(keyword);
+            }
+          }
+          return result;
+        };
+        const candidateSelectors = [
+          ".candidate-card-wrap",
+          ".candidate-card",
+          ".geek-card",
+          "[data-testid='candidate-card']",
+          "[class*='card'][class*='candidate']",
+        ];
+        const cards = Array.from(document.querySelectorAll(candidateSelectors.join(",")));
+        const displayStore = globalThis.__bossLocalKeywordDisplayStore || new WeakMap();
+        globalThis.__bossLocalKeywordDisplayStore = displayStore;
+        const rememberDisplay = (card) => {
+          if (!displayStore.has(card)) displayStore.set(card, card.style.display || "");
+          card.setAttribute("data-boss-local-keyword-display-tracked", "1");
+        };
+        const restoreDisplay = (card) => {
+          card.style.display = displayStore.has(card) ? displayStore.get(card) : "";
+        };
+        const clearExisting = () => {
+          document.querySelectorAll(".boss-local-keyword-filterbar").forEach((node) => node.remove());
+          document.querySelectorAll(".boss-local-keyword-badge").forEach((node) => node.remove());
+          document.querySelectorAll(".boss-local-keyword-highlight").forEach((node) => {
+            const text = document.createTextNode(node.textContent || "");
+            node.replaceWith(text);
+            text.parentElement?.normalize?.();
+          });
+          cards.forEach((card) => {
+            rememberDisplay(card);
+            card.removeAttribute("data-boss-local-keyword-groups");
+            restoreDisplay(card);
+          });
+        };
+        const rulesByGroup = normalizeRules(rules);
+        const allKeywords = groups.flatMap((group) => rulesByGroup[group].map((keyword) => ({ group, keyword })));
+        clearExisting();
+        if (!allKeywords.length) return;
+        if (!document.getElementById("boss-local-keyword-style")) {
+          const style = document.createElement("style");
+          style.id = "boss-local-keyword-style";
+          style.textContent = ".boss-local-keyword-badge{display:inline-flex;align-items:center;margin-right:6px;padding:2px 7px;border-radius:999px;font-size:12px;font-weight:700;line-height:1.4;border:1px solid #bfdbfe;background:#eff6ff;color:#1d4ed8}.boss-local-keyword-danger-badge{border-color:#fed7aa;background:#fff7ed;color:#c2410c}.boss-local-keyword-highlight{border-radius:4px;padding:0 2px;background:#e0f2fe;color:#0f172a}.boss-local-keyword-highlight.must{background:#dbeafe}.boss-local-keyword-highlight.plus{background:#dcfce7}.boss-local-keyword-highlight.risk{background:#ffedd5;color:#9a3412}.boss-local-keyword-highlight.note{background:#f1f5f9}.boss-local-keyword-filterbar{position:sticky;top:0;z-index:20;display:flex;flex-wrap:wrap;gap:6px;margin:8px 0;padding:8px;border:1px solid #dbe3ef;border-radius:10px;background:#fff}.boss-local-keyword-filterbar button{border:1px solid #dbe3ef;border-radius:999px;background:#f8fafc;color:#334155;padding:3px 9px;font-size:12px;cursor:pointer}";
+          document.head.appendChild(style);
+        }
+        const skipTags = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "INPUT", "TEXTAREA", "SELECT", "OPTION", "BUTTON"]);
+        const skipClasses = [
+          "boss-local-rating-badge",
+          "boss-local-keyword-highlight",
+          "boss-local-keyword-badge",
+          "boss-local-keyword-filterbar",
+        ];
+        const shouldSkipElement = (element) => {
+          if (!element || element.nodeType !== 1) return false;
+          if (skipTags.has(element.tagName)) return true;
+          if (element.hidden || element.getAttribute?.("hidden") !== null || element.getAttribute?.("aria-hidden") === "true") {
+            return true;
+          }
+          if (skipClasses.some((className) => element.classList?.contains(className) || element.closest?.(`.${className}`))) {
+            return true;
+          }
+          if (typeof getComputedStyle === "function") {
+            const style = getComputedStyle(element);
+            if (style.display === "none" || style.visibility === "hidden") return true;
+          }
+          return false;
+        };
+        const collectTextNodes = (root) => {
+          const nodes = [];
+          const visit = (node) => {
+            if (!node) return;
+            if (node.nodeType === 3) {
+              if (String(node.nodeValue || "").trim()) nodes.push(node);
+              return;
+            }
+            if (node.nodeType !== 1 || shouldSkipElement(node)) return;
+            Array.from(node.childNodes || []).forEach(visit);
+          };
+          Array.from(root.childNodes || []).forEach(visit);
+          return nodes;
+        };
+        const sortedKeywords = allKeywords
+          .map((item) => ({ ...item, folded: item.keyword.toLocaleLowerCase() }))
+          .sort((a, b) => b.keyword.length - a.keyword.length);
+        const findNextMatch = (foldedText, start) => {
+          let best = null;
+          for (const item of sortedKeywords) {
+            const index = foldedText.indexOf(item.folded, start);
+            if (index < 0) continue;
+            if (
+              !best
+              || index < best.index
+              || (index === best.index && item.keyword.length > best.keyword.length)
+            ) {
+              best = { ...item, index };
+            }
+          }
+          return best;
+        };
+        const highlightTextNode = (textNode) => {
+          const value = String(textNode.nodeValue || "");
+          const folded = value.toLocaleLowerCase();
+          let cursor = 0;
+          let found = false;
+          const fragment = document.createDocumentFragment();
+          while (cursor < value.length) {
+            const match = findNextMatch(folded, cursor);
+            if (!match) break;
+            if (match.index > cursor) {
+              fragment.appendChild(document.createTextNode(value.slice(cursor, match.index)));
+            }
+            const span = document.createElement("span");
+            span.className = `boss-local-keyword-highlight ${match.group}`;
+            span.setAttribute("data-boss-local-keyword-group", match.group);
+            span.textContent = value.slice(match.index, match.index + match.keyword.length);
+            fragment.appendChild(span);
+            cursor = match.index + match.keyword.length;
+            found = true;
+          }
+          if (!found) return false;
+          if (cursor < value.length) {
+            fragment.appendChild(document.createTextNode(value.slice(cursor)));
+          }
+          textNode.replaceWith(fragment);
+          return true;
+        };
+        const applyFilter = (filter) => {
+          for (const card of cards) {
+            const hitGroups = String(card.getAttribute("data-boss-local-keyword-groups") || "").split(",").filter(Boolean);
+            const matched = hitGroups.length > 0;
+            const visible = filter === "all" || (filter === "unmatched" && !matched) || hitGroups.includes(filter);
+            if (visible) {
+              restoreDisplay(card);
+            } else {
+              rememberDisplay(card);
+              card.style.display = "none";
+            }
+          }
+        };
+        const firstParent = cards[0]?.parentElement;
+        if (firstParent) {
+          const bar = document.createElement("div");
+          bar.className = "boss-local-keyword-filterbar";
+          for (const [filter, label] of [["all", "全部"], ["must", "有必须"], ["plus", "有加分"], ["risk", "有风险"], ["unmatched", "未命中"]]) {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.textContent = label;
+            button.addEventListener("click", () => applyFilter(filter));
+            bar.appendChild(button);
+          }
+          firstParent.insertBefore(bar, cards[0]);
+        }
+        for (const card of cards) {
+          rememberDisplay(card);
+          const textNodes = collectTextNodes(card);
+          const lowerText = textNodes.map((node) => String(node.nodeValue || "")).join("\n").toLocaleLowerCase();
+          const hitGroups = [];
+          const hitCount = { total: 0, risk: 0 };
+          for (const group of groups) {
+            const hits = rulesByGroup[group].filter((keyword) => lowerText.includes(keyword.toLocaleLowerCase()));
+            if (!hits.length) continue;
+            hitGroups.push(group);
+            hitCount.total += hits.length;
+            if (group === "risk") hitCount.risk += hits.length;
+          }
+          if (!hitGroups.length) continue;
+          card.setAttribute("data-boss-local-keyword-groups", hitGroups.join(","));
+          textNodes.forEach(highlightTextNode);
+          const badgeTarget = card.querySelector(".name, .geek-name, .candidate-name, [class*='name']") || card;
+          const summary = document.createElement("span");
+          summary.className = "boss-local-keyword-badge";
+          summary.textContent = `关键词 ${hitCount.total}`;
+          badgeTarget.insertAdjacentElement("afterbegin", summary);
+          if (hitCount.risk > 0) {
+            const risk = document.createElement("span");
+            risk.className = "boss-local-keyword-badge boss-local-keyword-danger-badge";
+            risk.textContent = `风险 ${hitCount.risk}`;
+            badgeTarget.insertAdjacentElement("afterbegin", risk);
+          }
+        }
+      },
+    });
+  } catch (_error) {}
+}
+
+async function applyRatingBadges(tabId, badges) {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      args: [badges],
+      func: (badgeRows) => {
+        const ratingClass = (rating) => `boss-local-rating-${String(rating || "").toLowerCase()}`;
+        const candidateSelectors = [
+          ".candidate-card-wrap",
+          ".candidate-card",
+          ".geek-card",
+          "[data-testid='candidate-card']",
+          "[class*='card'][class*='candidate']",
+        ];
+        const cards = Array.from(document.querySelectorAll(candidateSelectors.join(",")));
+        const normalize = (value) => String(value || "").trim();
+        const firstAttr = (node, attrs) => {
+          for (const attr of attrs) {
+            const value = normalize(node.getAttribute(attr));
+            if (value) return value;
+          }
+          return "";
+        };
+        const canonicalizePlatformUid = (sourcePlatform, rawUid) => {
+          const uid = normalize(rawUid);
+          if (!uid) return "";
+          const platform = normalize(sourcePlatform).toLowerCase();
+          if (!platform || platform === "unknown") return "";
+          if (uid.includes(":")) {
+            const prefix = normalize(uid.split(":", 1)[0]).toLowerCase();
+            return prefix === platform ? uid : `${platform}:${uid}`;
+          }
+          return `${platform}:${uid}`;
+        };
+        const sameBadge = (card, badge) => {
+          const rawPlatformUid = firstAttr(card, ["data-geek-id", "data-candidate-id", "data-user-id"]);
+          const badgePlatformUid = normalize(badge.platform_uid);
+          if (!badgePlatformUid || !rawPlatformUid) return false;
+          if (badgePlatformUid === rawPlatformUid) return true;
+          return badgePlatformUid === canonicalizePlatformUid(badge.source_platform, rawPlatformUid);
+        };
+        const rows = (Array.isArray(badgeRows) ? badgeRows : []).filter((badge) =>
+          ["UR", "SSR", "SR", "R", "N"].includes(String(badge?.rating || "")),
+        );
+        document.querySelectorAll(".boss-local-rating-badge").forEach((node) => node.remove());
+        for (const card of cards) {
+          const badge = rows.find((item) => sameBadge(card, item));
+          if (!badge) continue;
+          const node = document.createElement("span");
+          node.className = `boss-local-rating-badge ${ratingClass(badge.rating)}`;
+          node.textContent = String(badge.badge_text || `1${badge.rating}`);
+          node.setAttribute("data-boss-local-rating", String(badge.rating));
+          const palette = {
+            UR: ["#fef3c7", "#7c3aed", "#c4b5fd"],
+            SSR: ["#f5f3ff", "#6d28d9", "#ddd6fe"],
+            SR: ["#fff7ed", "#c2410c", "#fed7aa"],
+            R: ["#eff6ff", "#1d4ed8", "#bfdbfe"],
+            N: ["#f8fafc", "#475569", "#e2e8f0"],
+          }[String(badge.rating)] || ["#f8fafc", "#475569", "#e2e8f0"];
+          node.style.cssText = [
+            "display:inline-flex",
+            "align-items:center",
+            "margin-right:6px",
+            "padding:2px 7px",
+            "border-radius:999px",
+            "font-size:12px",
+            "font-weight:700",
+            "line-height:1.4",
+            `background:${palette[0]}`,
+            `color:${palette[1]}`,
+            `border:1px solid ${palette[2]}`,
+          ].join(";");
+          const target = card.querySelector(".name, .geek-name, .candidate-name, [class*='name']") || card;
+          target.insertAdjacentElement("afterbegin", node);
+        }
+      },
+    });
+  } catch (_error) {}
 }
 
 function updateBatchDownloadButton() {
@@ -903,10 +1420,41 @@ async function collectFromAllFrames(tabId, autoScroll, settings) {
   });
 }
 
+async function collectCurrentDetailFromAllFrames(tabId, settings) {
+  await chrome.scripting.executeScript({
+    target: { tabId, allFrames: true },
+    files: ["collector.js"],
+  });
+
+  return chrome.scripting.executeScript({
+    target: { tabId, allFrames: true },
+    args: [settings],
+    func: (settingsArg) => {
+      if (typeof globalThis.__bossLocalExtractCurrentDetail !== "function") {
+        return {
+          status: "failed",
+          detail: null,
+          diagnostics: { detail_regions: 0 },
+        };
+      }
+      try {
+        return globalThis.__bossLocalExtractCurrentDetail(settingsArg);
+      } catch (_error) {
+        return {
+          status: "failed",
+          detail: null,
+          diagnostics: { detail_regions: 0 },
+        };
+      }
+    },
+  });
+}
+
 function mergeFrameResults(frameResults) {
   const cardsByKey = new Map();
   const debugLines = [];
   const platforms = new Set();
+  const diagnostics = createCaptureDiagnostics();
   let framesSeen = 0;
   let framesWithCards = 0;
   let maxRoundsCompleted = 0;
@@ -924,9 +1472,15 @@ function mergeFrameResults(frameResults) {
     if (result.meta?.platform) {
       platforms.add(String(result.meta.platform));
     }
+    mergeCaptureDiagnostics(diagnostics, result.meta?.diagnostics);
     maxRoundsCompleted = Math.max(maxRoundsCompleted, Number(result.meta?.rounds_completed || 0));
     for (const card of cards) {
-      cardsByKey.set(buildKey(card), card);
+      const key = buildKey(card);
+      if (cardsByKey.has(key)) {
+        incrementCaptureDiagnostic(diagnostics, key.startsWith("fingerprint:") ? "duplicate_fingerprint" : "duplicate_identity");
+        continue;
+      }
+      cardsByKey.set(key, card);
     }
     debugLines.push(
       [result.frameUrl || frameResult.frameId || "frame", result.debug || "", `cards=${cards.length}`]
@@ -941,6 +1495,7 @@ function mergeFrameResults(frameResults) {
     framesWithCards,
     roundsCompleted: maxRoundsCompleted,
     platform: platforms.size === 1 ? Array.from(platforms)[0] : "",
+    diagnostics,
     debugSummary: debugLines.join(" || "),
   };
 }
@@ -1216,7 +1771,83 @@ function translateBatchPhase(value) {
 }
 
 function buildKey(card) {
-  return card.platform_uid || card.detail_url || card.raw_card_text || JSON.stringify(card);
+  if (card?.platform_uid) {
+    return `identity:${card.platform_uid}`;
+  }
+  const fingerprint = [
+    card?.source_candidate_id,
+    card?.name,
+    card?.expected_salary,
+    card?.work_experience_text,
+    card?.education_text,
+    card?.raw_card_text,
+  ].map((value) => String(value || "").trim().toLowerCase()).filter(Boolean).join("||");
+  return `fingerprint:${fingerprint || JSON.stringify(card)}`;
+}
+
+function createCaptureDiagnostics() {
+  return {
+    scanned_nodes: 0,
+    accepted_cards: 0,
+    missing_name: 0,
+    missing_candidate_structure: 0,
+    hidden: 0,
+    detached: 0,
+    duplicate_identity: 0,
+    duplicate_fingerprint: 0,
+    unsupported_platform: 0,
+    invalid_card: 0,
+    plugin_owned_node: 0,
+    stable_identity_found: 0,
+    missing_stable_identity: 0,
+    stable_identity_ambiguous: 0,
+    identity_from_root: 0,
+    identity_from_descendant: 0,
+    identity_from_bounded_ancestor: 0,
+  };
+}
+
+function incrementCaptureDiagnostic(diagnostics, key) {
+  if (diagnostics && key) {
+    diagnostics[key] = Number(diagnostics[key] || 0) + 1;
+  }
+}
+
+function mergeCaptureDiagnostics(target, source) {
+  if (!target || !source || typeof source !== "object") return target;
+  for (const [key, value] of Object.entries(source)) {
+    if (typeof value === "number") {
+      target[key] = Number(target[key] || 0) + value;
+    }
+  }
+  return target;
+}
+
+function formatCaptureDiagnosticLines(diagnostics) {
+  if (!diagnostics) return [];
+  const labels = [
+    ["scanned_nodes", "扫描候选节点"],
+    ["accepted_cards", "接受卡片"],
+    ["duplicate_identity", "稳定身份重复跳过"],
+    ["duplicate_fingerprint", "批内指纹重复跳过"],
+    ["hidden", "隐藏卡片跳过"],
+    ["missing_name", "缺少姓名跳过"],
+    ["missing_candidate_structure", "结构不完整跳过"],
+    ["stable_identity_found", "稳定身份已识别"],
+    ["missing_stable_identity", "缺少稳定身份"],
+    ["stable_identity_ambiguous", "稳定身份歧义"],
+    ["identity_from_root", "身份来自卡片根节点"],
+    ["identity_from_descendant", "身份来自卡片内部节点"],
+    ["identity_from_bounded_ancestor", "身份来自受控祖先"],
+    ["plugin_owned_node", "插件控件跳过"],
+    ["detached", "陈旧节点跳过"],
+    ["unsupported_platform", "不支持平台跳过"],
+    ["invalid_card", "无效卡片跳过"],
+  ];
+  return labels
+    .map(([key, label]) => [label, Number(diagnostics[key] || 0)])
+    .filter(([, value]) => value > 0)
+    .map(([label, value]) => `${label}: ${value}`);
 }
 
 function trimTrailingSlash(value) {
@@ -1256,13 +1887,20 @@ function setStatus(text) {
 globalThis.BossLocalPopup = {
   init,
   runCollection,
+  runCurrentDetailEnrichment,
   runAutomation,
   applyPairingCodeAndTest,
   retryWebIntake,
   openWebWorkbench,
   downloadCurrentBatch,
   refreshWebIntakeStatus,
+  refreshPluginContext,
+  refreshRatingBadges,
+  clearRatingBadges,
+  refreshKeywordHighlights,
+  clearKeywordHighlights,
   queueAndSendWebBatch,
   collectSettings,
+  collectCurrentDetailFromAllFrames,
   isWebWorkbenchMode,
 };
