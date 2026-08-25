@@ -184,7 +184,7 @@ if (!globalThis.__bossLocalChatBatchRunner) {
     runnerState.scanDebug = "";
     runnerState.runtimeLogs = [];
     runnerState.lastMessage = runnerState.mode === "download_only" ? "批量下载任务已启动。" : "批量求简历任务已启动。";
-    appendRunnerLog(`start batch mode=${runnerState.mode} token=${runToken}`);
+    appendRunnerLog(`start batch mode=${runnerState.mode}`);
     await reportProgress({ phase: "running", mode: runnerState.mode, message: runnerState.lastMessage, eventText: runnerState.lastMessage });
     void runBatchLoop(runToken);
     return { ok: true, message: runnerState.lastMessage, runnerVersion: CHAT_RUNNER_VERSION, runToken };
@@ -2735,7 +2735,7 @@ if (!globalThis.__bossLocalChatBatchRunner) {
 
   async function finishBatch(phase, message, error = "", runToken = "") {
     if (runToken && !isRunTokenActive(runToken)) {
-      appendRunnerLog(`ignore stale finish for token=${runToken}`);
+      appendRunnerLog("ignore stale finish for inactive run");
       return;
     }
     runnerState.running = false;

@@ -916,6 +916,12 @@ function testRuntimeFingerprintAndVersionAwareRunnerInjection() {
   assert(popup.includes("formatRuntimeFingerprint"));
 }
 
+function testChatRunnerRuntimeLogsDoNotExposeRunToken() {
+  const source = fs.readFileSync(path.join(EXTENSION_DIR, "chat_batch_runner.js"), "utf8");
+  assert(!source.includes("token=${runToken}"));
+  assert(!source.includes("token=${runnerState.runToken}"));
+}
+
 function loadRemoteControlForBehaviorTest() {
   const store = {};
   const chrome = {
@@ -4939,6 +4945,7 @@ async function main() {
   testScrollWaitDefaultsToThirtyMillisecondsAndHasAdjusters();
   testHoldEndScrollStrategyIsDefault();
   testRuntimeFingerprintAndVersionAwareRunnerInjection();
+  testChatRunnerRuntimeLogsDoNotExposeRunToken();
   testPairingCodeParsesAndRejectsInvalidInput();
   testPopupSupportsPairingAndAuthenticatedConnectionCheck();
   await testPopupPairsWithSingleWebCodeAndRemembersConnection();
